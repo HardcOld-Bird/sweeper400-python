@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sweeper400"
+version = "0.1.0"
+description = "协同控制NI数据采集卡和步进电机的自动化测量包"
+authors = [
+    {name = "400&402"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "nidaqmx-python",
+    "numpy",
+    "scipy",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pydantic",
+    "ruff",
+    "pre-commit",
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sweeper400*"]

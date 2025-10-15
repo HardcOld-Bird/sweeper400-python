@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# VS Code
+/.vscode/
+/.augment/
+/参考资料/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Pytest cache
+.pytest_cache/
+.coverage
+
+# Ruff cache
+.ruff_cache/

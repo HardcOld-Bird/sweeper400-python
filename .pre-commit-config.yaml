@@ -1,0 +1,40 @@
+# .pre-commit-config.yaml
+
+# 默认的CI配置，可以用于GitHub Actions等
+ci:
+    autofix_commit_msg: "style: [pre-commit.ci] auto-fixes from pre-commit.com hooks"
+    autoupdate_commit_msg: "chore: [pre-commit.ci] pre-commit autoupdate"
+
+repos:
+  # --- 预置的一些通用检查 ---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0 # 建议使用最新版本
+    hooks:
+      - id: trailing-whitespace # 检查并修复行尾多余的空格
+      - id: end-of-file-fixer   # 确保文件以一个空行结尾
+      - id: check-yaml          # 检查YAML文件语法
+        exclude: ^environment\.yml$  # 忽略conda环境文件（UTF-16编码）
+      - id: check-toml          # 检查TOML文件语法
+      - id: check-added-large-files # 防止意外提交大文件
+        args: ['--maxkb=1000'] # 允许最大1MB的文件（MT_API.dll约652KB）
+
+  # --- Ruff: 你的主要 Linter 和 Formatter ---
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # 参考 https://github.com/astral-sh/ruff-pre-commit#version-pinning 获取最新版本
+    rev: v0.14.0
+    hooks:
+      # 运行 linter
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix] # --fix: 自动修复可修复的问题
+      # 运行 formatter
+      - id: ruff-format
+
+  # --- Pyright: 你的静态类型检查器 ---
+  - repo: https://github.com/RobertCraigie/pyright-python
+    rev: v1.1.406 # 建议使用最新版本
+    hooks:
+      - id: pyright
+        # 如果你的项目依赖安装在虚拟环境中，pyright可能需要知道
+        # 对于Conda，通常 pyright 能够自动找到。如果找不到，可以取消下面的注释
+        # additional_dependencies:
+        #   - . # 这会让 pre-commit 在一个包含项目依赖的环境中运行 pyright
