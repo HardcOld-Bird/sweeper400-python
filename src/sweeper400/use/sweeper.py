@@ -564,6 +564,31 @@ class Sweeper:
         logger.info(f"移动到位置: ({x_mm:.3f}, {y_mm:.3f}) mm")
         return self._move_controller.move_absolute_2D(x_mm=x_mm, y_mm=y_mm)
 
+    def calib(self) -> bool:
+        """
+        执行步进电机的自动零位校准
+
+        这是MotorController.calibrate_all_axis方法的封装，方便用户在创建sweeper后
+        执行零位校准。
+
+        Returns:
+            bool: 校准是否成功完成
+
+        Raises:
+            RuntimeError: 当步进电机控制器未初始化时
+
+        Examples:
+            >>> sweeper = Sweeper("ai0", "ao0")
+            >>> success = sweeper.calib()
+            >>> if success:
+            ...     print("校准成功")
+        """
+        if not hasattr(self, "_move_controller"):
+            raise RuntimeError("步进电机控制器未初始化")
+
+        logger.info("执行零位校准...")
+        return self._move_controller.calibrate_all_axis()
+
     def new_point_list(self, point_list: list[Point2D]) -> None:
         """
         更新测量点阵

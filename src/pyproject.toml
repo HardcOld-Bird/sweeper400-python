@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=68.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,19 +11,21 @@ authors = [
 ]
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = [
+
+[project.optional-dependencies]
+std = [
     "nidaqmx-python",
     "numpy",
     "scipy",
     "matplotlib",
 ]
-
-[project.optional-dependencies]
 dev = [
     "pydantic",
     "ruff",
     "pre-commit",
     "pytest",
+    "pytest-cov",
+    "commitizen",
 ]
 
 [tool.setuptools.packages.find]

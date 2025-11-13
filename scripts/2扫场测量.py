@@ -25,8 +25,8 @@ swp = Sweeper(
 
 # 确定点阵
 swp.where()
-# swp.move_to(220.0, 220.0)
-grid = get_square_grid(20.0, 120.0, 260.0, 120.0)
+# swp.move_to(10.0, 260.0)
+grid = get_square_grid(10.0, 100.0, 260.0, 260.0)
 swp.new_point_list(grid)
 
 

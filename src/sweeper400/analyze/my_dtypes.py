@@ -12,7 +12,7 @@ from typing import Annotated, Any, NamedTuple, TypedDict, TypeGuard
 import numpy as np
 from pydantic import AfterValidator
 
-from sweeper400.logger import get_logger
+from sweeper400.logger import get_logger  # type: ignore
 
 # 获取模块日志器
 logger = get_logger(__name__)

@@ -10,9 +10,9 @@
 import numpy as np
 from scipy.linalg import lstsq  # type: ignore
 from scipy.optimize import curve_fit  # type: ignore
-from scipy.signal.windows import hann  # type: ignore
+from scipy.signal import periodogram  # type: ignore
 
-from sweeper400.logger import get_logger
+from sweeper400.logger import get_logger  # type: ignore
 
 from .my_dtypes import (
     PositiveFloat,
@@ -46,7 +46,7 @@ def get_sine(
 
     Examples:
         ```python
-        >>> sampling_info = init_sampling_info(1000, 1024)
+        >>> sampling_info = init_sampling_info(1000, 1024)  # noqa
         >>> sine_args = init_sine_args(50.0, 1.0, 0.0)
         >>> sine_wave = get_sine(sampling_info, sine_args)
         >>> print(sine_wave.shape)
@@ -62,7 +62,8 @@ def get_sine(
         f"生成正弦波: frequency={sine_args['frequency']}Hz, "
         f"amplitude={sine_args['amplitude']}, phase={sine_args['phase']}rad, "
         f"sampling_rate={sampling_info['sampling_rate']}Hz, "
-        f"samples_num={sampling_info['samples_num']}, timestamp={timestamp}, id={id}"
+        f"samples_num={sampling_info['samples_num']}, "
+        f"timestamp={timestamp}, id={id}"
     )
 
     # 生成时间序列
@@ -118,7 +119,7 @@ def get_sine_cycles(
     Examples:
         ```python
         >>> # 生成1000Hz采样率下50Hz的正弦波，包含完整周期
-        >>> sampling_info = init_sampling_info(1000, 1024)
+        >>> sampling_info = init_sampling_info(1000, 1024)  # type: ignore
         >>> sine_args = init_sine_args(50.0, 1.0, 0.0)  # 相位参数会被忽略
         >>> sine_wave = get_sine_cycles(sampling_info, sine_args)
         >>> print(f"实际采样点数: {sine_wave.shape[0]}")
@@ -215,8 +216,8 @@ def estimate_sine_args(
     对Waveform对象进行粗略的正弦波参数估计
 
     采用混合策略进行参数估计：
-    - 频率估计：Hann窗 + FFT + 抛物线插值（高精度，抗噪声）
-    - 幅值估计：Hann窗 + FFT + 抛物线插值（一般精度，0~7%误差）
+    - 频率估计：Periodogram功率谱估计 + 抛物线插值（高精度，抗噪声）
+    - 幅值估计：Periodogram功率谱估计 + 抛物线插值（高精度，0~7%误差）
     - 相位估计：短信号线性最小二乘法（使用原始信号，避免窗函数影响）
 
     这是一个快速的初始估计函数，为后续的精确拟合提供良好的初始值。
@@ -232,7 +233,7 @@ def estimate_sine_args(
     Examples:
         ```python
         >>> # 生成测试波形
-        >>> sampling_info = init_sampling_info(1000, 1024)
+        >>> sampling_info = init_sampling_info(1000, 1024)  # type: ignore
         >>> sine_args = init_sine_args(50.0, 2.0, 0.5)
         >>> test_wave = get_sine(sampling_info, sine_args)
         >>> estimated_args = estimate_sine_args(test_wave, approx_freq=50.0)
@@ -278,35 +279,31 @@ def estimate_sine_args(
             f"(中心频率: {approx_freq:.2f}Hz, 误差: ±{error_percentage:.1f}%)"
         )
 
-    # 应用Hann窗进行FFT分析（提高峰值检测准确性）
-    # 使用周期性窗函数（sym=False）
-    hann_window = hann(samples_num, sym=False)  # type: ignore
-    windowed_waveform_data = waveform_data * hann_window  # type: ignore
-
-    logger.debug(f"应用Hann窗: 窗函数长度={samples_num}, 窗函数类型=周期性")
-
-    # 计算FFT进行粗略频率估计（使用加窗后的信号）
-    fft_result = np.fft.fft(windowed_waveform_data)  # type: ignore
-    fft_freqs = np.fft.fftfreq(samples_num, 1.0 / sampling_rate)
-
-    # 只取正频率部分
-    positive_freq_mask = fft_freqs >= 0
-    fft_result_positive = fft_result[positive_freq_mask]
-    fft_freqs_positive = fft_freqs[positive_freq_mask]
-
-    # 计算幅度谱并进行窗函数补偿
-    # 计算窗函数的归一化因子（相干增益）
-    window_coherent_gain = float(np.mean(hann_window))  # type: ignore
-    fft_magnitude = np.abs(fft_result_positive) / (
-        float(samples_num) * window_coherent_gain
+    # 使用Periodogram方法计算功率谱
+    # window: 使用Hann窗以提高频率分辨率和降低频谱泄漏
+    # scaling: 'spectrum' 返回功率谱（单位V^2），峰值的平方根是RMS幅度
+    # return_onesided: 只返回正频率部分
+    psd_freqs, psd_values = periodogram(  # type: ignore
+        waveform_data,
+        fs=sampling_rate,
+        window="hann",
+        scaling="spectrum",  # 使用功率谱
+        return_onesided=True,  # 只返回正频率部分
     )
 
-    logger.debug(f"窗函数相干增益: {window_coherent_gain:.6f}")
+    logger.debug(
+        f"Periodogram方法参数: window='hann', scaling='spectrum', "
+        f"频率分辨率={psd_freqs[1] - psd_freqs[0]:.6f}Hz"
+    )
+
+    # 将功率谱转换为幅度谱
+    # 对于功率谱（scaling='spectrum'），峰值 = (RMS幅度)^2
+    # 对于正弦波，峰值幅度 = RMS幅度 * sqrt(2)
+    # 因此，峰值幅度 = sqrt(功率谱峰值) * sqrt(2)
+    psd_magnitude = np.sqrt(psd_values) * np.sqrt(2.0)  # type: ignore
 
     # 在指定频率范围内搜索峰值
-    freq_range_mask = (fft_freqs_positive >= freq_min) & (
-        fft_freqs_positive <= freq_max
-    )
+    freq_range_mask = (psd_freqs >= freq_min) & (psd_freqs <= freq_max)
     if not np.any(freq_range_mask):
         logger.error(
             f"指定的频率范围 [{freq_min:.2f}, {freq_max:.2f}] Hz 超出了有效范围",
@@ -316,20 +313,20 @@ def estimate_sine_args(
             f"指定的频率范围 [{freq_min:.2f}, {freq_max:.2f}] Hz 超出了有效范围"
         )
 
-    fft_magnitude_in_range = fft_magnitude[freq_range_mask]
-    fft_freqs_in_range = fft_freqs_positive[freq_range_mask]
+    psd_magnitude_in_range = psd_magnitude[freq_range_mask]
+    psd_freqs_in_range = psd_freqs[freq_range_mask]
 
     # 找到幅度最大的频率点
-    max_magnitude_idx = np.argmax(fft_magnitude_in_range)
-    coarse_frequency = fft_freqs_in_range[max_magnitude_idx]
-    coarse_magnitude = fft_magnitude_in_range[max_magnitude_idx]
+    max_magnitude_idx = np.argmax(psd_magnitude_in_range)
+    coarse_frequency = psd_freqs_in_range[max_magnitude_idx]
+    coarse_magnitude = psd_magnitude_in_range[max_magnitude_idx]
 
     # 使用抛物线拟合进行频率和幅值的精细化估计
-    if max_magnitude_idx > 0 and max_magnitude_idx < len(fft_magnitude_in_range) - 1:
+    if max_magnitude_idx > 0 and max_magnitude_idx < len(psd_magnitude_in_range) - 1:
         # 取峰值点及其相邻两点进行抛物线拟合
-        y1 = fft_magnitude_in_range[max_magnitude_idx - 1]
-        y2 = fft_magnitude_in_range[max_magnitude_idx]
-        y3 = fft_magnitude_in_range[max_magnitude_idx + 1]
+        y1 = psd_magnitude_in_range[max_magnitude_idx - 1]
+        y2 = psd_magnitude_in_range[max_magnitude_idx]
+        y3 = psd_magnitude_in_range[max_magnitude_idx + 1]
 
         # 抛物线插值公式，计算精确频率
         # 检查分母是否为零，避免除零错误
@@ -337,11 +334,11 @@ def estimate_sine_args(
         if abs(denominator) > 1e-12:  # 避免数值不稳定
             delta = 0.5 * float(y1 - y3) / denominator
             # 使用频率分辨率计算精确频率
-            freq_resolution = float(sampling_rate) / float(samples_num)
+            freq_resolution = float(psd_freqs[1] - psd_freqs[0])
             initial_frequency = float(coarse_frequency) + delta * freq_resolution
             # 计算精确幅值
             refined_magnitude = float(y2) - 0.25 * float(y1 - y3) * delta
-            initial_amplitude = refined_magnitude * 2.0  # 转换为峰值
+            initial_amplitude = refined_magnitude  # 已经是峰值幅度
 
             logger.debug(
                 f"抛物线拟合改进: 频率={initial_frequency:.6f}Hz, "
@@ -350,7 +347,7 @@ def estimate_sine_args(
         else:
             # 分母接近零，使用粗略估计
             initial_frequency = coarse_frequency
-            initial_amplitude = coarse_magnitude * 2.0  # 转换为峰值
+            initial_amplitude = coarse_magnitude  # 已经是峰值幅度
 
             logger.debug(
                 f"抛物线拟合分母接近零，使用粗略估计: "
@@ -358,7 +355,7 @@ def estimate_sine_args(
             )
     else:
         initial_frequency = coarse_frequency
-        initial_amplitude = coarse_magnitude * 2.0  # 转换为峰值
+        initial_amplitude = coarse_magnitude  # 已经是峰值幅度
 
         logger.debug(
             f"边界情况，使用粗略估计: "
@@ -366,12 +363,13 @@ def estimate_sine_args(
         )
 
     logger.debug(
-        f"FFT初始估计: 频率={initial_frequency:.6f}Hz, 幅值={initial_amplitude:.6f}"
+        f"Periodogram+抛物线拟合初始估计: "
+        f"频率={initial_frequency:.6f}Hz, 幅值={initial_amplitude:.6f}"
     )
 
     # 计算用于相位估计的信号长度（前1-3个周期）
     # 这样可以降低对频率估计误差的敏感性
-    cycles_for_phase_estimation = 1  # 使用1个周期
+    cycles_for_phase_estimation = 2  # 使用1个周期
     samples_per_cycle = float(sampling_rate) / float(initial_frequency)
     phase_estimation_samples = int(cycles_for_phase_estimation * samples_per_cycle)
 
@@ -430,8 +428,8 @@ def estimate_sine_args(
 
     # 验证初始估计的质量
     logger.debug(
-        f"粗略估计完成: 频率={initial_frequency:.6f}Hz (FFT+插值), "
-        f"幅值={initial_amplitude:.6f} (FFT), "
+        f"粗略估计完成: 频率={initial_frequency:.6f}Hz (Periodogram+抛物线插值), "
+        f"幅值={initial_amplitude:.6f} (Periodogram+抛物线插值), "
         f"相位={initial_phase:.6f}rad ({initial_phase * 180 / np.pi:.1f}°) (线性拟合)"
     )
 
@@ -462,7 +460,7 @@ def extract_single_tone_information_vvi(
     Examples:
         ```python
         >>> # 生成测试波形
-        >>> sampling_info = init_sampling_info(1000, 1024)
+        >>> sampling_info = init_sampling_info(1000, 1024)  # type: ignore
         >>> sine_args = init_sine_args(50.0, 2.0, 0.0)
         >>> test_wave = get_sine(sampling_info, sine_args)
         >>> detected_sine_args = extract_single_tone_information_vvi(

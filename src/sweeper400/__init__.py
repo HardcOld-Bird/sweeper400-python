@@ -20,10 +20,6 @@
 # 导出日志管理系统的主要接口
 from .logger import (
     get_logger,
-    set_brief_mode,
-    set_debug_mode,
-    set_quiet_mode,
-    set_verbose_mode,
 )
 
 # 将模块功能提升至包级别，可缩短外部import语句

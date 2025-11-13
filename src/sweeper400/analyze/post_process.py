@@ -1,4 +1,3 @@
-# pyright: basic, reportMissingImports=false
 """
 # 后处理模块
 
@@ -8,19 +7,18 @@
 主要包含传递函数计算等数据分析功能。
 """
 
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # type: ignore
 import numpy as np
-from matplotlib.axes import Axes
-from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
-from scipy.interpolate import griddata
+from matplotlib.axes import Axes  # type: ignore
+from matplotlib.figure import Figure  # type: ignore
+from matplotlib.patches import Rectangle  # type: ignore
+from scipy.interpolate import griddata  # type: ignore
 
-from sweeper400.logger import get_logger
+from sweeper400.logger import get_logger  # type: ignore
 
 from .basic_sine import extract_single_tone_information_vvi
-
-# , TYPE_CHECKING
-from .my_dtypes import PointTFData, SweepData, Waveform
+from .filter import FilterSOS, detrend_waveform, filter_waveform, get_highpass_filter
+from .my_dtypes import PointRawData, PointTFData, SweepData, Waveform
 
 # 配置matplotlib中文字体支持
 plt.rcParams["font.sans-serif"] = [
@@ -36,8 +34,140 @@ plt.rcParams["axes.unicode_minus"] = False
 logger = get_logger(__name__)
 
 
+def apply_highpass_filter_to_sweep_data(
+    sweep_data: SweepData,
+    cutoff_freq: float = 10.0,
+    filter_order: int = 4,
+) -> SweepData:
+    """
+    对SweepData中的所有波形应用高通滤波器
+
+    该函数对SweepData中的所有AI波形和AO波形应用高通滤波器，去除基线偏移。
+    滤波器只设计一次，然后复用到所有波形上，提高处理效率。
+
+    Args:
+        sweep_data: 原始的扫场测量数据
+        cutoff_freq: 高通滤波器截止频率（Hz），默认为10.0Hz
+        filter_order: 高通滤波器阶数，默认为4
+
+    Returns:
+        滤波后的SweepData，结构与输入完全相同，但所有波形已应用高通滤波
+
+    Raises:
+        ValueError: 当输入数据为空时
+
+    Examples:
+        ```python
+        >>> # 假设已有原始采集数据
+        >>> raw_data = sweeper.get_data()  # noqa
+        >>> # 应用高通滤波器（默认10Hz截止频率）
+        >>> filtered_data = apply_highpass_filter_to_sweep_data(raw_data)
+        >>> # 或自定义滤波器参数
+        >>> filtered_data = apply_highpass_filter_to_sweep_data(  # noqa
+        ...     raw_data,
+        ...     cutoff_freq=5.0,
+        ...     filter_order=3
+        ... )
+        >>> # 滤波后的数据可用于后续处理
+        >>> tf_results = calculate_transfer_function(
+        ...     filtered_data, apply_highpass_filter=False)
+        ```
+
+    Notes:
+        - 滤波器在所有波形间复用，避免重复设计的计算开销
+        - 推荐截止频率：10Hz左右（对于kHz级别的声波信号）
+        - 滤波后的数据结构与原始数据完全相同，可直接用于后续处理
+        - 如果后续使用calculate_transfer_function，
+            建议设置apply_highpass_filter=False避免重复滤波
+    """
+    # 获取函数日志器
+    func_logger = get_logger(f"{__name__}.apply_highpass_filter_to_sweep_data")
+
+    ai_data_list = sweep_data["ai_data_list"]
+    ao_data = sweep_data["ao_data"]
+
+    # 验证输入数据
+    if not ai_data_list:
+        func_logger.error("输入数据列表为空")
+        raise ValueError("输入数据列表不能为空")
+
+    # 统计总波形数量
+    total_ai_waveforms = sum(len(point["ai_data"]) for point in ai_data_list)
+    total_waveforms = total_ai_waveforms + 1  # +1 for AO waveform
+
+    func_logger.info(
+        f"开始对SweepData应用高通滤波器: "
+        f"截止频率={cutoff_freq}Hz, 阶数={filter_order}, "
+        f"共{len(ai_data_list)}个测量点, {total_waveforms}个波形"
+    )
+
+    # 获取采样率（使用第一个有效波形的采样率）
+    sampling_rate = ai_data_list[0]["ai_data"][0].sampling_rate
+    func_logger.debug(f"采样率: {sampling_rate}Hz")
+
+    # 设计滤波器（只设计一次，所有波形复用）
+    func_logger.debug(
+        f"设计高通滤波器: 采样率={sampling_rate}Hz, "
+        f"截止频率={cutoff_freq}Hz, 阶数={filter_order}"
+    )
+    sos = get_highpass_filter(
+        sampling_rate=sampling_rate,
+        cutoff_freq=cutoff_freq,
+        order=filter_order,
+    )
+    func_logger.debug("高通滤波器设计完成，将在所有波形复用")
+
+    # 处理AI数据
+    filtered_ai_data_list: list[PointRawData] = []
+    processed_count = 0
+
+    for point_idx, point_data in enumerate(ai_data_list):
+        position = point_data["position"]
+        ai_waveforms = point_data["ai_data"]
+
+        func_logger.debug(
+            f"处理点 {point_idx} @ ({position.x}, {position.y}), "
+            f"共{len(ai_waveforms)}个波形"
+        )
+
+        # 对该点的所有AI波形应用滤波器
+        filtered_ai_waveforms: list[Waveform] = []
+        for _, waveform in enumerate(ai_waveforms):
+            detrended_wf = detrend_waveform(waveform)
+            filtered_wf = filter_waveform(detrended_wf, sos)
+            filtered_ai_waveforms.append(filtered_wf)
+            processed_count += 1
+
+        # 创建滤波后的点数据
+        filtered_point_data: PointRawData = {
+            "position": position,
+            "ai_data": filtered_ai_waveforms,
+        }
+        filtered_ai_data_list.append(filtered_point_data)
+
+        func_logger.debug(f"点 {point_idx} 完成滤波，处理了{len(ai_waveforms)}个波形")
+
+    func_logger.debug(f"所有AI波形滤波完成，共处理{processed_count}个波形")
+
+    # 创建滤波后的SweepData
+    filtered_sweep_data: SweepData = {
+        "ai_data_list": filtered_ai_data_list,
+        "ao_data": ao_data,
+    }
+
+    func_logger.info(
+        f"SweepData滤波完成，共处理{processed_count}个波形 "
+        f"({len(ai_data_list)}个测量点)"
+    )
+
+    return filtered_sweep_data
+
+
 def calculate_transfer_function(
     sweep_data: SweepData,
+    apply_highpass_filter: bool = True,
+    cutoff_freq: float = 10.0,
+    filter_order: int = 4,
 ) -> list[PointTFData]:
     """
     计算Sweeper采集数据的传递函数
@@ -45,12 +175,16 @@ def calculate_transfer_function(
     对每个测量点的原始数据进行处理，计算输入输出信号的传递函数。
     具体步骤：
     1. 对每个点的多个AI波形chunks进行按位相加并取平均，减少随机噪声
-    2. 使用extract_single_tone_information_vvi提取AI信号的正弦波参数
-    3. 使用共用的AO波形的正弦波参数
-    4. 计算传递函数：幅值比 = AI幅值 / AO幅值，相位差 = AI相位 - AO相位
+    2. （可选）应用高通滤波器去除基线偏移，提高单频提取精度
+    3. 使用extract_single_tone_information_vvi提取AI信号的正弦波参数
+    4. 使用共用的AO波形的正弦波参数
+    5. 计算传递函数：幅值比 = AI幅值 / AO幅值，相位差 = AI相位 - AO相位
 
     Args:
         sweep_data: Sweeper采集的完整测量数据，包含ai_data_list和ao_data
+        apply_highpass_filter: 是否应用高通滤波器去除基线偏移，默认为True
+        cutoff_freq: 高通滤波器截止频率（Hz），默认为10.0Hz
+        filter_order: 高通滤波器阶数，默认为4
 
     Returns:
         传递函数结果列表，每个元素包含位置、幅值比和相位差信息
@@ -62,19 +196,43 @@ def calculate_transfer_function(
     Examples:
         ```python
         >>> # 假设已有采集的原始数据
-        >>> sweep_data = sweeper.get_data()
+        >>> sweep_data = sweeper.get_data()  # noqa
+        >>> # 使用默认高通滤波器（10Hz截止频率）
         >>> tf_results = calculate_transfer_function(sweep_data)
+        >>> # 或者自定义滤波器参数
+        >>> tf_results = calculate_transfer_function(  # noqa
+        ...     sweep_data,
+        ...     apply_highpass_filter=True,
+        ...     cutoff_freq=5.0
+        ... )
+        >>> # 或者不使用滤波器
+        >>> tf_results = calculate_transfer_function(  # noqa
+        ...     sweep_data,
+        ...     apply_highpass_filter=False
+        ... )
         >>> for result in tf_results:
         ...     print(
         ...         f"位置: {result['position']}, 幅值比: {result['amp_ratio']:.4f}, "
         ...         f"相位差: {result['phase_shift']:.4f}"
         ...     )
         ```
+
+    Notes:
+        - 默认启用高通滤波器，可有效去除基线偏移，提高单频提取精度
+        - 滤波器在所有测量点间复用，避免重复设计的计算开销
+        - 推荐截止频率：10Hz左右（对于kHz级别的声波信号）
     """
     ai_data_list = sweep_data["ai_data_list"]
     ao_data = sweep_data["ao_data"]
 
-    logger.info(f"开始计算传递函数，共 {len(ai_data_list)} 个测量点")
+    logger.info(
+        f"开始计算传递函数，共 {len(ai_data_list)} 个测量点"
+        + (
+            f"，使用高通滤波器（截止频率={cutoff_freq}Hz）"
+            if apply_highpass_filter
+            else ""
+        )
+    )
 
     # 验证输入数据
     if not ai_data_list:
@@ -91,6 +249,22 @@ def calculate_transfer_function(
         f"使用AO波形参数: 频率={ao_sine_args['frequency']:.2f}Hz, "
         f"幅值={ao_sine_args['amplitude']:.4f}"
     )
+
+    # 如果启用高通滤波器，预先设计滤波器（所有测量点复用）
+    sos: FilterSOS | None = None
+    if apply_highpass_filter:
+        # 获取采样率（使用第一个有效波形的采样率）
+        sampling_rate = ai_data_list[0]["ai_data"][0].sampling_rate
+        logger.debug(
+            f"设计高通滤波器: 采样率={sampling_rate}Hz, "
+            f"截止频率={cutoff_freq}Hz, 阶数={filter_order}"
+        )
+        sos = get_highpass_filter(
+            sampling_rate=sampling_rate,
+            cutoff_freq=cutoff_freq,
+            order=filter_order,
+        )
+        logger.debug("高通滤波器设计完成，将在所有测量点复用")
 
     # 存储结果
     results: list[PointTFData] = []
@@ -153,10 +327,16 @@ def calculate_transfer_function(
                     f"点 {point_idx} 完成 {len(ai_waveforms)} 个chunks的按位平均"
                 )
 
-                # 2. 提取AI信号的正弦波参数
+                # 2. （可选）应用高通滤波器去除基线偏移
+                if apply_highpass_filter:
+                    assert sos is not None, "滤波器未初始化"
+                    ai_averaged_waveform = filter_waveform(ai_averaged_waveform, sos)
+                    logger.debug(f"点 {point_idx} 完成高通滤波")
+
+                # 3. 提取AI信号的正弦波参数
                 ai_sine_args = extract_single_tone_information_vvi(ai_averaged_waveform)
 
-                # 3. 计算传递函数
+                # 4. 计算传递函数
                 # 幅值比 = AI幅值 / AO幅值
                 amp_ratio = ai_sine_args["amplitude"] / ao_sine_args["amplitude"]
 
@@ -166,7 +346,7 @@ def calculate_transfer_function(
                 # 将相位差归一化到 [-π, π] 区间
                 phase_shift = np.arctan2(np.sin(phase_shift), np.cos(phase_shift))
 
-                # 4. 存储结果
+                # 5. 存储结果
                 result: PointTFData = {
                     "position": point_data["position"],
                     "amp_ratio": float(amp_ratio),
@@ -215,11 +395,11 @@ def plot_transfer_function_discrete_distribution(
     Examples:
         ```python
         >>> # 假设已有传递函数计算结果
-        >>> tf_results = calculate_transfer_function(raw_data)
+        >>> tf_results = calculate_transfer_function(raw_data)  # noqa
         >>> fig, (ax1, ax2) = plot_transfer_function_discrete_distribution(tf_results)
         >>> plt.show()
         >>> # 或者保存图片
-        >>> fig, axes = plot_transfer_function_discrete_distribution(
+        >>> fig, axes = plot_transfer_function_discrete_distribution(  # noqa
         ...     tf_results, save_path="transfer_function.png"
         ... )
         ```
@@ -390,13 +570,13 @@ def plot_transfer_function_interpolated_distribution(
     Examples:
         ```python
         >>> # 假设已有传递函数计算结果
-        >>> tf_results = calculate_transfer_function(raw_data)
+        >>> tf_results = calculate_transfer_function(raw_data)  # noqa
         >>> fig, (ax1, ax2) = plot_transfer_function_interpolated_distribution(
         ...     tf_results
         ... )
         >>> plt.show()
         >>> # 或者保存图片并使用线性插值
-        >>> fig, axes = plot_transfer_function_interpolated_distribution(
+        >>> fig, axes = plot_transfer_function_interpolated_distribution(  # noqa
         ...     tf_results,
         ...     interpolation_method="linear",
         ...     save_path="transfer_function_interpolated.png"
@@ -613,11 +793,11 @@ def plot_transfer_function_instantaneous_field(
     Examples:
         ```python
         >>> # 假设已有传递函数计算结果
-        >>> tf_results = calculate_transfer_function(raw_data)
+        >>> tf_results = calculate_transfer_function(raw_data)  # noqa
         >>> fig, ax = plot_transfer_function_instantaneous_field(tf_results)
         >>> plt.show()
         >>> # 或者保存图片并使用线性插值
-        >>> fig, ax = plot_transfer_function_instantaneous_field(
+        >>> fig, ax = plot_transfer_function_instantaneous_field(  # noqa
         ...     tf_results,
         ...     interpolation_method="linear",
         ...     save_path="instantaneous_field.png"
@@ -757,3 +937,315 @@ def plot_transfer_function_instantaneous_field(
     logger.info("瞬时声压场分布图绘制完成")
 
     return fig, ax
+
+
+def plot_waveform(
+    waveform: Waveform,
+    figsize: tuple[float, float] = (12, 6),
+    title: str | None = None,
+    save_path: str | None = None,
+    show_grid: bool = True,
+    zoom_factor: float = 1.0,
+    point_index: int | None = None,
+    waveform_index: int | None = None,
+) -> tuple[Figure, Axes]:
+    """
+    绘制Waveform对象的时域波形图
+
+    该函数接收一个Waveform对象，绘制其时域波形图。
+    支持单通道和多通道波形的可视化。
+
+    Args:
+        waveform: 要可视化的Waveform对象
+        figsize: 图形尺寸 (宽, 高)，单位为英寸，默认为 (12, 6)
+        title: 图形标题，如果为None则使用默认标题，默认为None
+        save_path: 保存图片的路径，如果为None则不保存，默认为None
+        show_grid: 是否显示网格，默认为True
+        zoom_factor: 时间轴缩放因子，用于放大波形的时间轴。
+            例如，zoom_factor=10时仅绘制前1/10的波形，zoom_factor=2时绘制前1/2的波形。
+            默认为1.0（不缩放，绘制完整波形）
+        point_index: 数据点序号（从0开始），用于在标题中显示，默认为None
+        waveform_index: 波形序号（从0开始），用于在标题中显示，默认为None
+
+    Returns:
+        fig: matplotlib Figure对象
+        ax: Axes对象
+
+    Raises:
+        ValueError: 当输入的waveform为空或zoom_factor小于等于0时
+
+    Examples:
+        ```python
+        假设已有一个Waveform对象
+        >>> waveform = Waveform(np.sin(2*np.pi*1000*np.linspace(0, 1, 10000)),
+        ...                     sampling_rate=10000)
+        >>> fig, ax = plot_waveform(waveform)
+        >>> plt.show()
+        或者保存图片
+        >>> fig, ax = plot_waveform(waveform, save_path="waveform.png")
+        放大10倍，仅绘制前1/10的波形
+        >>> fig, ax = plot_waveform(waveform, zoom_factor=10)
+        >>> plt.show()
+        指定数据点和波形序号
+        >>> fig, ax = plot_waveform(waveform, point_index=5, waveform_index=2)
+        >>> plt.show()
+        ```
+    """
+    logger.info("开始绘制Waveform时域波形图")
+
+    # 验证输入
+    if waveform.size == 0:
+        logger.error("输入的Waveform对象为空，无法绘图")
+        raise ValueError("Waveform对象不能为空")
+
+    if zoom_factor <= 0:
+        logger.error(f"zoom_factor必须大于0，当前值: {zoom_factor}")
+        raise ValueError("zoom_factor必须大于0")
+
+    logger.info(
+        f"绘制Waveform: shape={waveform.shape}, "
+        f"sampling_rate={waveform.sampling_rate}Hz, "
+        f"duration={waveform.duration:.6f}s, "
+        f"zoom_factor={zoom_factor}"
+    )
+
+    # 1. 根据zoom_factor计算需要绘制的样本数
+    total_samples = waveform.samples_num
+    samples_to_plot = int(total_samples / zoom_factor)
+
+    # 确保至少绘制2个采样点
+    if samples_to_plot < 2:
+        logger.warning(
+            f"zoom_factor={zoom_factor}过大，导致绘制样本数不足2个，"
+            f"将调整为绘制2个采样点"
+        )
+        samples_to_plot = 2
+
+    # 计算实际绘制的时长
+    duration_to_plot = samples_to_plot / waveform.sampling_rate
+
+    logger.debug(
+        f"zoom_factor={zoom_factor}, 总样本数={total_samples}, "
+        f"绘制样本数={samples_to_plot}, 绘制时长={duration_to_plot:.6f}s"
+    )
+
+    # 2. 生成时间轴（仅包含需要绘制的部分）
+    time_array = np.linspace(0, duration_to_plot, samples_to_plot, endpoint=False)
+
+    logger.debug(
+        f"时间轴范围: [0, {duration_to_plot:.6f}]s, 采样点数: {samples_to_plot}"
+    )
+
+    # 3. 创建图形
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+    # 4. 绘制波形（仅绘制需要的部分）
+    if waveform.ndim == 1:
+        # 单通道波形
+        ax.plot(
+            time_array,
+            waveform[:samples_to_plot],
+            linewidth=1.0,
+            color="blue",
+            label="通道 1",
+        )
+        logger.debug("绘制单通道波形")
+    else:
+        # 多通道波形
+        colors = plt.cm.tab10(np.linspace(0, 1, waveform.channels_num))
+        for ch_idx in range(waveform.channels_num):
+            ax.plot(
+                time_array,
+                waveform[ch_idx, :samples_to_plot],
+                linewidth=1.0,
+                color=colors[ch_idx],
+                label=f"通道 {ch_idx + 1}",
+                alpha=0.8,
+            )
+        logger.debug(f"绘制 {waveform.channels_num} 个通道的波形")
+
+    # 5. 设置坐标轴标签和标题
+    ax.set_xlabel("时间 (s)", fontsize=12)
+    ax.set_ylabel("幅值", fontsize=12)
+
+    # 设置标题
+    if title is None:
+        # 使用默认标题
+        title_parts = []
+
+        # 添加数据点和波形序号信息
+        if point_index is not None and waveform_index is not None:
+            title_parts.append(f"数据点 {point_index} - 波形 {waveform_index}")
+        elif point_index is not None:
+            title_parts.append(f"数据点 {point_index}")
+        elif waveform_index is not None:
+            title_parts.append(f"波形 {waveform_index}")
+
+        # 添加基本信息
+        if zoom_factor == 1.0:
+            title_parts.append(
+                f"采样率: {waveform.sampling_rate:.0f} Hz, "
+                f"持续时间: {waveform.duration:.6f} s"
+            )
+        else:
+            title_parts.append(
+                f"采样率: {waveform.sampling_rate:.0f} Hz, "
+                f"显示时长: {duration_to_plot:.6f} s / {waveform.duration:.6f} s, "
+                f"缩放: {zoom_factor}x"
+            )
+
+        default_title = (
+            "时域波形图 - " + " | ".join(title_parts) if title_parts else "时域波形图"
+        )
+        ax.set_title(default_title, fontsize=14, fontweight="bold")
+    else:
+        ax.set_title(title, fontsize=14, fontweight="bold")
+
+    # 6. 添加图例（如果有多个通道）
+    if waveform.channels_num > 1:
+        ax.legend(loc="upper right", fontsize=10)
+
+    # 7. 可选：显示网格
+    if show_grid:
+        ax.grid(True, alpha=0.3, linestyle="--")
+
+    logger.debug("波形图绘制完成")
+
+    # 8. 调整布局
+    plt.tight_layout()
+
+    # 9. 保存图片（如果指定了路径）
+    if save_path is not None:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        logger.info(f"波形图已保存至: {save_path}")
+
+    logger.info("Waveform时域波形图绘制完成")
+
+    return fig, ax
+
+
+def plot_sweep_waveforms(
+    sweep_data: SweepData,
+    output_dir: str,
+    zoom_factor: float = 1.0,
+    figsize: tuple[float, float] = (12, 6),
+    show_grid: bool = True,
+) -> str:
+    """
+    批量绘制SweepData中所有波形的时域图
+
+    该函数接收一个SweepData对象，在指定的输出目录中创建一个新文件夹，
+    并对SweepData中每一个数据点的每一段waveform波形使用plot_waveform函数
+    绘制时域波形图。所有图像将被智能地自动命名并保存。
+
+    Args:
+        sweep_data: 要可视化的SweepData对象
+        output_dir: 输出目录路径
+        zoom_factor: 时间轴缩放因子，传递给plot_waveform函数，默认为1.0
+        figsize: 图形尺寸 (宽, 高)，单位为英寸，默认为 (12, 6)
+        show_grid: 是否显示网格，默认为True
+
+    Returns:
+        创建的输出文件夹的完整路径
+
+    Raises:
+        ValueError: 当输入的sweep_data为空时
+        OSError: 当无法创建输出目录时
+
+    Examples:
+        ```python
+        假设已有一个SweepData对象
+        >>> sweep_data = load_sweep_data("measurement.pkl")  # noqa
+        >>> output_folder = plot_sweep_waveforms(
+        ...     sweep_data,
+        ...     output_dir="D:/plots",
+        ...     zoom_factor=10
+        ... )
+        >>> print(f"所有波形图已保存至: {output_folder}")
+        ```
+    """
+    from datetime import datetime
+    from pathlib import Path
+
+    logger.info("开始批量绘制SweepData波形图")
+
+    # 验证输入
+    ai_data_list = sweep_data["ai_data_list"]
+    if not ai_data_list:
+        logger.error("输入的SweepData对象为空，无法绘图")
+        raise ValueError("SweepData对象不能为空")
+
+    # 创建输出目录
+    output_dir_path = Path(output_dir)
+    if not output_dir_path.exists():
+        logger.info(f"输出目录不存在，创建目录: {output_dir_path}")
+        output_dir_path.mkdir(parents=True, exist_ok=True)
+
+    # 创建带时间戳的子文件夹
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    folder_name = f"waveforms_{timestamp}"
+    output_folder = output_dir_path / folder_name
+
+    try:
+        output_folder.mkdir(parents=True, exist_ok=True)
+        logger.info(f"创建输出文件夹: {output_folder}")
+    except OSError as e:
+        logger.error(f"无法创建输出文件夹: {e}", exc_info=True)
+        raise
+
+    # 统计总波形数
+    total_waveforms = sum(len(point_data["ai_data"]) for point_data in ai_data_list)
+    logger.info(f"开始绘制 {len(ai_data_list)} 个数据点的共 {total_waveforms} 个波形")
+
+    # 遍历每个数据点
+    waveform_count = 0
+    for point_idx, point_data in enumerate(ai_data_list):
+        position = point_data["position"]
+        ai_waveforms = point_data["ai_data"]
+
+        logger.debug(
+            f"处理数据点 {point_idx} (位置: {position}), 共 {len(ai_waveforms)} 个波形"
+        )
+
+        # 遍历该点的每个波形
+        for waveform_idx, waveform in enumerate(ai_waveforms):
+            # 生成文件名：point_{点序号}_waveform_{波形序号}.png
+            filename = f"point_{point_idx:04d}_waveform_{waveform_idx:02d}.png"
+            save_path = output_folder / filename
+
+            # 绘制波形图
+            try:
+                fig, _ = plot_waveform(
+                    waveform=waveform,
+                    figsize=figsize,
+                    title=None,  # 使用默认标题，会自动包含点序号和波形序号
+                    save_path=str(save_path),
+                    show_grid=show_grid,
+                    zoom_factor=zoom_factor,
+                    point_index=point_idx,
+                    waveform_index=waveform_idx,
+                )
+                # 关闭图形以释放内存
+                plt.close(fig)
+
+                waveform_count += 1
+
+                # 每10个波形输出一次进度
+                if waveform_count % 10 == 0 or waveform_count == total_waveforms:
+                    logger.info(
+                        f"进度: {waveform_count}/{total_waveforms} "
+                        f"({waveform_count / total_waveforms * 100:.1f}%)"
+                    )
+
+            except Exception as e:
+                logger.error(
+                    f"绘制数据点 {point_idx} 的波形 {waveform_idx} 时发生错误: {e}",
+                    exc_info=True,
+                )
+                # 继续处理下一个波形
+                continue
+
+    logger.info(f"批量绘制完成，成功绘制 {waveform_count}/{total_waveforms} 个波形图")
+    logger.info(f"所有波形图已保存至: {output_folder}")
+
+    return str(output_folder)

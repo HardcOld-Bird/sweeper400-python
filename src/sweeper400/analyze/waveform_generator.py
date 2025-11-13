@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from sweeper400.logger import get_logger
+from sweeper400.logger import get_logger  # type: ignore
 
 from .basic_sine import get_sine
 from .my_dtypes import PositiveFloat, SamplingInfo, SineArgs, Waveform
@@ -135,8 +135,8 @@ class SineGenerator(WaveformGenerator):
 
     Examples:
         ```python
-        >>> sampling_info = init_sampling_info(1000, 1024)
-        >>> sine_args = init_sine_args(50.0, 1.0, 0.0)
+        >>> sampling_info = init_sampling_info(1000, 1024)  # type: ignore
+        >>> sine_args = init_sine_args(50.0, 1.0, 0.0)  # type: ignore
         >>> generator = SineGenerator(sampling_info, sine_args)
         >>> wave1 = generator.generate()
         >>> wave2 = generator.generate()
@@ -159,7 +159,7 @@ class SineGenerator(WaveformGenerator):
 
         Args:
             sampling_info: 采样信息，包含采样率和采样点数
-            sine_args: 正弦波参数，包含频率、幅值和初相位信息
+            next_sine_args: 正弦波参数，包含频率、幅值和初相位信息
             next_timestamp: 下一次合成Waveform的时间戳，默认为None
             next_id: 下一次生成Waveform的唯一标识符，默认为1
         """
