@@ -17,14 +17,18 @@ measurement_data = load_sweep_data(save_path)
 
 # %%
 
-clean_data = apply_highpass_filter_to_sweep_data(measurement_data)
+clean_data = apply_highpass_filter_to_sweep_data(
+    measurement_data,
+    cutoff_freq=343,
+    # trim_samples=200,
+)
 
 # %%
 
 plot_sweep_waveforms(
     clean_data,
     output_dir="D:\\EveryoneDownloaded\\",
-    # zoom_factor=200,
+    zoom_factor=200,
 )
 
 # %%

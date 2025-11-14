@@ -13,7 +13,7 @@ from .basic_sine import (
     get_sine,
     get_sine_cycles,
 )
-from .filter import detrend_waveform, filter_waveform, get_highpass_filter
+from .filter import detrend_waveform, filter_sweep_data, filter_waveform
 from .my_dtypes import (
     Point2D,
     PointRawData,
@@ -28,7 +28,6 @@ from .my_dtypes import (
 )
 from .post_process import (
     PointTFData,
-    apply_highpass_filter_to_sweep_data,
     calculate_transfer_function,
     plot_sweep_waveforms,
     plot_transfer_function_discrete_distribution,
@@ -58,13 +57,12 @@ __all__ = [
     "SineGenerator",
     "PointTFData",
     "calculate_transfer_function",
-    "apply_highpass_filter_to_sweep_data",
+    "filter_sweep_data",
     "plot_transfer_function_discrete_distribution",
     "plot_transfer_function_interpolated_distribution",
     "plot_transfer_function_instantaneous_field",
     "plot_waveform",
     "plot_sweep_waveforms",
-    "get_highpass_filter",
     "filter_waveform",
     "detrend_waveform",
 ]

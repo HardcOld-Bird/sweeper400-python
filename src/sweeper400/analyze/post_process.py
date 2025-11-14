@@ -1,3 +1,4 @@
+# pyright: basic
 """
 # 后处理模块
 
@@ -7,18 +8,17 @@
 主要包含传递函数计算等数据分析功能。
 """
 
-import matplotlib.pyplot as plt  # type: ignore
+import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.axes import Axes  # type: ignore
-from matplotlib.figure import Figure  # type: ignore
-from matplotlib.patches import Rectangle  # type: ignore
-from scipy.interpolate import griddata  # type: ignore
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
+from scipy.interpolate import griddata
 
-from sweeper400.logger import get_logger  # type: ignore
+from sweeper400.logger import get_logger  # noqa
 
 from .basic_sine import extract_single_tone_information_vvi
-from .filter import FilterSOS, detrend_waveform, filter_waveform, get_highpass_filter
-from .my_dtypes import PointRawData, PointTFData, SweepData, Waveform
+from .my_dtypes import PointTFData, SweepData, Waveform
 
 # 配置matplotlib中文字体支持
 plt.rcParams["font.sans-serif"] = [
@@ -34,140 +34,8 @@ plt.rcParams["axes.unicode_minus"] = False
 logger = get_logger(__name__)
 
 
-def apply_highpass_filter_to_sweep_data(
-    sweep_data: SweepData,
-    cutoff_freq: float = 10.0,
-    filter_order: int = 4,
-) -> SweepData:
-    """
-    对SweepData中的所有波形应用高通滤波器
-
-    该函数对SweepData中的所有AI波形和AO波形应用高通滤波器，去除基线偏移。
-    滤波器只设计一次，然后复用到所有波形上，提高处理效率。
-
-    Args:
-        sweep_data: 原始的扫场测量数据
-        cutoff_freq: 高通滤波器截止频率（Hz），默认为10.0Hz
-        filter_order: 高通滤波器阶数，默认为4
-
-    Returns:
-        滤波后的SweepData，结构与输入完全相同，但所有波形已应用高通滤波
-
-    Raises:
-        ValueError: 当输入数据为空时
-
-    Examples:
-        ```python
-        >>> # 假设已有原始采集数据
-        >>> raw_data = sweeper.get_data()  # noqa
-        >>> # 应用高通滤波器（默认10Hz截止频率）
-        >>> filtered_data = apply_highpass_filter_to_sweep_data(raw_data)
-        >>> # 或自定义滤波器参数
-        >>> filtered_data = apply_highpass_filter_to_sweep_data(  # noqa
-        ...     raw_data,
-        ...     cutoff_freq=5.0,
-        ...     filter_order=3
-        ... )
-        >>> # 滤波后的数据可用于后续处理
-        >>> tf_results = calculate_transfer_function(
-        ...     filtered_data, apply_highpass_filter=False)
-        ```
-
-    Notes:
-        - 滤波器在所有波形间复用，避免重复设计的计算开销
-        - 推荐截止频率：10Hz左右（对于kHz级别的声波信号）
-        - 滤波后的数据结构与原始数据完全相同，可直接用于后续处理
-        - 如果后续使用calculate_transfer_function，
-            建议设置apply_highpass_filter=False避免重复滤波
-    """
-    # 获取函数日志器
-    func_logger = get_logger(f"{__name__}.apply_highpass_filter_to_sweep_data")
-
-    ai_data_list = sweep_data["ai_data_list"]
-    ao_data = sweep_data["ao_data"]
-
-    # 验证输入数据
-    if not ai_data_list:
-        func_logger.error("输入数据列表为空")
-        raise ValueError("输入数据列表不能为空")
-
-    # 统计总波形数量
-    total_ai_waveforms = sum(len(point["ai_data"]) for point in ai_data_list)
-    total_waveforms = total_ai_waveforms + 1  # +1 for AO waveform
-
-    func_logger.info(
-        f"开始对SweepData应用高通滤波器: "
-        f"截止频率={cutoff_freq}Hz, 阶数={filter_order}, "
-        f"共{len(ai_data_list)}个测量点, {total_waveforms}个波形"
-    )
-
-    # 获取采样率（使用第一个有效波形的采样率）
-    sampling_rate = ai_data_list[0]["ai_data"][0].sampling_rate
-    func_logger.debug(f"采样率: {sampling_rate}Hz")
-
-    # 设计滤波器（只设计一次，所有波形复用）
-    func_logger.debug(
-        f"设计高通滤波器: 采样率={sampling_rate}Hz, "
-        f"截止频率={cutoff_freq}Hz, 阶数={filter_order}"
-    )
-    sos = get_highpass_filter(
-        sampling_rate=sampling_rate,
-        cutoff_freq=cutoff_freq,
-        order=filter_order,
-    )
-    func_logger.debug("高通滤波器设计完成，将在所有波形复用")
-
-    # 处理AI数据
-    filtered_ai_data_list: list[PointRawData] = []
-    processed_count = 0
-
-    for point_idx, point_data in enumerate(ai_data_list):
-        position = point_data["position"]
-        ai_waveforms = point_data["ai_data"]
-
-        func_logger.debug(
-            f"处理点 {point_idx} @ ({position.x}, {position.y}), "
-            f"共{len(ai_waveforms)}个波形"
-        )
-
-        # 对该点的所有AI波形应用滤波器
-        filtered_ai_waveforms: list[Waveform] = []
-        for _, waveform in enumerate(ai_waveforms):
-            detrended_wf = detrend_waveform(waveform)
-            filtered_wf = filter_waveform(detrended_wf, sos)
-            filtered_ai_waveforms.append(filtered_wf)
-            processed_count += 1
-
-        # 创建滤波后的点数据
-        filtered_point_data: PointRawData = {
-            "position": position,
-            "ai_data": filtered_ai_waveforms,
-        }
-        filtered_ai_data_list.append(filtered_point_data)
-
-        func_logger.debug(f"点 {point_idx} 完成滤波，处理了{len(ai_waveforms)}个波形")
-
-    func_logger.debug(f"所有AI波形滤波完成，共处理{processed_count}个波形")
-
-    # 创建滤波后的SweepData
-    filtered_sweep_data: SweepData = {
-        "ai_data_list": filtered_ai_data_list,
-        "ao_data": ao_data,
-    }
-
-    func_logger.info(
-        f"SweepData滤波完成，共处理{processed_count}个波形 "
-        f"({len(ai_data_list)}个测量点)"
-    )
-
-    return filtered_sweep_data
-
-
 def calculate_transfer_function(
     sweep_data: SweepData,
-    apply_highpass_filter: bool = True,
-    cutoff_freq: float = 10.0,
-    filter_order: int = 4,
 ) -> list[PointTFData]:
     """
     计算Sweeper采集数据的传递函数
@@ -175,16 +43,12 @@ def calculate_transfer_function(
     对每个测量点的原始数据进行处理，计算输入输出信号的传递函数。
     具体步骤：
     1. 对每个点的多个AI波形chunks进行按位相加并取平均，减少随机噪声
-    2. （可选）应用高通滤波器去除基线偏移，提高单频提取精度
-    3. 使用extract_single_tone_information_vvi提取AI信号的正弦波参数
-    4. 使用共用的AO波形的正弦波参数
-    5. 计算传递函数：幅值比 = AI幅值 / AO幅值，相位差 = AI相位 - AO相位
+    2. 使用extract_single_tone_information_vvi提取AI信号的正弦波参数
+    3. 使用共用的AO波形的正弦波参数
+    4. 计算传递函数：幅值比 = AI幅值 / AO幅值，相位差 = AI相位 - AO相位
 
     Args:
         sweep_data: Sweeper采集的完整测量数据，包含ai_data_list和ao_data
-        apply_highpass_filter: 是否应用高通滤波器去除基线偏移，默认为True
-        cutoff_freq: 高通滤波器截止频率（Hz），默认为10.0Hz
-        filter_order: 高通滤波器阶数，默认为4
 
     Returns:
         传递函数结果列表，每个元素包含位置、幅值比和相位差信息
@@ -197,19 +61,8 @@ def calculate_transfer_function(
         ```python
         >>> # 假设已有采集的原始数据
         >>> sweep_data = sweeper.get_data()  # noqa
-        >>> # 使用默认高通滤波器（10Hz截止频率）
+        >>> # 计算传递函数
         >>> tf_results = calculate_transfer_function(sweep_data)
-        >>> # 或者自定义滤波器参数
-        >>> tf_results = calculate_transfer_function(  # noqa
-        ...     sweep_data,
-        ...     apply_highpass_filter=True,
-        ...     cutoff_freq=5.0
-        ... )
-        >>> # 或者不使用滤波器
-        >>> tf_results = calculate_transfer_function(  # noqa
-        ...     sweep_data,
-        ...     apply_highpass_filter=False
-        ... )
         >>> for result in tf_results:
         ...     print(
         ...         f"位置: {result['position']}, 幅值比: {result['amp_ratio']:.4f}, "
@@ -218,21 +71,14 @@ def calculate_transfer_function(
         ```
 
     Notes:
-        - 默认启用高通滤波器，可有效去除基线偏移，提高单频提取精度
-        - 滤波器在所有测量点间复用，避免重复设计的计算开销
+        - 滤波器通过调用filter_sweep_data函数实现
         - 推荐截止频率：10Hz左右（对于kHz级别的声波信号）
+        - trim_samples参数用于消除滤波器的边缘效应
     """
+    logger.info(f"开始计算传递函数，共 {len(sweep_data['ai_data_list'])} 个测量点，")
+
     ai_data_list = sweep_data["ai_data_list"]
     ao_data = sweep_data["ao_data"]
-
-    logger.info(
-        f"开始计算传递函数，共 {len(ai_data_list)} 个测量点"
-        + (
-            f"，使用高通滤波器（截止频率={cutoff_freq}Hz）"
-            if apply_highpass_filter
-            else ""
-        )
-    )
 
     # 验证输入数据
     if not ai_data_list:
@@ -249,22 +95,6 @@ def calculate_transfer_function(
         f"使用AO波形参数: 频率={ao_sine_args['frequency']:.2f}Hz, "
         f"幅值={ao_sine_args['amplitude']:.4f}"
     )
-
-    # 如果启用高通滤波器，预先设计滤波器（所有测量点复用）
-    sos: FilterSOS | None = None
-    if apply_highpass_filter:
-        # 获取采样率（使用第一个有效波形的采样率）
-        sampling_rate = ai_data_list[0]["ai_data"][0].sampling_rate
-        logger.debug(
-            f"设计高通滤波器: 采样率={sampling_rate}Hz, "
-            f"截止频率={cutoff_freq}Hz, 阶数={filter_order}"
-        )
-        sos = get_highpass_filter(
-            sampling_rate=sampling_rate,
-            cutoff_freq=cutoff_freq,
-            order=filter_order,
-        )
-        logger.debug("高通滤波器设计完成，将在所有测量点复用")
 
     # 存储结果
     results: list[PointTFData] = []
@@ -327,16 +157,10 @@ def calculate_transfer_function(
                     f"点 {point_idx} 完成 {len(ai_waveforms)} 个chunks的按位平均"
                 )
 
-                # 2. （可选）应用高通滤波器去除基线偏移
-                if apply_highpass_filter:
-                    assert sos is not None, "滤波器未初始化"
-                    ai_averaged_waveform = filter_waveform(ai_averaged_waveform, sos)
-                    logger.debug(f"点 {point_idx} 完成高通滤波")
-
-                # 3. 提取AI信号的正弦波参数
+                # 2. 提取AI信号的正弦波参数
                 ai_sine_args = extract_single_tone_information_vvi(ai_averaged_waveform)
 
-                # 4. 计算传递函数
+                # 3. 计算传递函数
                 # 幅值比 = AI幅值 / AO幅值
                 amp_ratio = ai_sine_args["amplitude"] / ao_sine_args["amplitude"]
 
@@ -346,7 +170,7 @@ def calculate_transfer_function(
                 # 将相位差归一化到 [-π, π] 区间
                 phase_shift = np.arctan2(np.sin(phase_shift), np.cos(phase_shift))
 
-                # 5. 存储结果
+                # 4. 存储结果
                 result: PointTFData = {
                     "position": point_data["position"],
                     "amp_ratio": float(amp_ratio),

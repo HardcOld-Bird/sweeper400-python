@@ -117,7 +117,7 @@ def init_sampling_info(
     标准化地生成采样信息字典
 
     Args:
-        sampling_rate: 采样率，必须为正整数（Hz）
+        sampling_rate: 采样率，必须为正实数（Hz），且不建议超过200kHz
         samples_num: 总采样数，必须为正整数
 
     Returns:

@@ -1,10 +1,12 @@
 [tool.pyright]
 
 pythonVersion = "3.12"
-typeCheckingMode = "standard"
+typeCheckingMode = "strict"
 exclude = [
     "参考资料/**",
-    "tests/**"
+    "tests/**",
+    "scripts/**",
+    "src/sweeper400/analyze/post_process.py"
 ]
 reportMissingTypeStubs = "none"
 reportMissingImports = "none"

@@ -283,12 +283,13 @@ def estimate_sine_args(
     # window: 使用Hann窗以提高频率分辨率和降低频谱泄漏
     # scaling: 'spectrum' 返回功率谱（单位V^2），峰值的平方根是RMS幅度
     # return_onesided: 只返回正频率部分
-    psd_freqs, psd_values = periodogram(  # type: ignore
+    psd_freqs, psd_values = periodogram(  # noqa
         waveform_data,
         fs=sampling_rate,
         window="hann",
-        scaling="spectrum",  # 使用功率谱
+        detrend=False,  # 不去趋势，相关操作交给filter完成
         return_onesided=True,  # 只返回正频率部分
+        scaling="spectrum",  # 使用功率谱
     )
 
     logger.debug(
@@ -300,7 +301,7 @@ def estimate_sine_args(
     # 对于功率谱（scaling='spectrum'），峰值 = (RMS幅度)^2
     # 对于正弦波，峰值幅度 = RMS幅度 * sqrt(2)
     # 因此，峰值幅度 = sqrt(功率谱峰值) * sqrt(2)
-    psd_magnitude = np.sqrt(psd_values) * np.sqrt(2.0)  # type: ignore
+    psd_magnitude = np.sqrt(psd_values) * np.sqrt(2.0)
 
     # 在指定频率范围内搜索峰值
     freq_range_mask = (psd_freqs >= freq_min) & (psd_freqs <= freq_max)
@@ -322,7 +323,7 @@ def estimate_sine_args(
     coarse_magnitude = psd_magnitude_in_range[max_magnitude_idx]
 
     # 使用抛物线拟合进行频率和幅值的精细化估计
-    if max_magnitude_idx > 0 and max_magnitude_idx < len(psd_magnitude_in_range) - 1:
+    if 0 < max_magnitude_idx < len(psd_magnitude_in_range) - 1:
         # 取峰值点及其相邻两点进行抛物线拟合
         y1 = psd_magnitude_in_range[max_magnitude_idx - 1]
         y2 = psd_magnitude_in_range[max_magnitude_idx]
@@ -369,7 +370,7 @@ def estimate_sine_args(
 
     # 计算用于相位估计的信号长度（前1-3个周期）
     # 这样可以降低对频率估计误差的敏感性
-    cycles_for_phase_estimation = 2  # 使用1个周期
+    cycles_for_phase_estimation = 3  # 使用3个周期
     samples_per_cycle = float(sampling_rate) / float(initial_frequency)
     phase_estimation_samples = int(cycles_for_phase_estimation * samples_per_cycle)
 
