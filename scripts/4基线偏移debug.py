@@ -1,26 +1,26 @@
 # pyright: basic
-from sweeper400.analyze import (
-    apply_highpass_filter_to_sweep_data,
+from src.sweeper400.analyze import (
+    average_sweep_data,
     calculate_transfer_function,
+    filter_sweep_data,
     plot_sweep_waveforms,
     plot_transfer_function_discrete_distribution,
     plot_transfer_function_instantaneous_field,
     plot_transfer_function_interpolated_distribution,
 )
-from sweeper400.use.sweeper import (
+from src.sweeper400.use.sweeper import (
     load_sweep_data,
 )
 
 save_path = "D:\\EveryoneDownloaded\\test_data.pkl"
-# save_path = "D:\\EveryoneDownloaded\\半场.pkl"
+
 measurement_data = load_sweep_data(save_path)
 
 # %%
 
-clean_data = apply_highpass_filter_to_sweep_data(
-    measurement_data,
-    cutoff_freq=343,
-    # trim_samples=200,
+measurement_data = average_sweep_data(measurement_data)
+clean_data = filter_sweep_data(
+    measurement_data, lowcut=1000, highcut=10000, trim_samples=500
 )
 
 # %%

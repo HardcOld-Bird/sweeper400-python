@@ -201,9 +201,9 @@ def filter_sweep_data(
     trim_samples: int = 0,
 ) -> SweepData:
     """
-    对SweepData中的所有波形应用带通滤波器
+    对SweepData中的所有波形进行滤波
 
-    该函数对SweepData中的所有AI波形和AO波形应用带通滤波器。
+    该函数对SweepData中的所有AI波形进行去趋势、应用带通滤波、并按需裁剪信号头。
     滤波器只设计一次，然后复用到所有波形上，提高处理效率。
 
     Args:
@@ -214,7 +214,7 @@ def filter_sweep_data(
         trim_samples: 滤波后切除波形开头的采样点数量，用于消除边缘效应，默认为0
 
     Returns:
-        滤波后的SweepData，结构与输入完全相同，但所有波形已应用高通滤波
+        滤波后的SweepData，结构与输入完全相同，但所有波形已被滤波
 
     Raises:
         ValueError: 当输入数据为空时
@@ -228,14 +228,13 @@ def filter_sweep_data(
         >>> # 或自定义滤波器参数并切除开头100个采样点
         >>> filtered_data = filter_sweep_data(  # noqa
         ...     raw_data,
-        ...     lowcut=100.0,
-        ...     highcut=20000.0,
-        ...     filter_order=3,
-        ...     trim_samples=100
+        ...     lowcut=1000.0,
+        ...     highcut=10000.0,
+        ...     filter_order=4,
+        ...     trim_samples=500
         ... )
         >>> # 滤波后的数据可用于后续处理
-        >>> tf_results = calculate_transfer_function(  # noqa
-        ...     filtered_data, apply_highpass_filter=False)
+        >>> tf_results = calculate_transfer_function(filtered_data)  # noqa
         ```
 
     Notes:
@@ -248,11 +247,6 @@ def filter_sweep_data(
 
     ai_data_list = sweep_data["ai_data_list"]
     ao_data = sweep_data["ao_data"]
-
-    # 验证输入数据
-    if not ai_data_list:
-        func_logger.error("输入数据列表为空")
-        raise ValueError("输入数据列表不能为空")
 
     func_logger.info(
         f"开始对SweepData应用带通滤波器: "

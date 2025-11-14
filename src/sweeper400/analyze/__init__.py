@@ -13,10 +13,15 @@ from .basic_sine import (
     get_sine,
     get_sine_cycles,
 )
-from .filter import detrend_waveform, filter_sweep_data, filter_waveform
+from .filter import (
+    detrend_waveform,
+    filter_sweep_data,
+    filter_waveform,
+)
 from .my_dtypes import (
     Point2D,
     PointRawData,
+    PointTFData,
     PositiveFloat,
     PositiveInt,
     SamplingInfo,
@@ -26,19 +31,22 @@ from .my_dtypes import (
     init_sampling_info,
     init_sine_args,
 )
-from .post_process import (
-    PointTFData,
-    calculate_transfer_function,
+from .plot import (
     plot_sweep_waveforms,
     plot_transfer_function_discrete_distribution,
     plot_transfer_function_instantaneous_field,
     plot_transfer_function_interpolated_distribution,
     plot_waveform,
 )
+from .post_process import (
+    average_sweep_data,
+    calculate_transfer_function,
+)
 from .waveform_generator import SineGenerator, WaveformGenerator
 
 # 控制 import * 的行为
 __all__ = [
+    "average_sweep_data",
     "PositiveInt",
     "PositiveFloat",
     "SamplingInfo",

@@ -6,7 +6,7 @@ exclude = [
     "参考资料/**",
     "tests/**",
     "scripts/**",
-    "src/sweeper400/analyze/post_process.py"
+    "src/sweeper400/analyze/plot.py"
 ]
 reportMissingTypeStubs = "none"
 reportMissingImports = "none"
