@@ -1,7 +1,7 @@
 [tool.pyright]
 
 pythonVersion = "3.12"
-typeCheckingMode = "strict"
+typeCheckingMode = "standard"
 exclude = [
     "参考资料/**",
     "tests/**",

@@ -9,8 +9,7 @@
 
 import numpy as np
 
-from sweeper400.logger import get_logger  # noqa
-
+from ..logger import get_logger
 from .basic_sine import extract_single_tone_information_vvi
 from .my_dtypes import PointRawData, PointTFData, SweepData, Waveform
 

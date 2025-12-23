@@ -10,12 +10,10 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from sweeper400.logger import get_logger  # type: ignore
-
+from ..logger import get_logger
 from .basic_sine import get_sine
 from .my_dtypes import PositiveFloat, SamplingInfo, SineArgs, Waveform
 
-# 获取模块日志器
 logger = get_logger(__name__)
 
 

@@ -24,7 +24,7 @@ from ctypes import (
 )
 
 # 导入日志系统
-from sweeper400.logger import get_logger
+from ..logger import get_logger
 
 # 获取模块专用日志器
 logger = get_logger(__name__)

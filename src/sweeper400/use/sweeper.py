@@ -17,7 +17,7 @@ from typing import TypedDict
 
 import numpy as np
 
-from sweeper400.analyze import (
+from ..analyze import (
     Point2D,
     PositiveFloat,
     PositiveInt,
@@ -27,9 +27,9 @@ from sweeper400.analyze import (
     init_sampling_info,
     init_sine_args,
 )
-from sweeper400.logger import get_logger
-from sweeper400.measure import HiPerfCSSIO
-from sweeper400.move import MotorController
+from ..logger import get_logger
+from ..measure import HiPerfCSIO
+from ..move import MotorController
 
 # 获取模块日志器
 logger = get_logger(__name__)
@@ -324,7 +324,7 @@ class Sweeper:
     # 创建扫场测量器（自动管理硬件控制器）
     sweeper = Sweeper(
         ai_channel="400Slot2/ai0",
-        ao_channel="400Slot2/ao0",
+        ao_channels="400Slot2/ao0",
         output_waveform=output_waveform,
         point_list=grid
     )
@@ -347,7 +347,7 @@ class Sweeper:
 
     Attributes:
         ai_channel: AI通道名称
-        ao_channel: AO通道名称
+        ao_channels: AO通道名称
         output_waveform: 输出波形对象
         point_list: 测量点阵列表
         chunks_per_point: 每个点采集的chunk数量，默认3
@@ -403,9 +403,9 @@ class Sweeper:
 
         try:
             logger.debug("正在初始化数据采集控制器...")
-            self._measure_controller = HiPerfCSSIO(
+            self._measure_controller = HiPerfCSIO(
                 ai_channel=ai_channel,
-                ao_channel=ao_channel,
+                ao_channels=(ao_channel,),  # 转换为tuple
                 output_waveform=output_waveform,
                 export_function=self._data_export_callback,
             )
@@ -626,9 +626,6 @@ class Sweeper:
         Examples:
             >>> sweeper = Sweeper("ai0", "ao0")
             >>> # 创建新的输出波形
-            >>> from sweeper400.analyze import (
-            ...     init_sampling_info, init_sine_args, get_sine_cycles
-            ... )
             >>> sampling_info = init_sampling_info(48000.0, 4800)
             >>> sine_args = init_sine_args(2000.0, 0.02, 0.0)
             >>> new_waveform = get_sine_cycles(sampling_info, sine_args)
@@ -651,9 +648,9 @@ class Sweeper:
         # 创建新的数据采集控制器
         try:
             logger.info("正在创建新的数据采集控制器...")
-            self._measure_controller = HiPerfCSSIO(
+            self._measure_controller = HiPerfCSIO(
                 ai_channel=ai_channel,
-                ao_channel=ao_channel,
+                ao_channels=(ao_channel,),  # 转换为tuple
                 output_waveform=output_waveform,
                 export_function=self._data_export_callback,
             )
@@ -833,7 +830,7 @@ class Sweeper:
 
     def _wtf_move_to_point(self, point: Point2D) -> bool:
         """
-        移动到指定点位
+        移动到指定点位（阻塞操作）
 
         Args:
             point: 目标点位坐标

@@ -8,12 +8,11 @@
 """
 
 import numpy as np
-from scipy.linalg import lstsq  # type: ignore
-from scipy.optimize import curve_fit  # type: ignore
-from scipy.signal import periodogram  # type: ignore
+from scipy.linalg import lstsq  # noqa
+from scipy.optimize import curve_fit  # noqa
+from scipy.signal import periodogram  # noqa
 
-from sweeper400.logger import get_logger  # type: ignore
-
+from ..logger import get_logger
 from .my_dtypes import (
     PositiveFloat,
     SamplingInfo,

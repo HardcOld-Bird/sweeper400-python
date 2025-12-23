@@ -10,8 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.signal import butter, detrend, sosfilt
 
-from sweeper400.logger import get_logger  # noqa
-
+from ..logger import get_logger
 from .my_dtypes import PointRawData, PositiveFloat, PositiveInt, SweepData, Waveform
 
 # 获取模块日志器

@@ -14,8 +14,7 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from scipy.interpolate import griddata
 
-from sweeper400.logger import get_logger  # noqa
-
+from ..logger import get_logger
 from .my_dtypes import PointTFData, SweepData, Waveform
 
 # 获取模块日志器
