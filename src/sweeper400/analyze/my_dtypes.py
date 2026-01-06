@@ -517,3 +517,25 @@ class PointTFData(TypedDict):
     position: "Point2D"
     amp_ratio: float
     phase_shift: float
+
+
+# 定义校准数据格式
+class CalibData(TypedDict):
+    """
+    多通道校准数据格式
+
+    该类型定义了校准结果的标准化格式，包含传递函数、通道信息和测量参数。
+
+    ## 内部组成:
+        **tf_list**: 最终传递函数列表（每个通道一个PointTFData）
+        **ao_channels**: AO通道名称元组
+        **ai_channel**: AI通道名称
+        **sampling_info**: 采样信息
+        **sine_args**: 正弦波参数
+    """
+
+    tf_list: list[PointTFData]
+    ao_channels: tuple[str, ...]
+    ai_channel: str
+    sampling_info: SamplingInfo
+    sine_args: SineArgs

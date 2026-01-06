@@ -7,6 +7,7 @@
 """
 
 # 将模块功能提升至包级别，可缩短外部import语句
+from .caliber import Caliber
 from .sweeper import (
     Point2D,
     SweepData,
@@ -17,6 +18,7 @@ from .sweeper import (
 
 # 控制 import * 的行为
 __all__ = [
+    "Caliber",
     "Point2D",
     "SweepData",
     "load_sweep_data",

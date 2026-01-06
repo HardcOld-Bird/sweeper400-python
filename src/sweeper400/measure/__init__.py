@@ -7,10 +7,9 @@
 """
 
 # 将模块功能提升至包级别，可缩短外部import语句
-from .cont_sync_io import HiPerfCrossChassisIO, HiPerfCSIO
+from .cont_sync_io import MultiChasCSIO
 
 # 控制 import * 的行为
 __all__ = [
-    "HiPerfCSIO",
-    "HiPerfCrossChassisIO",
+    "MultiChasCSIO",
 ]

@@ -12,6 +12,7 @@ from .basic_sine import (
     extract_single_tone_information_vvi,
     get_sine,
     get_sine_cycles,
+    get_sine_multi_chs,
 )
 from .filter import (
     detrend_waveform,
@@ -19,6 +20,7 @@ from .filter import (
     filter_waveform,
 )
 from .my_dtypes import (
+    CalibData,
     Point2D,
     PointRawData,
     PointTFData,
@@ -47,6 +49,7 @@ from .waveform_generator import SineGenerator, WaveformGenerator
 # 控制 import * 的行为
 __all__ = [
     "average_sweep_data",
+    "CalibData",
     "PositiveInt",
     "PositiveFloat",
     "SamplingInfo",
@@ -59,6 +62,7 @@ __all__ = [
     "SweepData",
     "get_sine",
     "get_sine_cycles",
+    "get_sine_multi_chs",
     "estimate_sine_args",
     "extract_single_tone_information_vvi",
     "WaveformGenerator",

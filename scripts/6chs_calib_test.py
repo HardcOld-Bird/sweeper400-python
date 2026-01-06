@@ -1,0 +1,75 @@
+"""
+# Caliber 硬件测试脚本
+
+这是一个用于实际硬件测试的脚本，可以直接运行来测试校准功能。
+"""
+
+from sweeper400.analyze import init_sampling_info, init_sine_args
+from sweeper400.use import Caliber
+
+# %% 创建采样信息和正弦波参数（使用推荐的参数）
+sampling_info = init_sampling_info(171500.0, 85750)  # 采样率171.5kHz, 0.5秒
+sine_args = init_sine_args(
+    frequency=3430.0, amplitude=0.01, phase=0.0
+)  # 3430Hz正弦波，波长10cm
+
+# 定义通道配置
+ai_channel = "PXI2Slot2/ai0"
+ao_channels = (
+    "PXI2Slot2/ao0",
+    "PXI2Slot2/ao1",
+    "PXI2Slot3/ao0",
+    "PXI2Slot3/ao1",
+    "PXI3Slot2/ao0",
+    "PXI3Slot2/ao1",
+    "PXI3Slot3/ao0",
+    "PXI3Slot3/ao1",
+)
+
+# 创建校准对象
+caliber = Caliber(
+    ai_channel=ai_channel,
+    ao_channels=ao_channels,
+    sampling_info=sampling_info,
+    sine_args=sine_args,
+)
+
+# %% 执行校准
+# caliber.calibrate(
+#     starts_num=2,
+#     chunks_per_start=3,
+#     result_folder="D:\\EveryoneDownloaded\\before_calib",
+# )
+
+# %% 执行多次校准
+caliber.ex_calibrate(
+    ex_starts_num=6,
+    starts_num=1,
+    chunks_per_start=3,
+    result_folder="D:\\EveryoneDownloaded\\before_calib",
+)
+
+# %% 检查SweepData波形
+# sd = load_sweep_data("D:\\EveryoneDownloaded\\before_calib\\raw_sweep_data.pkl")
+# plot_sweep_waveforms(
+#     sd,
+#     "D:\\EveryoneDownloaded\\caliber_test",
+#     zoom_factor=1,
+# )
+
+# %% 创建验证对象并再次校准
+dangerous_sine_args = init_sine_args(frequency=3430.0, amplitude=200.0, phase=0.0)
+
+caliber = Caliber(
+    ai_channel=ai_channel,
+    ao_channels=ao_channels,
+    sampling_info=sampling_info,
+    sine_args=dangerous_sine_args,
+    calib_data="D:\\EveryoneDownloaded\\before_calib\\calib_data.pkl",
+)
+
+caliber.calibrate(
+    starts_num=2,
+    chunks_per_start=3,
+    result_folder="D:\\EveryoneDownloaded\\after_calib",
+)
