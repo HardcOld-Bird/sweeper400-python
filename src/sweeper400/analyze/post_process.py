@@ -86,7 +86,7 @@ def calculate_transfer_function(
     """
     计算Sweeper采集数据的传递函数
 
-    对每个测量点的原始数据进行处理，计算输入输出信号的传递函数。
+    对每个测量点的原始数据进行处理，计算输入输出信号的复数传递函数 H(ω) = A·e^(jφ)。
     具体步骤：
     1. 若存在多个AI波形chunks，进行按位相加并取平均
     2. 使用extract_single_tone_information_vvi提取AI信号的正弦波参数
@@ -97,7 +97,7 @@ def calculate_transfer_function(
         sweep_data: Sweeper采集的完整测量数据，包含ai_data_list和ao_data
 
     Returns:
-        传递函数结果列表，每个元素包含位置、幅值比和相位差信息
+        传递函数结果列表，每个元素包含位置、绝对幅值比和绝对相位差
 
     Raises:
         ValueError: 当输入数据为空或格式不正确时
@@ -111,8 +111,9 @@ def calculate_transfer_function(
         >>> tf_results = calculate_transfer_function(sweep_data)
         >>> for result in tf_results:
         ...     print(
-        ...         f"位置: {result['position']}, 幅值比: {result['amp_ratio']:.4f}, "
-        ...         f"相位差: {result['phase_shift']:.4f}"
+        ...         f"位置: {result['position']}, "
+        ...         f"幅值比: {result['amp_ratio']:.4f}, "
+        ...         f"相位差: {result['phase_shift']:.4f}rad"
         ...     )
         ```
     """

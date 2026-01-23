@@ -12,16 +12,18 @@ from .basic_sine import (
     extract_single_tone_information_vvi,
     get_sine,
     get_sine_cycles,
-    get_sine_multi_chs,
+    get_sine_multi_ch,
 )
 from .filter import (
     detrend_waveform,
     filter_sweep_data,
     filter_waveform,
 )
+from .general_signal import calib_multi_ch_wf
 from .my_dtypes import (
     CalibData,
     Point2D,
+    PointCompData,
     PointRawData,
     PointTFData,
     PositiveFloat,
@@ -58,11 +60,12 @@ __all__ = [
     "init_sine_args",
     "Waveform",
     "Point2D",
+    "PointCompData",
     "PointRawData",
     "SweepData",
     "get_sine",
     "get_sine_cycles",
-    "get_sine_multi_chs",
+    "get_sine_multi_ch",
     "estimate_sine_args",
     "extract_single_tone_information_vvi",
     "WaveformGenerator",
@@ -77,4 +80,5 @@ __all__ = [
     "plot_sweep_waveforms",
     "filter_waveform",
     "detrend_waveform",
+    "calib_multi_ch_wf",
 ]

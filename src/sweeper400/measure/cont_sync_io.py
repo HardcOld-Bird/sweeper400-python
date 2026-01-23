@@ -19,6 +19,7 @@ from nidaqmx.constants import (
     Edge,
     ExcitationSource,
     RegenerationMode,
+    Signal,
     SoundPressureUnits,
 )
 
@@ -36,36 +37,35 @@ class MultiChasCSIO:
     """
     # 高性能跨机箱连续同步 AI/AO 类
 
-    该类专门用于处理跨机箱的多通道AO输出场景。
-    该类为每个机箱创建独立的AO任务，
-    并使用显式的触发路由来实现跨机箱同步。
+    该类专门用于处理跨机箱的多通道AI/AO场景。
+    该类为每个机箱创建独立的AI和AO任务，
+    并使用StartTrigger导出和接收机制实现跨机箱同步触发。
 
     ## 主要特性：
-        - 支持跨机箱的多通道AO输出
-        - 为每个机箱创建独立的AO任务
-        - 使用DAQmx Connect Terminals显式路由触发信号
-        - 通过PFI物理连线传递触发信号
+        - 支持跨机箱的多通道AI输入和AO输出
+        - 为每个机箱创建独立的AI和AO任务
+        - 使用StartTrigger导出/接收机制实现所有任务的同步触发
         - 硬件同步的连续 AI/AO 任务
         - AI 通道使用麦克风模式
-        - 使用固定输出波形和再生模式
-        - 支持运行时动态启用/禁用AO通道
-        - 基于回调函数的数据处理
+        - 支持两种AO模式：
+          * Static AO：使用再生模式，循环播放固定波形
+          * Feedback AO：使用非再生模式，根据AI数据实时生成输出
+        - 支持运行时动态更换静态输出波形
+        - 基于回调函数的数据处理和反馈控制
         - 线程安全的数据传输控制
 
     ## 跨机箱同步机制：
-        1. 识别AO通道所属的机箱
-        2. 为每个机箱创建独立的AO任务
-        3. 指定AI通道所在机箱为Master机箱
-        4. 使用DAQmx Connect Terminals配置触发路由：
-           - Master机箱的触发信号通过PFI0导出
-           - Slave机箱通过PFI0接收触发信号
-        5. 所有任务使用外部10MHz参考时钟（通过机箱背板的"10 MHz REF IN"接口输入，
+        1. 识别AI和AO通道所属的机箱
+        2. 为每个机箱创建独立的AI、Static AO和Feedback AO任务
+        3. 按优先级选择Master任务
+        （优先级：PXI1Slot2>PXI1Slot3>PXI2Slot2>PXI2Slot3>PXI3Slot2>PXI3Slot3）
+        4. Master任务导出StartTrigger信号到其PFI0接口
+        5. 其他Slave任务从各自机箱的PFI0接口接收触发信号
+        6. 所有任务使用外部10MHz参考时钟（通过机箱背板的"10 MHz REF IN"接口输入，
            自动锁定到各机箱的PXIe_Clk100或PXI_Clk10，实现跨机箱时钟同步）
 
     ## 硬件连线要求：
-        - 触发信号: 所有6个PFI0全部相连（星型拓扑）
-          PXI1Slot2/PFI0 ←→ PXI1Slot3/PFI0 ←→ PXI2Slot2/PFI0 ←→
-          PXI2Slot3/PFI0 ←→ PXI3Slot2/PFI0 ←→ PXI3Slot3/PFI0
+        - 触发信号: 所有板卡的PFI0接口通过线缆相连，用于传递StartTrigger信号
         - 外部参考时钟: 三个机箱的"10 MHz REF IN"接口均接收同步的10MHz时钟信号，
           自动锁定到各机箱的PXIe_Clk100或PXI_Clk10，实现跨机箱时钟同步
 
@@ -73,195 +73,306 @@ class MultiChasCSIO:
     ```python
     from sweeper400.analyze import init_sampling_info, init_sine_args, get_sine_cycles
     from sweeper400.measure.cont_sync_io import MultiChasCSIO
+    import numpy as np
 
-    # 创建采样信息和固定输出波形
+    # 创建采样信息和静态输出波形
     sampling_info = init_sampling_info(48000, 4800)
     sine_args = init_sine_args(1000.0, 0.02, 0.0)
-    output_waveform = get_sine_cycles(sampling_info, sine_args)
+    static_output_waveform = get_sine_cycles(sampling_info, sine_args)
+
+    # 定义反馈函数（根据AI数据生成AO输出）
+    def feedback_function(ai_waveform):
+        # 示例：将AI数据取反并缩放作为AO输出
+        feedback_data = -0.5 * ai_waveform.view(np.ndarray)
+        return Waveform(feedback_data, sampling_rate=ai_waveform.sampling_rate)
 
     # 定义数据导出函数
-    def export_data(ai_waveform, chunks_num):
+    def export_data(ai_waveform, ao_static_waveform, ao_feedback_waveform, chunks_num):
         print(f"导出第 {chunks_num} 段数据")
+        print(f"AI波形shape: {ai_waveform.shape}")
+        print(f"Static AO波形shape: {ao_static_waveform.shape}")
+        if ao_feedback_waveform is not None:
+            print(f"Feedback AO波形shape: {ao_feedback_waveform.shape}")
 
     # 跨机箱多通道示例
     sync_io = MultiChasCSIO(
-        ai_channel="PXI2Slot2/ai0",
-        ao_channels=(
-            "PXI1Slot2/ao0",  # PXIChassis1
-            "PXI2Slot2/ao0",  # PXIChassis2 (Master)
-            "PXI3Slot2/ao0",  # PXIChassis3
+        ai_channels=(
+            "PXI1Slot2/ai0",  # PXIChassis1
+            "PXI2Slot2/ai0",  # PXIChassis2
         ),
-        output_waveform=output_waveform,
-        export_function=export_data
+        ao_channels_static=(
+            "PXI1Slot2/ao0",  # PXIChassis1 - 静态输出
+        ),
+        ao_channels_feedback=(
+            "PXI2Slot2/ao0",  # PXIChassis2 - 反馈输出
+            "PXI3Slot2/ao0",  # PXIChassis3 - 反馈输出
+        ),
+        static_output_waveform=static_output_waveform,
+        feedback_function=feedback_function,
+        export_function=export_data,
+        # 可选：自定义缓冲区配置（如遇到缓冲区溢出警告时）
+        # buffer_size_multiplier=5,  # AI和Feedback AO缓冲区大小倍数，默认5
     )
 
-    # 启动任务
+    # 启动任务（Master任务导出StartTrigger，Slave任务接收）
     sync_io.start()
     sync_io.enable_export = True
 
-    # 动态控制通道状态
-    sync_io.set_ao_channels_status((True, False, True))
+    # 动态更换静态输出波形
+    new_waveform = get_sine_cycles(sampling_info, init_sine_args(2000.0, 0.02, 0.0))
+    sync_io.update_static_output_waveform(new_waveform)
 
     # 停止任务
     sync_io.stop()
     ```
 
     ## 注意事项：
-        - 建议至少一个AO通道位于PXIChassis2（Master机箱）
-        - 所有机箱必须通过PFI连线正确连接
+        - 所有板卡的PFI0接口必须通过线缆相连
+        - 所有机箱必须接收同步的外部10MHz参考时钟
         - 确保PXI Platform Services已正确安装和配置
+        - Master任务按优先级自动选择
+            （PXI1Slot2>PXI1Slot3>PXI2Slot2>PXI2Slot3>PXI3Slot2>PXI3Slot3）
+        - feedback_function必须返回与feedback_ao_channels数量匹配的Waveform对象
+        - Static AO和Feedback AO通道至少要有一个非空
     """
 
     def __init__(
         self,
-        ai_channel: str,
-        ao_channels: tuple[str, ...],
-        output_waveform: Waveform,
-        export_function: Callable[[Waveform, PositiveInt], Any],
+        ai_channels: tuple[str, ...],
+        ao_channels_static: tuple[str, ...],
+        ao_channels_feedback: tuple[str, ...],
+        static_output_waveform: Waveform,
+        feedback_function: Callable[[Waveform], Waveform],
+        export_function: Callable[[Waveform, Waveform, Waveform, PositiveInt], Any],
+        buffer_size_multiplier: PositiveInt = 5,
     ):
         """
         初始化跨机箱连续同步 AI/AO 任务
 
         Args:
-            ai_channel: AI 通道名称（例如 "PXI1Slot2/ai0"）
-            ao_channels: AO 通道名称元组（例如 ("PXI1Slot2/ao0", "PXI2Slot2/ao0")）
-            output_waveform: 输出波形对象（Waveform类型）
-            export_function: 数据导出函数，接收 (ai_waveform, chunks_num) 参数
+            ai_channels: AI 通道名称元组（例如 ("PXI1Slot2/ai0", "PXI2Slot2/ai0")）
+            ao_channels_static: 静态AO通道名称元组，使用再生模式
+                （例如 ("PXI1Slot2/ao0",)）
+            ao_channels_feedback: 反馈AO通道名称元组，使用非再生模式
+                （例如 ("PXI2Slot2/ao0",)）
+            static_output_waveform: 静态输出波形对象（Waveform类型），
+                用于static_ao_channels
+            feedback_function: 反馈函数，接收AI数据（多通道Waveform），
+                返回feedback AO数据（多通道Waveform）
+            export_function: 数据导出函数，接收 (ai_waveform, ao_static_waveform,
+                ao_feedback_waveform, chunks_num) 参数。
+                其中ao_static_waveform是当前的静态输出波形，
+                ao_feedback_waveform是当前的反馈输出波形（如果没有反馈通道则为None）
+            buffer_size_multiplier: AI和Feedback AO缓冲区大小倍数
+                （相对于static_output_waveform.samples_num），
+                默认为5。增大此值可减少缓冲区溢出风险，但会增加内存占用。
 
         Raises:
             ValueError: 当参数无效时
         """
         # 验证参数
-        if not ai_channel:
-            raise ValueError("AI 通道名称不能为空")
-        if not ao_channels:
-            raise ValueError("AO 通道列表不能为空")
-        if output_waveform.samples_num == 0:
-            raise ValueError("输出波形不能为空")
+        if not ai_channels:
+            raise ValueError("AI 通道列表不能为空")
+        if not ao_channels_static and not ao_channels_feedback:
+            raise ValueError("Static AO 通道和 Feedback AO 通道不能同时为空")
+        if static_output_waveform.samples_num == 0:
+            raise ValueError("静态输出波形不能为空")
 
-        # 公共属性
-        self._ai_channel = ai_channel
-        self._ao_channels = ao_channels
+        # 公共属性 - 函数
         self._export_function = export_function
+        self._feedback_function = feedback_function
 
-        # 处理输出波形
-        # 如果输出波形是单通道，需要扩展为多通道
-        if output_waveform.channels_num == 1 and len(ao_channels) > 1:
-            logger.info(f"输出波形为单通道，将扩展为 {len(ao_channels)} 通道")
-            # 创建多通道波形：将单通道波形复制到所有通道
-            expanded_data = np.tile(output_waveform, (len(ao_channels), 1))
-
-            self._output_waveform = Waveform(
-                expanded_data,
-                sampling_rate=output_waveform.sampling_rate,
-                timestamp=output_waveform.timestamp,
-                id=output_waveform.id,
-                sine_args=output_waveform.sine_args,
-            )
-        else:
-            self._output_waveform = output_waveform
-
-        # 验证波形通道数与AO通道数匹配
-        if self._output_waveform.channels_num != len(ao_channels):
-            raise ValueError(
-                f"输出波形通道数 ({self._output_waveform.channels_num}) "
-                f"与 AO 通道数 ({len(ao_channels)}) 不匹配"
-            )
+        # 缓冲区配置参数
+        self._buffer_size_multiplier = buffer_size_multiplier
 
         # 采样信息
-        self._sampling_info = output_waveform.sampling_info
+        self._sampling_info = static_output_waveform.sampling_info
 
-        logger.info(
-            f"MultiChasCSIO 实例已创建 - "
-            f"AI: {ai_channel}, "
-            f"AO通道数: {len(ao_channels)}, "
-            f"AO: {ao_channels}, "
-            f"输出波形shape: {self._output_waveform.shape}, "
-            f"采样率: {self._sampling_info['sampling_rate']} Hz"
-        )
+        # 私有属性 - 通道信息（统一的数据结构）
+        # _channels_info: 包含 "ai", "ao_static", "ao_feedback" 三个键
+        # 每个键的值是一个字典：机箱名 -> 该机箱的物理通道字符串列表
+        self._channels_info: dict[str, dict[str, list[str]]] = {
+            "ai": {},
+            "ao_static": {},
+            "ao_feedback": {},
+        }
 
-        # 私有属性 - 任务和状态管理
-        self._ai_task: nidaqmx.Task | None = None
-        self._ao_tasks: dict[str, nidaqmx.Task] = {}  # 机箱名称 -> AO任务
-        self._trigger_routes: list[tuple[str, str]] = []  # 触发路由列表
+        # 私有属性 - 任务管理（统一的数据结构）
+        # _tasks: 包含 "ai", "ao_static", "ao_feedback" 三个键
+        # 每个键的值是一个字典：机箱名 -> nidaqmx.Task
+        self._tasks: dict[str, dict[str, nidaqmx.Task]] = {
+            "ai": {},
+            "ao_static": {},
+            "ao_feedback": {},
+        }
+
+        # 私有属性 - 状态管理
         self._is_running = False
         self._callback_lock = threading.Lock()
         self._worker_thread: threading.Thread | None = None
-        self._stop_event = threading.Event()
         self._data_ready_event = threading.Event()
+        self._stop_event = threading.Event()
 
         # 私有属性 - 数据缓冲和控制
-        self._data_buffer: deque[Waveform] = deque(maxlen=10)
+        self._ai_queue: deque[dict[str, Any]] = deque()  # 存储AI数据包
         self._chunks_num = 0
         self._enable_export = False
+        self._ai_tasks_num = 0  # AI任务总数，用于工作线程判断何时处理数据
 
-        # 私有属性 - AO通道状态控制（默认全部禁用）
-        self._ao_channels_status = np.zeros(len(ao_channels), dtype=bool)
-        self._ao_channels_status_lock = threading.RLock()  # 使用可重入锁避免死锁
+        # 将输入通道信息预处理为统一的内置数据结构
+        # 分组AI通道
+        self._init_group_channels_by_type(ai_channels, self._channels_info["ai"], "AI")
 
-        # 私有属性 - 机箱分组信息
-        self._chassis_groups: dict[str, list[int]] = {}  # 机箱名称 -> 通道索引列表
+        # 分组Static AO通道
+        self._init_group_channels_by_type(
+            ao_channels_static, self._channels_info["ao_static"], "Static AO"
+        )
 
-        # Master机箱（自动确定为AI通道所在的机箱）
-        # 必须在调用_group_ao_channels()之前设置
-        ai_device = ai_channel.split("/")[0]  # 例如 "PXI1Slot2"
-        # 从设备名称提取机箱名称（例如 "PXI1Slot2" -> "PXIChassis1"）
-        if "PXI1" in ai_device:
-            self._master_chassis = "PXIChassis1"
-        elif "PXI2" in ai_device:
-            self._master_chassis = "PXIChassis2"
-        elif "PXI3" in ai_device:
-            self._master_chassis = "PXIChassis3"
-        else:
-            # 默认使用PXIChassis2
-            self._master_chassis = "PXIChassis2"
-            logger.warning(
-                f"无法从AI通道 {ai_channel} 确定机箱，使用默认Master: {self._master_chassis}"
+        # 分组Feedback AO通道
+        self._init_group_channels_by_type(
+            ao_channels_feedback, self._channels_info["ao_feedback"], "Feedback AO"
+        )
+
+        # 处理静态输出波形（在_channels_info初始化完成之后）
+        if ao_channels_static:
+            self._static_output_waveform = self._process_waveform_for_channels(
+                static_output_waveform
             )
+        else:
+            self._static_output_waveform = static_output_waveform
 
-        logger.info(f"Master机箱已确定为: {self._master_chassis} (AI通道所在机箱)")
+        # 输出初始化完成日志
+        logger.info(
+            f"MultiChasCSIO 实例已创建 - "
+            f"AI通道数: {len(ai_channels)}, "
+            f"AI: {ai_channels}, "
+            f"Static AO通道数: {len(ao_channels_static)}, "
+            f"Static AO: {ao_channels_static}, "
+            f"Feedback AO通道数: {len(ao_channels_feedback)}, "
+            f"Feedback AO: {ao_channels_feedback}, "
+            f"静态输出波形shape: {self._static_output_waveform.shape}, "
+            f"采样率: {self._sampling_info['sampling_rate']} Hz, "
+            f"缓冲区倍数: {buffer_size_multiplier}"
+        )
 
-        # 识别并分组AO通道
-        self._group_ao_channels()
-
-    def _group_ao_channels(self):
+    @staticmethod
+    def _init_group_channels_by_type(
+        channels: tuple[str, ...],
+        chassis_groups: dict[str, list[str]],
+        channel_type: str,
+    ):
         """
-        将AO通道按机箱分组
+        将指定类型的通道按机箱分组（静态方法）
 
-        解析通道名称，识别所属机箱，并建立机箱到通道索引的映射。
+        Args:
+            channels: 通道名称元组
+            chassis_groups: 机箱分组字典（将被修改），键为机箱名，值为物理通道字符串列表
+            channel_type: 通道类型名称（用于日志）
         """
-        for idx, channel in enumerate(self._ao_channels):
-            # 解析通道名称，例如 "PXI1Slot2/ao0"
+        for channel in channels:
+            # 从通道名称中提取机箱名称
             device = channel.split("/")[0]
+            chassis_name = None
 
             # 提取机箱编号
             if device.startswith("PXI") and "Slot" in device:
                 chassis_num = device[3]  # 提取 "PXI1Slot2" 中的 "1"
                 chassis_name = f"PXIChassis{chassis_num}"
 
-                if chassis_name not in self._chassis_groups:
-                    self._chassis_groups[chassis_name] = []
-
-                self._chassis_groups[chassis_name].append(idx)
+            if chassis_name:
+                if chassis_name not in chassis_groups:
+                    chassis_groups[chassis_name] = []
+                chassis_groups[chassis_name].append(channel)  # 存储物理通道字符串
             else:
-                logger.warning(f"无法识别通道 {channel} 的机箱信息，将被忽略")
+                logger.warning(
+                    f"无法识别{channel_type}通道 {channel} 的机箱信息，将被忽略"
+                )
 
         logger.info(
-            f"AO通道分组完成，共 {len(self._chassis_groups)} 个机箱: "
-            f"{list(self._chassis_groups.keys())}"
+            f"{channel_type}通道分组完成，共 {len(chassis_groups)} 个机箱: "
+            f"{list(chassis_groups.keys())}"
         )
 
-        # 检查是否包含Master机箱
-        if self._master_chassis not in self._chassis_groups:
-            logger.warning(
-                f"未检测到Master机箱 {self._master_chassis}，"
-                f"建议至少一个AO通道位于Master机箱以获得最佳同步性能"
+    def _process_waveform_for_channels(
+        self,
+        waveform: Waveform,
+    ) -> Waveform:
+        """
+        处理波形以匹配通道要求（单通道扩展/补充通道信息/检查匹配）
+
+        从self._channels_info["ao_static"]自动获取目标通道名称。
+
+        Args:
+            waveform: 输入波形对象
+
+        Returns:
+            处理后的波形对象
+
+        Raises:
+            ValueError: 当波形通道数与目标通道数不匹配时
+        """
+        # 从self._channels_info["ao_static"]获取所有静态AO通道列表
+        all_ao_static_channels = []
+        for channels in self._channels_info["ao_static"].values():
+            all_ao_static_channels.extend(channels)
+
+        channel_names = tuple(all_ao_static_channels)
+        channels_num = len(channel_names)
+
+        # 如果输出波形是单通道，需要扩展为多通道
+        if waveform.channels_num == 1 and channels_num > 1:
+            logger.info(f"静态输出波形为单通道，将扩展为 {channels_num} 通道")
+            # 创建多通道波形：将单通道波形复制到所有通道
+            expanded_data = np.tile(waveform, (channels_num, 1))
+
+            return Waveform(
+                expanded_data,
+                sampling_rate=waveform.sampling_rate,
+                channel_names=channel_names,  # 添加通道名称元数据
+                timestamp=waveform.timestamp,
+                id=waveform.id,
+                sine_args=waveform.sine_args,
             )
+        else:
+            # 如果波形已经是多通道，检查是否需要添加channel_names
+            if waveform.channels_num == channels_num and waveform.channel_names is None:
+                # 添加通道名称元数据
+                return Waveform(
+                    waveform,
+                    sampling_rate=waveform.sampling_rate,
+                    channel_names=channel_names,
+                    timestamp=waveform.timestamp,
+                    id=waveform.id,
+                    sine_args=waveform.sine_args,
+                )
+            elif waveform.channels_num == channels_num:
+                # 通道数匹配且已有channel_names，直接返回
+                return waveform
+            else:
+                # 通道数不匹配，抛出错误
+                raise ValueError(
+                    f"静态输出波形通道数 ({waveform.channels_num}) "
+                    f"与目标通道数 ({channels_num}) 不匹配"
+                )
 
     @property
-    def ao_channels_num(self) -> int:
-        """AO 通道数量"""
-        return len(self._ao_channels)
+    def ai_channels_num(self) -> int:
+        """AI 通道数量"""
+        return sum(len(channels) for channels in self._channels_info["ai"].values())
+
+    @property
+    def ao_channels_num_static(self) -> int:
+        """Static AO 通道数量"""
+        return sum(
+            len(channels) for channels in self._channels_info["ao_static"].values()
+        )
+
+    @property
+    def ao_channels_num_feedback(self) -> int:
+        """Feedback AO 通道数量"""
+        return sum(
+            len(channels) for channels in self._channels_info["ao_feedback"].values()
+        )
 
     @property
     def enable_export(self) -> bool:
@@ -270,126 +381,91 @@ class MultiChasCSIO:
 
     @enable_export.setter
     def enable_export(self, value: bool):
-        """设置数据导出使能状态"""
+        """设置数据导出启用状态"""
         self._enable_export = value
         if value:
             logger.info("数据导出已启用")
         else:
             logger.info("数据导出已禁用")
 
-    def get_ao_channels_status(self) -> tuple[bool, ...]:
+    def update_static_output_waveform(self, new_waveform: Waveform):
         """
-        获取所有AO通道的启用状态
+        更新静态输出波形
 
-        Returns:
-            包含所有通道状态的元组，True表示启用，False表示禁用
-        """
-        with self._ao_channels_status_lock:
-            return tuple(self._ao_channels_status)
-
-    def set_ao_channels_status(self, status: tuple[bool, ...]):
-        """
-        设置AO通道的启用状态
+        在任务运行中动态更换static_output_waveform。
+        该方法仅会更新所有Static AO任务的波形数据。
 
         Args:
-            status: 通道状态元组，长度必须与AO通道数量相同
+            new_waveform: 新的静态输出波形对象（Waveform类型）
 
         Raises:
-            ValueError: 当状态元组长度不匹配时
+            ValueError: 当波形参数无效时
             RuntimeError: 当任务未运行时
         """
-        if len(status) != len(self._ao_channels):
-            raise ValueError(
-                f"状态元组长度 ({len(status)}) 与 AO 通道数 ({len(self._ao_channels)}) 不匹配"
+        if not self._is_running:
+            raise RuntimeError("任务未运行，无法更新输出波形")
+
+        if new_waveform.samples_num == 0:
+            raise ValueError("输出波形不能为空")
+
+        # 处理输出波形（单通道扩展/补充通道信息/检查匹配）
+        processed_waveform = self._process_waveform_for_channels(new_waveform)
+
+        # 验证采样率是否匹配
+        if processed_waveform.sampling_rate != self._sampling_info["sampling_rate"]:
+            logger.warning(
+                f"新波形采样率 ({processed_waveform.sampling_rate} Hz) "
+                f"与原采样率 ({self._sampling_info['sampling_rate']} Hz) 不匹配"
             )
 
-        if not self._is_running:
-            raise RuntimeError("任务未运行，无法设置通道状态")
+        # 更新内部波形
+        self._static_output_waveform = processed_waveform
 
-        with self._ao_channels_status_lock:
-            old_status = self._ao_channels_status.copy()
-            self._ao_channels_status = np.array(status, dtype=bool)
-
-            # 检查哪些通道状态发生了变化
-            changed_indices = np.where(old_status != self._ao_channels_status)[0]
-
-            if len(changed_indices) > 0:
-                logger.info(
-                    f"AO通道状态已更新: {list(status)}, "
-                    f"变化的通道索引: {list(changed_indices)}"
+        # 更新所有Static AO任务的波形数据
+        for chassis_name in self._tasks["ao_static"].keys():
+            try:
+                self._write_ao_task_waveform_static(chassis_name)
+                logger.info(f"机箱 {chassis_name} 的静态输出波形已更新")
+            except Exception as e:
+                logger.error(
+                    f"更新机箱 {chassis_name} 静态波形失败: {e}",
+                    exc_info=True,
                 )
+                raise
 
-                # 更新所有AO任务的波形
-                self._update_all_ao_waveforms()
-            else:
-                logger.debug("AO通道状态未发生变化")
+        logger.info(
+            f"静态输出波形已更新 - shape: {self._static_output_waveform.shape}, "
+            f"采样率: {self._static_output_waveform.sampling_rate} Hz"
+        )
 
-    def _setup_ai_task(self):
+    def _setup_ai_tasks(self):
         """
-        配置 AI 任务
+        为每个机箱创建并配置独立的AI任务
 
         配置为麦克风模式，使用 IEPE 激励电流。
         """
-        if self._ai_task is None:
-            logger.error("AI 任务未创建", exc_info=True)
-            raise RuntimeError("AI 任务未创建")
+        logger.info("开始为每个机箱创建独立的AI任务")
 
-        logger.debug("配置 MultiChasCSIO AI 任务")
+        # 记录AI任务总数
+        self._ai_tasks_num = len(self._channels_info["ai"])
 
-        # 添加 AI 通道（麦克风模式）
-        self._ai_task.ai_channels.add_ai_microphone_chan(  # type: ignore
-            self._ai_channel,
-            units=SoundPressureUnits.PA,
-            mic_sensitivity=0.004,
-            max_snd_press_level=120.0,
-            current_excit_source=ExcitationSource.INTERNAL,
-            current_excit_val=0.004,
-        )
-
-        # 配置时钟源和采样
-        # 不显式设置ref_clk_src，使用默认值（None）
-        # 外部10MHz时钟通过机箱背板的"10 MHz REF IN"接口输入后，
-        # 会自动锁定到PXIe_Clk100（对于PXIe设备）或PXI_Clk10（对于PXI设备）
-        # 所有机箱的参考时钟都会锁定到外部10MHz参考时钟，实现跨机箱时钟同步
-        self._ai_task.timing.cfg_samp_clk_timing(  # type: ignore
-            rate=self._sampling_info["sampling_rate"],
-            sample_mode=AcquisitionType.CONTINUOUS,
-        )
-
-        # 配置缓冲区大小
-        buffer_size = self._output_waveform.samples_num * 2
-        self._ai_task.in_stream.input_buf_size = buffer_size
-        logger.debug(f"设置 AI 缓冲区大小: {buffer_size} 样本")
-
-        # 注册回调函数
-        self._ai_task.register_every_n_samples_acquired_into_buffer_event(  # type: ignore
-            self._output_waveform.samples_num, self._ai_callback
-        )
-
-        logger.debug("MultiChasCSIO AI 任务配置完成")
-
-    def _setup_ao_tasks(self):
-        """
-        为每个机箱创建并配置独立的AO任务
-
-        这是跨机箱同步的关键：为每个机箱创建独立的AO任务，
-        避免DAQmx尝试在不同机箱之间自动路由触发信号。
-        """
-        logger.info("开始为每个机箱创建独立的AO任务")
-
-        for chassis_name, channel_indices in self._chassis_groups.items():
+        for chassis_name, channel_names in self._channels_info["ai"].items():
             # 创建任务
-            task_name = f"ContSyncAO_{chassis_name}"
-            ao_task = nidaqmx.Task(task_name)
-            self._ao_tasks[chassis_name] = ao_task
+            task_name = f"ContSyncAI_{chassis_name}"
+            ai_task = nidaqmx.Task(task_name)
+            self._tasks["ai"][chassis_name] = ai_task
 
-            logger.debug(f"为机箱 {chassis_name} 创建AO任务: {task_name}")
+            logger.debug(f"为机箱 {chassis_name} 创建AI任务: {task_name}")
 
-            # 添加该机箱的所有AO通道
-            for idx in channel_indices:
-                channel_name = self._ao_channels[idx]
-                ao_task.ao_channels.add_ao_voltage_chan(  # type: ignore
-                    channel_name, min_val=-10.0, max_val=10.0
+            # 添加该机箱的所有AI通道（麦克风模式）
+            for channel_name in channel_names:
+                ai_task.ai_channels.add_ai_microphone_chan(  # type: ignore
+                    channel_name,
+                    units=SoundPressureUnits.PA,
+                    mic_sensitivity=0.004,
+                    max_snd_press_level=120.0,
+                    current_excit_source=ExcitationSource.INTERNAL,
+                    current_excit_val=0.004,
                 )
                 logger.debug(f"  添加通道: {channel_name}")
 
@@ -398,261 +474,421 @@ class MultiChasCSIO:
             # 外部10MHz时钟通过机箱背板的"10 MHz REF IN"接口输入后，
             # 会自动锁定到PXIe_Clk100（对于PXIe设备）或PXI_Clk10（对于PXI设备）
             # 所有机箱的参考时钟都会锁定到外部10MHz参考时钟，实现跨机箱时钟同步
+            ai_task.timing.cfg_samp_clk_timing(  # type: ignore
+                rate=self._sampling_info["sampling_rate"],
+                sample_mode=AcquisitionType.CONTINUOUS,
+            )
+
+            # 配置缓冲区大小（使用可配置的倍数）
+            buffer_size = (
+                self._static_output_waveform.samples_num * self._buffer_size_multiplier
+            )
+            ai_task.in_stream.input_buf_size = buffer_size
+            logger.debug(f"  设置AI缓冲区大小: {buffer_size} 样本")
+
+            # 注册回调函数（使用闭包捕获chassis_name）
+            callback_samples = self._static_output_waveform.samples_num
+
+            def make_callback(chassis_name_captured: str):
+                """创建回调函数的工厂函数"""
+
+                def callback(task_handle, event_type, num_samples, callback_data):  # type: ignore
+                    return self._ai_callback(
+                        chassis_name_captured,
+                        task_handle,
+                        event_type,
+                        num_samples,
+                        callback_data,
+                    )
+
+                return callback
+
+            ai_task.register_every_n_samples_acquired_into_buffer_event(  # type: ignore
+                callback_samples, make_callback(chassis_name)
+            )
+
+        logger.info(f"成功创建 {len(self._tasks['ai'])} 个AI任务")
+
+    def _setup_ao_tasks(self, task_type: str):
+        """
+        为每个机箱创建并配置独立的AO任务（通用方法）
+
+        Args:
+            task_type: 任务类型键名（"ao_static"或"ao_feedback"）
+        """
+        # 从 _channels_info 和 _tasks 中获取相应的数据结构
+        chassis_groups = self._channels_info[task_type]
+        tasks_dict = self._tasks[task_type]
+
+        if not chassis_groups:
+            logger.info(f"没有{task_type} AO通道，跳过{task_type} AO任务创建")
+            return
+
+        # 根据 task_type 确定配置参数
+        if task_type == "ao_static":
+            regeneration_mode = RegenerationMode.ALLOW_REGENERATION
+            buffer_size_multiplier = 1
+            task_name_prefix = "ContSyncStaticAO"
+        elif task_type == "ao_feedback":
+            regeneration_mode = RegenerationMode.DONT_ALLOW_REGENERATION
+            buffer_size_multiplier = self._buffer_size_multiplier
+            task_name_prefix = "ContSyncFeedbackAO"
+        else:
+            raise ValueError(f"不支持的任务类型: {task_type}")
+
+        logger.info(f"开始为每个机箱创建独立的{task_type} AO任务")
+
+        for chassis_name, channel_names in chassis_groups.items():
+            # 创建任务
+            task_name = f"{task_name_prefix}_{chassis_name}"
+            ao_task = nidaqmx.Task(task_name)
+            tasks_dict[chassis_name] = ao_task
+
+            logger.debug(f"为机箱 {chassis_name} 创建{task_type} AO任务: {task_name}")
+
+            # 添加该机箱的所有AO通道
+            for channel_name in channel_names:
+                ao_task.ao_channels.add_ao_voltage_chan(  # type: ignore
+                    channel_name, min_val=-10.0, max_val=10.0
+                )
+                logger.debug(f"  添加通道: {channel_name}")
+
+            # 配置时钟源和采样
             ao_task.timing.cfg_samp_clk_timing(  # type: ignore
                 rate=self._sampling_info["sampling_rate"],
                 sample_mode=AcquisitionType.CONTINUOUS,
             )
 
             # 设置再生模式
-            ao_task.out_stream.regen_mode = RegenerationMode.ALLOW_REGENERATION
+            ao_task.out_stream.regen_mode = regeneration_mode
 
             # 设置缓冲区大小
-            buffer_size = self._output_waveform.samples_num
+            buffer_size = (
+                self._static_output_waveform.samples_num * buffer_size_multiplier
+            )
             ao_task.out_stream.output_buf_size = buffer_size
-            logger.debug(f"  设置缓冲区大小: {buffer_size} 样本")
+            logger.debug(f"  设置{task_type} AO缓冲区大小: {buffer_size} 样本")
 
-            # 写入该机箱的波形数据
-            self._write_ao_task_waveform(chassis_name, ao_task, channel_indices)
+            # 预写入波形数据
+            if task_type == "ao_static":
+                # Static AO: 写入静态输出波形
+                self._write_ao_task_waveform_static(chassis_name)
+            elif task_type == "ao_feedback":
+                # Feedback AO: 写入全0静音波形
+                self._write_ao_task_waveform_feedback_silence(chassis_name)
 
-        logger.info(f"成功创建 {len(self._ao_tasks)} 个AO任务")
+        logger.info(f"成功创建 {len(tasks_dict)} 个{task_type} AO任务")
 
-    def _write_ao_task_waveform(
-        self,
-        chassis_name: str,
-        ao_task: nidaqmx.Task,
-        channel_indices: list[int],
-    ):
+    def _write_ao_task_waveform_static(self, chassis_name: str):
         """
-        向指定的AO任务写入波形数据
+        向指定的Static AO任务写入波形数据
 
         Args:
             chassis_name: 机箱名称
-            ao_task: AO任务对象
-            channel_indices: 该任务包含的通道索引列表
         """
         try:
+            # 从内部数据结构获取任务和通道信息
+            ao_task = self._tasks["ao_static"][chassis_name]
+            channel_names = self._channels_info["ao_static"][chassis_name]
+
+            # 获取所有 static AO 通道的完整列表（从 channel_names 元数据）
+            all_channel_names = self._static_output_waveform.channel_names
+            if all_channel_names is None:
+                raise ValueError("静态输出波形缺少 channel_names 元数据")
+
+            # 找到当前机箱通道在完整列表中的索引
+            channel_indices = [all_channel_names.index(ch) for ch in channel_names]
+
             # 提取该机箱的通道波形
             # Waveform是ndarray的子类，需要根据波形维度和通道数量正确索引
-            if self._output_waveform.ndim == 1:
+            if self._static_output_waveform.ndim == 1:
                 # 输出波形是一维的（单通道）
                 if len(channel_indices) == 1:
                     # 单通道任务：直接使用整个波形
-                    chassis_waveform = np.asarray(self._output_waveform)
+                    chassis_waveform = np.asarray(self._static_output_waveform)
                 else:
                     # 理论上不应该到这里，因为__init__中已经处理过
                     logger.warning("一维波形但有多个通道索引，这不应该发生")
-                    chassis_waveform = np.asarray(self._output_waveform)
+                    chassis_waveform = np.asarray(self._static_output_waveform)
             else:
                 # 输出波形是二维的（多通道）
                 if len(channel_indices) == 1:
                     # 单通道任务：提取一维数组
                     chassis_waveform = np.asarray(
-                        self._output_waveform[channel_indices[0], :]
+                        self._static_output_waveform[channel_indices[0], :]
                     )
                 else:
                     # 多通道任务：提取二维数组
                     chassis_waveform = np.asarray(
-                        self._output_waveform[channel_indices, :]
+                        self._static_output_waveform[channel_indices, :]
                     )
-
-            # 应用通道状态（禁用的通道输出零）
-            # 需要创建副本以避免修改原始波形
-            chassis_waveform = chassis_waveform.copy()
-            with self._ao_channels_status_lock:
-                for i, global_idx in enumerate(channel_indices):
-                    if not self._ao_channels_status[global_idx]:
-                        if len(channel_indices) == 1:
-                            chassis_waveform[:] = 0.0
-                        else:
-                            chassis_waveform[i, :] = 0.0
 
             # 写入数据
             ao_task.write(chassis_waveform, auto_start=False)  # type: ignore
             logger.debug(
-                f"成功写入机箱 {chassis_name} 的波形数据，"
+                f"成功写入机箱 {chassis_name} 的静态波形数据，"
                 f"shape: {chassis_waveform.shape}"
             )
 
         except Exception as e:
-            logger.error(f"机箱 {chassis_name} 波形写入失败: {e}", exc_info=True)
+            logger.error(f"机箱 {chassis_name} 静态波形写入失败: {e}", exc_info=True)
             raise
 
-    def _update_all_ao_waveforms(self):
+    def _write_ao_task_waveform_feedback_silence(self, chassis_name: str):
         """
-        更新所有AO任务的波形数据
+        向指定的Feedback AO任务写入全0静音波形
 
-        用于动态控制通道状态时更新输出波形。
+        注意：此方法一次性写入2个chunk长度的静音波形。
+        这是因为所有AI和AO任务同步开始，当AO输出一个chunk时，
+        AI任务才刚刚返回第一段采集到的chunk，而此时反馈AO任务的缓冲区已经空了。
+        我们必须先为反馈AO任务写入2个chunk，这样我们才有足够的时间处理反馈逻辑，
+        并写入反馈AO缓冲区。
+
+        Args:
+            chassis_name: 机箱名称
         """
-        for chassis_name, ao_task in self._ao_tasks.items():
-            channel_indices = self._chassis_groups[chassis_name]
-            try:
-                self._write_ao_task_waveform(chassis_name, ao_task, channel_indices)
-            except Exception as e:
-                logger.error(
-                    f"更新机箱 {chassis_name} 波形失败: {e}",
-                    exc_info=True,
+        try:
+            # 从内部数据结构获取任务和通道信息
+            ao_task = self._tasks["ao_feedback"][chassis_name]
+            channel_names = self._channels_info["ao_feedback"][chassis_name]
+
+            # 创建全0静音波形（2个chunk长度）
+            samples_num = self._static_output_waveform.samples_num * 2  # 2个chunk
+            channels_num = len(channel_names)
+
+            if channels_num == 1:
+                # 单通道：一维数组
+                silence_waveform = np.zeros(samples_num, dtype=np.float64)
+            else:
+                # 多通道：二维数组
+                silence_waveform = np.zeros(
+                    (channels_num, samples_num), dtype=np.float64
                 )
 
-    def _setup_cross_chassis_trigger_routing(self):
-        """
-        配置跨机箱触发路由
+            # 写入数据
+            ao_task.write(silence_waveform, auto_start=False)  # type: ignore
+            logger.debug(
+                f"成功写入机箱 {chassis_name} 的静音波形数据（2个chunk），"
+                f"shape: {silence_waveform.shape}"
+            )
 
-        这是跨机箱同步的核心：使用DAQmx Connect Terminals显式配置
-        触发信号的路由路径，通过PFI物理连线传递触发信号。
+        except Exception as e:
+            logger.error(f"机箱 {chassis_name} 静音波形写入失败: {e}", exc_info=True)
+            raise
+
+    def _write_ao_task_waveform_feedback(
+        self, chassis_name: str, feedback_waveform: Waveform
+    ):
+        """
+        向指定的Feedback AO任务写入波形数据
+
+        Args:
+            chassis_name: 机箱名称
+            feedback_waveform: 反馈波形数据（包含所有feedback通道）
+        """
+        try:
+            # 从内部数据结构获取任务和通道信息
+            ao_task = self._tasks["ao_feedback"][chassis_name]
+            channel_names = self._channels_info["ao_feedback"][chassis_name]
+
+            # 获取所有 feedback AO 通道的完整列表（从 channel_names 元数据）
+            all_channel_names = feedback_waveform.channel_names
+            if all_channel_names is None:
+                raise ValueError("反馈波形缺少 channel_names 元数据")
+
+            # 找到当前机箱通道在完整列表中的索引
+            channel_indices = [all_channel_names.index(ch) for ch in channel_names]
+
+            # 提取该机箱的通道波形
+            if feedback_waveform.ndim == 1:
+                # 输出波形是一维的（单通道）
+                if len(channel_indices) == 1:
+                    # 单通道任务：直接使用整个波形
+                    chassis_waveform = np.asarray(feedback_waveform)
+                else:
+                    logger.warning("一维波形但有多个通道索引，这不应该发生")
+                    chassis_waveform = np.asarray(feedback_waveform)
+            else:
+                # 输出波形是二维的（多通道）
+                if len(channel_indices) == 1:
+                    # 单通道任务：提取一维数组
+                    chassis_waveform = np.asarray(
+                        feedback_waveform[channel_indices[0], :]
+                    )
+                else:
+                    # 多通道任务：提取二维数组
+                    chassis_waveform = np.asarray(feedback_waveform[channel_indices, :])
+
+            # 写入数据
+            ao_task.write(chassis_waveform, auto_start=False)  # type: ignore
+            logger.debug(
+                f"成功写入机箱 {chassis_name} 的反馈波形数据，"
+                f"shape: {chassis_waveform.shape}"
+            )
+
+        except Exception as e:
+            logger.error(f"机箱 {chassis_name} 反馈波形写入失败: {e}", exc_info=True)
+            raise
+
+    def _collect_devices_from_tasks(self) -> set[str]:
+        """
+        从所有任务中收集设备信息，用于确认哪些机箱被真正使用
+
+        Returns:
+            all_devices: 所有设备集合
+        """
+        all_devices: set[str] = set()
+
+        # 遍历所有三类任务
+        for task_type in ["ai", "ao_static", "ao_feedback"]:
+            chassis_groups = self._channels_info[task_type]
+
+            for chassis_name in chassis_groups.keys():
+                # 检查该机箱的通道，提取设备名
+                channel_names = chassis_groups[chassis_name]
+                if channel_names:
+                    # 从第一个通道名提取设备名
+                    channel_name = channel_names[0]
+                    device = channel_name.split("/")[
+                        0
+                    ]  # 例如 "PXI1Slot2/ai0" -> "PXI1Slot2"
+                    all_devices.add(device)
+
+        return all_devices
+
+    @staticmethod
+    def _configure_slave_trigger_with_pfi(
+        task: nidaqmx.Task, chassis_name: str, task_name: str
+    ):
+        """
+        配置Slave任务的触发源（自动获取PFI终端）
+
+        Args:
+            task: 任务对象
+            chassis_name: 机箱名称（例如 "PXIChassis1"）
+            task_name: 任务名称（用于日志）
+        """
+        # 获取指定机箱的PFI0终端名称
+        chassis_num = chassis_name[-1]  # 提取 "PXIChassis1" 中的 "1"
+        pfi_device = f"PXI{chassis_num}Slot2"
+        pfi_terminal = f"/{pfi_device}/PFI0"
+
+        # 配置触发源
+        task.triggers.start_trigger.cfg_dig_edge_start_trig(  # type: ignore
+            pfi_terminal, trigger_edge=Edge.RISING
+        )
+        logger.info(f"Slave任务 {task_name} 配置为从 {pfi_terminal} 接收触发")
+
+    def _setup_start_trigger_sync(self):
+        """
+        配置StartTrigger导出和接收同步
+
+        使用Master/Slave模式实现跨机箱同步触发。
+        Master任务导出StartTrigger到PFI0，Slave任务从PFI0接收触发信号。
+
+        Master任务选择优先级（按板卡名称）：
+        PXI1Slot2 > PXI1Slot3 > PXI2Slot2 > PXI2Slot3 > PXI3Slot2 > PXI3Slot3
 
         策略：
-        1. 确定Master机箱和Slave机箱
-        2. Master机箱的AO任务使用AI任务的StartTrigger作为触发源
-        3. Master机箱导出触发信号到PFI0
-        4. Slave机箱从PFI0接收触发信号
-        5. 使用DAQmx Connect Terminals建立显式路由
+        1. 收集所有任务涉及的板卡设备
+        2. 按优先级排序，选择第一个作为Master设备
+        3. 找到Master设备对应的任务（AI或AO）
+        4. Master任务导出StartTrigger到其PFI0接口
+        5. 其他所有任务配置为从各自机箱的PFI0接收触发信号
         """
-        logger.info("开始配置跨机箱触发路由")
+        logger.info("开始配置StartTrigger导出和接收同步")
 
-        # 如果只有一个机箱，不需要跨机箱路由
-        if len(self._chassis_groups) <= 1:
-            logger.info("只有一个机箱，使用简单的触发配置")
-            self._setup_single_chassis_trigger()
-            return
-
-        # 多机箱配置
-        logger.info(f"检测到 {len(self._chassis_groups)} 个机箱，配置跨机箱触发路由")
-
-        # 获取AI设备名称
-        ai_device = self._ai_channel.split("/")[0]
-
-        # 配置Master机箱
-        if self._master_chassis in self._chassis_groups:
-            master_task = self._ao_tasks[self._master_chassis]
-
-            # Master任务使用AI的StartTrigger作为触发源
-            # 尝试所有可能的时序引擎终端
-            te_terminals = [
-                f"/{ai_device}/te0/StartTrigger",
-                f"/{ai_device}/te1/StartTrigger",
-                f"/{ai_device}/te2/StartTrigger",
-                f"/{ai_device}/te3/StartTrigger",
-            ]
-
-            trigger_configured = False
-            for te_terminal in te_terminals:
-                try:
-                    master_task.triggers.start_trigger.cfg_dig_edge_start_trig(  # type: ignore
-                        te_terminal, trigger_edge=Edge.RISING
-                    )
-                    ai_start_trigger = te_terminal
-                    logger.info(
-                        f"Master机箱 {self._master_chassis} 配置为使用 {ai_start_trigger} 作为触发源"
-                    )
-                    trigger_configured = True
-                    break
-                except Exception as e:
-                    logger.debug(f"时序引擎终端 {te_terminal} 配置失败: {e}")
-                    continue
-
-            if not trigger_configured:
-                raise RuntimeError(
-                    f"Master机箱 {self._master_chassis} 无法配置触发源，"
-                    f"所有时序引擎终端都失败"
-                )
-
-            # Master机箱导出触发信号到PFI0
-            # 获取Master机箱的一个设备（用于导出触发）
-            master_indices = self._chassis_groups[self._master_chassis]
-            master_channel = self._ao_channels[master_indices[0]]
-            master_device = master_channel.split("/")[0]
-
-            # 导出Master任务的StartTrigger到PFI0
-            # 需要使用Master AO任务的时序引擎StartTrigger
-            master_pfi = f"/{master_device}/PFI0"
-
-            # 尝试找到Master AO任务使用的时序引擎
-            master_te_terminals = [
-                f"/{master_device}/te0/StartTrigger",
-                f"/{master_device}/te1/StartTrigger",
-                f"/{master_device}/te2/StartTrigger",
-                f"/{master_device}/te3/StartTrigger",
-            ]
-
-            master_start_trigger = ""
-            for te_terminal in master_te_terminals:
-                master_start_trigger = te_terminal
-                break  # 暂时使用第一个，后续可以优化
-
-            # 使用DAQmx Connect Terminals建立路由
-            try:
-                nidaqmx.system.storage.persisted_task.PersistedTask.delete(  # type: ignore
-                    master_start_trigger
-                )
-            except Exception:
-                pass  # 忽略删除失败
-
-            # 连接Master的StartTrigger到PFI0
-            logger.info(f"连接 {master_start_trigger} -> {master_pfi}")
-            # 注意：这里不使用Connect Terminals，而是使用export_signals
-            master_task.export_signals.start_trig_output_term = master_pfi  # type: ignore
-            logger.info(f"Master机箱触发信号已导出到 {master_pfi}")
-
-        # 配置Slave机箱
-        for chassis_name, ao_task in self._ao_tasks.items():
-            if chassis_name == self._master_chassis:
-                continue  # 跳过Master机箱
-
-            # 获取Slave机箱的一个设备
-            slave_indices = self._chassis_groups[chassis_name]
-            slave_channel = self._ao_channels[slave_indices[0]]
-            slave_device = slave_channel.split("/")[0]
-            slave_pfi = f"/{slave_device}/PFI0"
-
-            # Slave任务使用PFI0作为触发源
-            ao_task.triggers.start_trigger.cfg_dig_edge_start_trig(  # type: ignore
-                slave_pfi, trigger_edge=Edge.RISING
-            )
-            logger.info(f"Slave机箱 {chassis_name} 配置为使用 {slave_pfi} 作为触发源")
-
-        logger.info("跨机箱触发路由配置完成")
-
-    def _setup_single_chassis_trigger(self):
-        """
-        配置单机箱触发（所有AO通道在同一机箱）
-
-        使用简单的触发配置，所有AO任务使用AI的StartTrigger。
-        """
-        ai_device = self._ai_channel.split("/")[0]
-
-        # 尝试所有可能的时序引擎终端
-        te_terminals = [
-            f"/{ai_device}/te0/StartTrigger",
-            f"/{ai_device}/te1/StartTrigger",
-            f"/{ai_device}/te2/StartTrigger",
-            f"/{ai_device}/te3/StartTrigger",
+        # 定义板卡优先级（从高到低）
+        device_priority = [
+            "PXI1Slot2",
+            "PXI1Slot3",
+            "PXI2Slot2",
+            "PXI2Slot3",
+            "PXI3Slot2",
+            "PXI3Slot3",
         ]
 
-        for chassis_name, ao_task in self._ao_tasks.items():
-            trigger_configured = False
-            for te_terminal in te_terminals:
-                try:
-                    ao_task.triggers.start_trigger.cfg_dig_edge_start_trig(  # type: ignore
-                        te_terminal, trigger_edge=Edge.RISING
-                    )
-                    logger.debug(
-                        f"机箱 {chassis_name} 配置为使用 {te_terminal} 作为触发源"
-                    )
-                    trigger_configured = True
-                    break
-                except Exception as e:
-                    logger.debug(f"时序引擎终端 {te_terminal} 配置失败: {e}")
-                    continue
+        # 收集所有任务涉及的设备
+        all_devices = self._collect_devices_from_tasks()
 
-            if not trigger_configured:
-                raise RuntimeError(
-                    f"机箱 {chassis_name} 无法配置触发源，所有时序引擎终端都失败"
-                )
+        logger.debug(f"收集到的所有设备: {sorted(all_devices)}")
 
-        logger.info("单机箱触发配置完成")
+        # 按优先级选择Master设备
+        master_device = None
+        for device in device_priority:
+            if device in all_devices:
+                master_device = device
+                break
+
+        if master_device is None:
+            raise RuntimeError("无法找到合适的Master设备")
+
+        logger.info(f"选择 {master_device} 作为Master设备")
+
+        # 确定Master任务（优先选择AI任务，如果没有则选择Static AO或Feedback AO任务）
+        # 从master_device提取机箱名称
+        chassis_num = master_device[3]  # 提取 "PXI1Slot2" 中的 "1"
+        master_chassis_name = f"PXIChassis{chassis_num}"
+
+        master_task = None
+        master_task_type = None
+
+        # 优先选择AI任务
+        if master_chassis_name in self._tasks["ai"]:
+            master_task = self._tasks["ai"][master_chassis_name]
+            master_task_type = "AI"
+        # 其次选择Static AO任务
+        elif master_chassis_name in self._tasks["ao_static"]:
+            master_task = self._tasks["ao_static"][master_chassis_name]
+            master_task_type = "Static AO"
+        # 最后选择Feedback AO任务
+        elif master_chassis_name in self._tasks["ao_feedback"]:
+            master_task = self._tasks["ao_feedback"][master_chassis_name]
+            master_task_type = "Feedback AO"
+
+        if master_task is None:
+            raise RuntimeError(f"Master设备 {master_device} 没有对应的任务")
+
+        # Master任务导出StartTrigger到PFI0
+        master_pfi_terminal = f"/{master_device}/PFI0"
+        master_task.export_signals.export_signal(  # type: ignore
+            Signal.START_TRIGGER, master_pfi_terminal
+        )
+        logger.info(
+            f"Master任务 ({master_task_type}, {master_device}) "
+            f"导出StartTrigger到 {master_pfi_terminal}"
+        )
+
+        # 配置所有Slave任务从各自机箱的PFI0接收触发信号
+        # 配置所有AI任务的触发（除了Master AI任务）
+        for chassis_name, ai_task in self._tasks["ai"].items():
+            if ai_task is master_task:
+                continue  # 跳过Master任务
+            self._configure_slave_trigger_with_pfi(
+                ai_task, chassis_name, f"AI {chassis_name}"
+            )
+
+        # 配置所有Static AO任务的触发（除了Master任务）
+        for chassis_name, ao_task in self._tasks["ao_static"].items():
+            if ao_task is master_task:
+                continue  # 跳过Master任务
+            self._configure_slave_trigger_with_pfi(
+                ao_task, chassis_name, f"Static AO {chassis_name}"
+            )
+
+        # 配置所有Feedback AO任务的触发（除了Master任务）
+        for chassis_name, ao_task in self._tasks["ao_feedback"].items():
+            if ao_task is master_task:
+                continue  # 跳过Master任务
+            self._configure_slave_trigger_with_pfi(
+                ao_task, chassis_name, f"Feedback AO {chassis_name}"
+            )
+
+        logger.info("StartTrigger导出和接收同步配置完成")
 
     def _ai_callback(
         self,
+        chassis_name: str,
         task_handle,
         every_n_samples_event_type,
         number_of_samples,
@@ -662,30 +898,53 @@ class MultiChasCSIO:
         AI 任务回调函数
 
         在每次采集到指定数量的样本后被调用。
+        仅读取当前任务的数据并加入队列，不处理其他任务。
+        保持逻辑简单和迅速，避免阻塞后台nidaqmx线程。
         （未使用的参数不可删除，其为NI-DAQmx回调函数的API要求）
+
+        Args:
+            chassis_name: 机箱名称（通过闭包传入）
+            task_handle: 任务句柄
+            every_n_samples_event_type: 事件类型
+            number_of_samples: 样本数量
+            callback_data: 回调数据
         """
         try:
-            with self._callback_lock:
-                # 检查任务是否仍在运行
-                if self._ai_task is None or not self._is_running:
-                    return 0
+            # 检查任务是否仍在运行
+            if not self._is_running:
+                return 0
 
-                # 读取数据
-                data = self._ai_task.read(  # type: ignore
+            # 获取当前任务
+            current_task = self._tasks["ai"].get(chassis_name)
+            if current_task is None:
+                logger.warning(f"无法找到机箱 {chassis_name} 的AI任务")
+                return 0
+
+            # 读取当前任务的数据
+            try:
+                data = current_task.read(  # type: ignore
                     number_of_samples_per_channel=number_of_samples
                 )
 
-                # 转换为 Waveform 对象
-                ai_waveform = Waveform(
-                    input_array=np.array(data, dtype=np.float64).reshape(1, -1),
-                    sampling_rate=self._sampling_info["sampling_rate"],
-                )
+                # 准备数据包
+                ai_package = {
+                    "chassis_name": chassis_name,
+                    "data": data,
+                    "samples_num": number_of_samples,
+                }
 
-                # 添加到缓冲区
-                self._data_buffer.append(ai_waveform)
+                # 加入队列
+                with self._callback_lock:
+                    self._ai_queue.append(ai_package)
 
                 # 通知工作线程
                 self._data_ready_event.set()
+
+            except Exception as e:
+                logger.error(
+                    f"从机箱 {chassis_name} 读取AI数据失败: {e}",
+                    exc_info=True,
+                )
 
         except Exception as e:
             logger.error(f"AI 回调函数异常: {e}", exc_info=True)
@@ -696,33 +955,153 @@ class MultiChasCSIO:
         """
         工作线程函数
 
-        负责从缓冲区取出数据并调用导出函数。
+        负责从缓冲区取出数据并调用导出函数，同时处理feedback数据并写入Feedback AO任务。
+        等待所有AI任务的数据包到齐后，才进行一次集中处理。
+
+        触发机制：
+        - 使用"剩余等待event次数"变量控制执行
+        - 每当收到ai_tasks_num次event，或达到超时时间，尝试执行一次
+        - 如果数据不足，输出警告并等待下次触发
         """
         logger.debug("工作线程已启动")
 
+        # 计算超时时间：波形持续时间
+        timeout = self._static_output_waveform.duration
+
+        # 剩余等待event次数（用于控制执行触发）
+        remaining_events = self._ai_tasks_num
+
         while not self._stop_event.is_set():
-            # 等待数据就绪或停止信号
-            if self._data_ready_event.wait(timeout=1.0):
-                self._data_ready_event.clear()
+            # 等待数据就绪事件，超时时间为一个波形周期
+            event_triggered = self._data_ready_event.wait(timeout=timeout)
 
-                # 处理缓冲区中的所有数据（但要检查停止事件）
-                while len(self._data_buffer) > 0 and not self._stop_event.is_set():
+            # 清除事件标志
+            self._data_ready_event.clear()
+
+            # 判断是否应该尝试执行
+            should_execute = False
+
+            if event_triggered:
+                # 事件被触发，减少剩余等待次数
+                remaining_events -= 1
+                if remaining_events <= 0:
+                    # 已收到足够的event，应该执行
+                    should_execute = True
+            else:
+                # 超时，无论如何都尝试执行
+                should_execute = True
+                logger.debug("超时触发，尝试执行数据处理")
+
+            if not should_execute:
+                # 还需要等待更多event
+                continue
+
+            # 尝试收集所有AI任务的数据包
+            collected_packages: list[dict[str, Any]] = []
+
+            with self._callback_lock:
+                # 一次性取出所有可用的数据包
+                while len(self._ai_queue) > 0:
+                    package = self._ai_queue.popleft()
+                    collected_packages.append(package)
+
+            # 检查是否收集到足够的数据包
+            if len(collected_packages) < self._ai_tasks_num:
+                logger.warning(
+                    f"数据不足，未能收集到足够的AI数据包 "
+                    f"(期望 {self._ai_tasks_num}，实际 {len(collected_packages)})，"
+                    f"等待下次触发"
+                )
+                # 数据不足，保持remaining_events为0，等待下次event或超时触发
+                remaining_events = 0
+                continue
+
+            # 数据充足，重置剩余等待次数
+            remaining_events = self._ai_tasks_num
+
+            # 处理收集到的数据包
+            try:
+                # 获取所有 AI 通道列表（按机箱顺序）
+                all_ai_channels = []
+                for channels in self._channels_info["ai"].values():
+                    all_ai_channels.extend(channels)
+
+                # 按机箱名称排序，确保通道顺序与 _channels_info["ai"] 一致
+                collected_packages.sort(
+                    key=lambda pkg: list(self._channels_info["ai"].keys()).index(
+                        pkg["chassis_name"]
+                    )
+                )
+
+                # 合并所有数据
+                all_data = []
+                for package in collected_packages:
+                    data = package["data"]
+                    # 将数据转换为numpy数组并确保是2D格式
+                    data_array = np.array(data, dtype=np.float64)
+                    if data_array.ndim == 1:
+                        # 单通道数据，reshape为(1, samples)
+                        data_array = data_array.reshape(1, -1)
+                    all_data.append(data_array)
+
+                # 沿通道轴（axis=0）合并
+                combined_data = np.vstack(all_data)
+
+                # 转换为 Waveform 对象，添加通道名称元数据
+                ai_waveform = Waveform(
+                    input_array=combined_data,
+                    sampling_rate=self._sampling_info["sampling_rate"],
+                    channel_names=tuple(all_ai_channels),
+                )
+
+                # 处理反馈
+                feedback_waveform = None
+                if self._channels_info["ao_feedback"]:
                     try:
-                        ai_waveform = self._data_buffer.popleft()
-
-                        # 如果启用导出，调用导出函数
-                        if self._enable_export:
-                            # 增加导出计数
-                            self._chunks_num += 1
-                            self._export_function(ai_waveform, self._chunks_num)
+                        feedback_waveform = self._feedback_function(ai_waveform)
+                        # 验证反馈波形通道数
+                        if (
+                            feedback_waveform.channels_num
+                            != self.ao_channels_num_feedback
+                        ):
+                            logger.error(
+                                f"反馈函数返回的波形通道数 ({feedback_waveform.channels_num}) "
+                                f"与 Feedback AO 通道数 ({self.ao_channels_num_feedback}) 不匹配"
+                            )
+                            feedback_waveform = None  # 重置为None，表示反馈失败
                         else:
-                            # 重置导出计数
-                            self._chunks_num = 0
-
-                    except IndexError:
-                        break  # 缓冲区已空
+                            # 写入所有Feedback AO任务
+                            for chassis_name in self._tasks["ao_feedback"].keys():
+                                try:
+                                    self._write_ao_task_waveform_feedback(
+                                        chassis_name, feedback_waveform
+                                    )
+                                except Exception as e:
+                                    logger.error(
+                                        f"写入机箱 {chassis_name} 的反馈数据失败: {e}",
+                                        exc_info=True,
+                                    )
                     except Exception as e:
-                        logger.error(f"数据处理异常: {e}", exc_info=True)
+                        logger.error(f"调用反馈函数失败: {e}", exc_info=True)
+                        feedback_waveform = None  # 重置为None，表示反馈失败
+
+                # 处理导出
+                if self._enable_export:
+                    # 增加导出计数
+                    self._chunks_num += 1
+                    # 导出所有波形：AI、Static AO、Feedback AO
+                    self._export_function(
+                        ai_waveform,
+                        self._static_output_waveform,
+                        feedback_waveform,
+                        self._chunks_num,
+                    )
+                else:
+                    # 重置导出计数
+                    self._chunks_num = 0
+
+            except Exception as e:
+                logger.error(f"数据处理异常: {e}", exc_info=True)
 
         logger.debug("工作线程已退出")
 
@@ -730,7 +1109,7 @@ class MultiChasCSIO:
         """
         启动同步的连续 AI/AO 任务
 
-        配置并启动硬件同步的 AI 和多个 AO 任务，使用跨机箱触发路由。
+        配置并启动硬件同步的 AI 和 AO 任务，使用StartTrigger导出/接收同步。
 
         Raises:
             RuntimeError: 当任务启动失败时
@@ -740,38 +1119,47 @@ class MultiChasCSIO:
             return
 
         try:
-            # 创建 AI 任务
-            self._ai_task = nidaqmx.Task("ContSyncAI")
+            # 为每个机箱创建并配置 AI 任务
+            self._setup_ai_tasks()
 
-            # 配置 AI 任务
-            self._setup_ai_task()
+            # 为每个机箱创建并配置 Static AO 任务
+            self._setup_ao_tasks("ao_static")
 
-            # 为每个机箱创建并配置 AO 任务
-            self._setup_ao_tasks()
+            # 为每个机箱创建并配置 Feedback AO 任务
+            self._setup_ao_tasks("ao_feedback")
 
-            # 配置跨机箱触发路由
-            self._setup_cross_chassis_trigger_routing()
+            # 配置StartTrigger导出和接收同步
+            self._setup_start_trigger_sync()
 
             # 启动工作线程
             self._stop_event.clear()
             self._worker_thread = threading.Thread(
                 target=self._worker_thread_function,
-                name="HiPerfCrossChassisIO_Worker",
+                name="MultiChasCSIO_Worker",
             )
             self._worker_thread.start()
 
-            # 启动所有AO任务（等待触发）
-            for chassis_name, ao_task in self._ao_tasks.items():
+            # 启动所有Feedback AO任务（等待StartTrigger触发）
+            for chassis_name, ao_task in self._tasks["ao_feedback"].items():
                 ao_task.start()
-                logger.debug(f"AO任务 {chassis_name} 已启动（等待触发）")
+                logger.debug(
+                    f"Feedback AO任务 {chassis_name} 已启动（等待StartTrigger触发）"
+                )
 
-            # 启动AI任务（触发所有AO任务）
-            if self._ai_task is not None:
-                self._ai_task.start()
-                logger.debug("AI任务已启动")
+            # 启动所有Static AO任务（等待StartTrigger触发）
+            for chassis_name, ao_task in self._tasks["ao_static"].items():
+                ao_task.start()
+                logger.debug(
+                    f"Static AO任务 {chassis_name} 已启动（等待StartTrigger触发）"
+                )
+
+            # 启动所有AI任务（等待StartTrigger触发）
+            for chassis_name, ai_task in self._tasks["ai"].items():
+                ai_task.start()
+                logger.debug(f"AI任务 {chassis_name} 已启动（等待StartTrigger触发）")
 
             self._is_running = True
-            logger.info("跨机箱同步 AI/AO 任务启动成功")
+            logger.info("跨机箱同步 AI/AO 任务启动成功，使用StartTrigger同步")
 
         except Exception as e:
             logger.error(f"任务启动失败: {e}", exc_info=True)
@@ -812,33 +1200,41 @@ class MultiChasCSIO:
 
     def _cleanup_tasks(self):
         """清理所有任务资源"""
-        # 停止并关闭AI任务
-        if self._ai_task is not None:
+        # 停止并关闭所有AI任务
+        for chassis_name, ai_task in self._tasks["ai"].items():
             try:
-                self._ai_task.stop()
-                self._ai_task.close()
-                logger.debug("AI 任务已关闭")
+                ai_task.stop()
+                ai_task.close()
+                logger.debug(f"AI 任务 {chassis_name} 已关闭")
             except Exception as e:
-                logger.warning(f"关闭 AI 任务时出错: {e}")
-            finally:
-                self._ai_task = None
+                logger.warning(f"关闭 AI 任务 {chassis_name} 时出错: {e}")
 
-        # 停止并关闭所有AO任务
-        for chassis_name, ao_task in self._ao_tasks.items():
+        self._tasks["ai"].clear()
+
+        # 停止并关闭所有Static AO任务
+        for chassis_name, ao_task in self._tasks["ao_static"].items():
             try:
                 ao_task.stop()
                 ao_task.close()
-                logger.debug(f"AO 任务 {chassis_name} 已关闭")
+                logger.debug(f"Static AO 任务 {chassis_name} 已关闭")
             except Exception as e:
-                logger.warning(f"关闭 AO 任务 {chassis_name} 时出错: {e}")
+                logger.warning(f"关闭 Static AO 任务 {chassis_name} 时出错: {e}")
 
-        self._ao_tasks.clear()
+        self._tasks["ao_static"].clear()
 
-        # 清理触发路由
-        self._trigger_routes.clear()
+        # 停止并关闭所有Feedback AO任务
+        for chassis_name, ao_task in self._tasks["ao_feedback"].items():
+            try:
+                ao_task.stop()
+                ao_task.close()
+                logger.debug(f"Feedback AO 任务 {chassis_name} 已关闭")
+            except Exception as e:
+                logger.warning(f"关闭 Feedback AO 任务 {chassis_name} 时出错: {e}")
+
+        self._tasks["ao_feedback"].clear()
 
         # 清空缓冲区
-        self._data_buffer.clear()
+        self._ai_queue.clear()
         self._chunks_num = 0
 
         # 重置事件状态

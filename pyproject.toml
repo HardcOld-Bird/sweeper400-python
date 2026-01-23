@@ -26,7 +26,7 @@ reportMissingParameterType = "warning"
 [tool.ruff]
 
 target-version = "py312"
-line-length = 88
+line-length = 108
 exclude = [
     ".git/**",
     ".idea/**",

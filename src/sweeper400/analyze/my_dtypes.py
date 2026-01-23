@@ -199,6 +199,7 @@ def init_sine_args(
 def _rebuild_waveform_from_pickle(
     array_data: np.ndarray,
     sampling_rate: PositiveFloat,
+    channel_names: tuple[str, ...] | None,
     timestamp: np.datetime64,
     id: int | None,
     sine_args: SineArgs | None,
@@ -209,6 +210,7 @@ def _rebuild_waveform_from_pickle(
     Args:
         array_data: 数组数据
         sampling_rate: 采样率
+        channel_names: 通道名称元组
         timestamp: 时间戳
         id: ID
         sine_args: 正弦波参数
@@ -220,7 +222,8 @@ def _rebuild_waveform_from_pickle(
     waveform_obj = array_data.view(Waveform)
 
     # 设置所有自定义属性（包括None值，确保属性存在）
-    waveform_obj._sampling_rate = sampling_rate  # type: ignore
+    waveform_obj._sampling_rate = sampling_rate
+    waveform_obj._channel_names = channel_names
     waveform_obj.timestamp = timestamp
     waveform_obj.id = id
     waveform_obj.sine_args = sine_args
@@ -238,6 +241,7 @@ class Waveform(np.ndarray):
 
     ## 新增属性：
         - **sampling_rate**: 波形数据的**采样率**（Hz），只读属性
+        - **channel_names**: 波形的**通道名称元组**，只读属性，可选属性
         - **timestamp**: 波形采样开始**时间戳**，可修改属性
         - **id**: 波形的**唯一标识符**，可修改属性，可选属性
         - **sine_args**: 波形的**正弦波参数**，可修改属性，可选属性
@@ -246,18 +250,18 @@ class Waveform(np.ndarray):
         创建单通道波形：
         ```python
         data = np.array([1.0, 2.0, 3.0, 4.0])
-        waveform = Waveform(data, sampling_rate=1000)
+        waveform = Waveform(data, sampling_rate=1000, channel_names=None)
         ```
 
         创建多通道波形：
         ```python
         data = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        waveform = Waveform(data, sampling_rate=1000)
+        waveform = Waveform(data, sampling_rate=1000, channel_names=("ch1", "ch2"))
         ```
 
         指定时间戳：
         ```python
-        waveform = Waveform(data, sampling_rate=1000,
+        waveform = Waveform(data, sampling_rate=1000, channel_names=None,
                            timestamp=np.datetime64("2024-01-01T12:00:00", "ns"))
         ```
     """
@@ -265,6 +269,7 @@ class Waveform(np.ndarray):
     # "__new__"方法中不支持属性的类型注解（而"__init__"中可以），
     # 因此需要首先显式声明类型
     _sampling_rate: PositiveFloat
+    _channel_names: tuple[str, ...] | None
     timestamp: np.datetime64
     id: int | None
     sine_args: SineArgs | None
@@ -276,6 +281,7 @@ class Waveform(np.ndarray):
         cls,
         input_array: np.ndarray | list[float | int],  # python原生float也即numpy.float64
         sampling_rate: PositiveFloat,
+        channel_names: tuple[str, ...] | None = None,
         timestamp: np.datetime64 | None = None,
         id: int | None = None,
         sine_args: SineArgs | None = None,
@@ -287,8 +293,10 @@ class Waveform(np.ndarray):
         Args:
             input_array: 输入的波形数据数组
             sampling_rate: 采样率（Hz），必须为正实数
+            channel_names: 通道名称元组，长度必须等于通道数，可选
             timestamp: 采样开始时间戳，可选，默认为当前时间
             id: 波形的唯一标识符，可选，默认为None
+            sine_args: 正弦波参数，可选，默认为None
             **kwargs: 传递给numpy.ndarray的其他参数
 
         Returns:
@@ -306,8 +314,21 @@ class Waveform(np.ndarray):
             logger.error(f"只支持1维或2维数组，得到{obj.ndim}维数组", exc_info=True)
             raise ValueError(f"只支持1维或2维数组，得到{obj.ndim}维数组")
 
+        # 验证channel_names长度
+        if channel_names is not None:
+            expected_channels = 1 if obj.ndim == 1 else obj.shape[0]
+            if len(channel_names) != expected_channels:
+                logger.error(
+                    f"channel_names长度({len(channel_names)})与通道数({expected_channels})不匹配",
+                    exc_info=True,
+                )
+                raise ValueError(
+                    f"channel_names长度({len(channel_names)})与通道数({expected_channels})不匹配"
+                )
+
         # 设置只读属性
         obj._sampling_rate = sampling_rate
+        obj._channel_names = channel_names
 
         # 设置时间戳
         if timestamp is None:
@@ -342,6 +363,11 @@ class Waveform(np.ndarray):
         else:  # 如果没有，说明是在__new__中，稍后会设置
             pass  # 保持现有值
 
+        if hasattr(obj, "_channel_names"):
+            self._channel_names = obj._channel_names  # type: ignore
+        else:
+            pass  # 同理
+
         if hasattr(obj, "timestamp"):
             self.timestamp = obj.timestamp  # type: ignore
         else:
@@ -370,6 +396,7 @@ class Waveform(np.ndarray):
             (
                 np.asarray(self),  # 数组数据
                 self._sampling_rate,  # 不应为None
+                getattr(self, "_channel_names", None),
                 self.timestamp,  # 不应为None
                 getattr(self, "id", None),
                 getattr(self, "sine_args", None),
@@ -418,6 +445,19 @@ class Waveform(np.ndarray):
             采样率值（Hz）
         """
         return self._sampling_rate
+
+    @property
+    def channel_names(self) -> tuple[str, ...] | None:
+        """
+        通道名称元组
+
+        只读属性，只能在对象创建时指定
+        （tuple是不可变对象，直接传出是安全的）
+
+        Returns:
+            通道名称元组，如果未设置则返回None
+        """
+        return self._channel_names
 
     @property
     def sampling_info(self) -> SamplingInfo:
@@ -506,12 +546,19 @@ class SweepData(TypedDict):
 # 定义传递函数结果数据格式
 class PointTFData(TypedDict):
     """
-    传递函数计算结果格式
+    传递函数计算结果格式（描述复数传递函数）
+
+    该类型描述AI信号相对于AO信号的传递函数 H(ω) = A·e^(jφ)，
+    用于分析信号传播特性和频率响应。
 
     ## 内部组成:
         **position**: 测量点的二维坐标
-        **amp_ratio**: 幅值比（输入/输出）
-        **phase_shift**: 相位差（输入-输出，弧度制）
+        **amp_ratio**: 绝对幅值比（AI幅值 / AO幅值）
+        **phase_shift**: 绝对相位差（AI相位 - AO相位，弧度制）
+
+    ## 注意:
+        - 此类型不包含time_delay字段，因为时间延迟依赖于特定频率
+        - 如需补偿参数（包含时间延迟），请使用PointCompData类型
     """
 
     position: "Point2D"
@@ -519,23 +566,48 @@ class PointTFData(TypedDict):
     phase_shift: float
 
 
+# 定义补偿数据格式
+class PointCompData(TypedDict):
+    """
+    单通道补偿数据格式
+
+    该类型描述每个通道相对于所有通道平均值的补偿参数，
+    用于多通道系统的校准，使所有通道响应一致。
+
+    ## 内部组成:
+        **position**: 测量点的二维坐标（通常用于标识通道）
+        **amp_ratio**: 幅值补偿倍率（补偿到平均值需要乘以的倍率）
+        **time_delay**: 时间延迟补偿值（相对于平均值的时间差，单位：秒）
+
+    ## 注意:
+        - 此类型不包含phase_shift字段，因为补偿信息不包含频率
+        - 如需传递函数数据（包含相位差），请使用PointTFData类型
+    """
+
+    position: "Point2D"
+    amp_ratio: float
+    time_delay: float
+
+
 # 定义校准数据格式
 class CalibData(TypedDict):
     """
     多通道校准数据格式
 
-    该类型定义了校准结果的标准化格式，包含传递函数、通道信息和测量参数。
+    该类型定义了校准结果的标准化格式，包含补偿参数、通道信息和测量参数。
 
     ## 内部组成:
-        **tf_list**: 最终传递函数列表（每个通道一个PointTFData）
+        **comp_list**: 补偿参数列表（每个通道一个PointCompData）
         **ao_channels**: AO通道名称元组
         **ai_channel**: AI通道名称
         **sampling_info**: 采样信息
         **sine_args**: 正弦波参数
+        **amp_ratio_mean**: 所有通道传递函数幅值比的平均值（绝对幅值比的典型值）
     """
 
-    tf_list: list[PointTFData]
+    comp_list: list["PointCompData"]
     ao_channels: tuple[str, ...]
     ai_channel: str
     sampling_info: SamplingInfo
     sine_args: SineArgs
+    amp_ratio_mean: float

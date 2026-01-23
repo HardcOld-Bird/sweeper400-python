@@ -207,7 +207,7 @@ def get_sine_cycles(
     return output_sine_wave
 
 
-def get_sine_multi_chs(
+def get_sine_multi_ch(
     sampling_info: SamplingInfo,
     sine_args: SineArgs,
     calib_data: CalibData,
@@ -215,12 +215,15 @@ def get_sine_multi_chs(
     id: int | None = None,
 ) -> Waveform:
     """
-    生成多通道补偿波形，根据校准数据对每个通道进行幅值和相位补偿
+    生成多通道补偿波形，根据校准数据对每个通道进行幅值和时间补偿
 
     该函数根据校准得到的传递函数，为每个通道生成补偿后的正弦波形。
     补偿原理：
-    - 幅值补偿：输出幅值 = 期望幅值 / 传递函数幅值比
-    - 相位补偿：输出相位 = 期望相位 - 传递函数相位差
+    - 幅值补偿：输出幅值 = 期望幅值 × 相对幅值比
+      （相对幅值比 = 平均幅值比 / 该通道绝对幅值比，表示补偿到平均值需要乘以的倍率）
+    - 时间补偿：输出相位 = 期望相位 + 时间延迟对应的相位差
+      （时间延迟 = (平均相位差 - 该通道绝对相位差) / (2πf)）
+      （如果该通道相位滞后，time_delay为正，需要让发送相位超前）
 
     当把该多通道波形发送到相应的多通道系统时，系统的每个通道应当具有相同的响应，
     即每个通道传回信号的初相位和幅值都与输入sine_args保持一致。
@@ -228,7 +231,7 @@ def get_sine_multi_chs(
     Args:
         sampling_info: 采样信息，包含采样率和采样点数
         sine_args: 期望的正弦波参数（目标输出的频率、幅值和相位）
-        calib_data: 校准数据，包含每个通道的传递函数信息
+        calib_data: 校准数据，包含每个通道的传递函数信息（相对幅值比和时间延迟）
         timestamp: 采样开始时间戳，默认值为None
         id: 波形的唯一标识符，默认值为None
 
@@ -244,31 +247,31 @@ def get_sine_multi_chs(
         >>> sampling_info = init_sampling_info(171500.0, 85750)
         >>> sine_args = init_sine_args(3430.0, 0.01, 0.0)
         >>> # calib_data 从校准流程中获得
-        >>> multi_ch_waveform = get_sine_multi_chs(sampling_info, sine_args, calib_data)
+        >>> multi_ch_waveform = get_sine_multi_ch(sampling_info, sine_args, calib_data)
         >>> print(multi_ch_waveform.shape)  # (8, 85750) 假设有8个通道
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.get_sine_multi_chs")
+    logger = get_logger(f"{__name__}.get_sine_multi_ch")
 
     logger.debug(
         f"生成多通道补偿波形: frequency={sine_args['frequency']}Hz, "
         f"amplitude={sine_args['amplitude']}, phase={sine_args['phase']}rad, "
         f"sampling_rate={sampling_info['sampling_rate']}Hz, "
         f"samples_num={sampling_info['samples_num']}, "
-        f"channels_num={len(calib_data['tf_list'])}"
+        f"channels_num={len(calib_data['comp_list'])}"
     )
 
     # 验证校准数据
     channels_num = len(calib_data["ao_channels"])
-    if len(calib_data["tf_list"]) != channels_num:
+    if len(calib_data["comp_list"]) != channels_num:
         logger.error(
-            f"校准数据中的传递函数数量({len(calib_data['tf_list'])}) "
+            f"校准数据中的传递函数数量({len(calib_data['comp_list'])}) "
             f"与通道数量({channels_num})不匹配",
             exc_info=True,
         )
         raise ValueError(
-            f"校准数据中的传递函数数量({len(calib_data['tf_list'])}) "
+            f"校准数据中的传递函数数量({len(calib_data['comp_list'])}) "
             f"与通道数量({channels_num})不匹配"
         )
 
@@ -297,21 +300,30 @@ def get_sine_multi_chs(
     multi_ch_data = np.zeros((channels_num, sampling_info["samples_num"]))
 
     # 为每个通道生成补偿波形
-    for ch_idx, tf_data in enumerate(calib_data["tf_list"]):
-        # 提取传递函数参数
-        amp_ratio = tf_data["amp_ratio"]
-        phase_shift = tf_data["phase_shift"]
+    for ch_idx, comp_data in enumerate(calib_data["comp_list"]):
+        # 提取补偿参数（相对幅值比和时间延迟）
+        amp_ratio_relative = comp_data["amp_ratio"]
+        time_delay = comp_data["time_delay"]
 
         # 计算补偿后的幅值和相位
-        # 幅值补偿：输出幅值 = 期望幅值 / 传递函数幅值比
-        compensated_amplitude = sine_args["amplitude"] / amp_ratio
+        # 幅值补偿：输出幅值 = 期望幅值 * 相对幅值比
+        # 相对幅值比 = 平均幅值比 / 该通道绝对幅值比，表示补偿到平均值需要乘以的倍率
+        compensated_amplitude = sine_args["amplitude"] * amp_ratio_relative
 
-        # 相位补偿：输出相位 = 期望相位 - 传递函数相位差
-        compensated_phase = sine_args["phase"] - phase_shift
+        # 时间补偿：将时间延迟转换为相位差
+        # phase_shift = 2π * frequency * time_delay
+        frequency = sine_args["frequency"]
+        phase_shift = 2.0 * np.pi * frequency * time_delay
+
+        # 相位补偿：输出相位 = 期望相位 + 相位差
+        # time_delay的定义：mean_phase_shift - channel_phase_shift
+        # 如果该通道相位滞后（phase_shift小），time_delay为正，需要让发送相位超前（加上phase_shift）
+        # 如果该通道相位超前（phase_shift大），time_delay为负，需要让发送相位滞后（加上负的phase_shift）
+        compensated_phase = sine_args["phase"] + phase_shift
 
         logger.debug(
             f"通道 {ch_idx} ({calib_data['ao_channels'][ch_idx]}): "
-            f"传递函数幅值比={amp_ratio:.6f}, 相位差={phase_shift:.6f}rad, "
+            f"相对幅值比={amp_ratio_relative:.6f}, 时间延迟={time_delay * 1e6:.3f}μs, "
             f"补偿后幅值={compensated_amplitude:.6f}, 补偿后相位={compensated_phase:.6f}rad"
         )
 
