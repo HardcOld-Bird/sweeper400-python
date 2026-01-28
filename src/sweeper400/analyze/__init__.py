@@ -22,15 +22,17 @@ from .filter import (
 from .general_signal import calib_multi_ch_wf
 from .my_dtypes import (
     CalibData,
+    CompData,
     Point2D,
     PointCompData,
-    PointRawData,
+    PointSweepData,
     PointTFData,
     PositiveFloat,
     PositiveInt,
     SamplingInfo,
     SineArgs,
     SweepData,
+    TFData,
     Waveform,
     init_sampling_info,
     init_sine_args,
@@ -44,14 +46,22 @@ from .plot import (
 )
 from .post_process import (
     average_sweep_data,
+    average_comp_data_list,
+    average_tf_data_list,
+    calculate_compensation_list,
     calculate_transfer_function,
+    comp_to_tf,
+    tf_to_comp,
 )
 from .waveform_generator import SineGenerator, WaveformGenerator
 
 # 控制 import * 的行为
 __all__ = [
     "average_sweep_data",
+    "average_comp_data_list",
+    "average_tf_data_list",
     "CalibData",
+    "CompData",
     "PositiveInt",
     "PositiveFloat",
     "SamplingInfo",
@@ -61,8 +71,9 @@ __all__ = [
     "Waveform",
     "Point2D",
     "PointCompData",
-    "PointRawData",
+    "PointSweepData",
     "SweepData",
+    "TFData",
     "get_sine",
     "get_sine_cycles",
     "get_sine_multi_ch",
@@ -71,7 +82,10 @@ __all__ = [
     "WaveformGenerator",
     "SineGenerator",
     "PointTFData",
+    "calculate_compensation_list",
     "calculate_transfer_function",
+    "tf_to_comp",
+    "comp_to_tf",
     "filter_sweep_data",
     "plot_transfer_function_discrete_distribution",
     "plot_transfer_function_interpolated_distribution",

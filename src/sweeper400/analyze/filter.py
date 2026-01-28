@@ -11,7 +11,7 @@ from numpy.typing import NDArray
 from scipy.signal import butter, detrend, sosfilt
 
 from ..logger import get_logger
-from .my_dtypes import PointRawData, PositiveFloat, PositiveInt, SweepData, Waveform
+from .my_dtypes import PointSweepData, PositiveFloat, PositiveInt, SweepData, Waveform
 
 # 获取模块日志器
 logger = get_logger(__name__)
@@ -269,7 +269,7 @@ def filter_sweep_data(
     func_logger.debug("高通滤波器设计完成，将在所有波形复用")
 
     # 处理AI数据
-    filtered_ai_data_list: list[PointRawData] = []
+    filtered_ai_data_list: list[PointSweepData] = []
     processed_count = 0
 
     for point_idx, point_data in enumerate(ai_data_list):
@@ -301,7 +301,7 @@ def filter_sweep_data(
             processed_count += 1
 
         # 创建滤波后的点数据
-        filtered_point_data: PointRawData = {
+        filtered_point_data: PointSweepData = {
             "position": position,
             "ai_data": filtered_ai_waveforms,
         }

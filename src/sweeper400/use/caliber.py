@@ -16,17 +16,21 @@ import numpy as np
 
 from ..analyze import (
     CalibData,
+    CompData,
     Point2D,
     PointCompData,
-    PointRawData,
+    PointSweepData,
     PointTFData,
     PositiveInt,
     SamplingInfo,
     SineArgs,
     SweepData,
+    TFData,
     Waveform,
+    average_comp_data_list,
     average_sweep_data,
-    calculate_transfer_function,
+    calculate_compensation_list,
+    comp_to_tf,
     filter_sweep_data,
     get_sine_cycles,
     get_sine_multi_ch,
@@ -57,17 +61,25 @@ class CaliberOctopus:
         - 支持基于已有校准数据进行校准验证（通过calib_data参数）
 
     ## 校准原理：
-        1. 多次执行独立校准（每次创建和销毁MultiChasCSIO对象）
-        2. 每次独立校准中：
-           a. 创建一个MultiChasCSIO对象，向所有通道发送相同的单频正弦信号
-           b. 通过动态更换波形，每次只向一个通道发送信号（其他通道输出零）
-           c. 对每个通道采集多个连续chunk
-           d. 将数据存储为SweepData格式（x坐标=1，y坐标=通道序号）
-           e. 使用average_sweep_data、filter_sweep_data和calculate_transfer_function处理数据
-           f. 提取每个通道的绝对幅值比和相位差
-           g. 计算所有通道的平均值，然后计算每个通道相对于平均值的相对幅值比和时间延迟
-        3. 对所有独立校准的结果进行平均，得到最终的相对幅值比和时间延迟
-        4. 保存相对幅值比、时间延迟以及绝对幅值比的平均值
+        1. 第一阶段：循环调用_single_calibrate，采集并保存原始数据
+           - 多次执行独立校准（每次创建和销毁MultiChasCSIO对象）
+           - 每次独立校准中：
+             a. 创建MultiChasCSIO对象
+             b. 通过动态更换波形，每次只向一个通道发送信号（其他通道输出零）
+             c. 对每个通道采集多个连续chunk
+             d. 将数据存储为SweepData格式（x坐标=1，y坐标=通道序号）
+             e. 返回原始SweepData并立即保存到文件
+        2. 第二阶段：处理SweepData，计算补偿数据
+           - 对每个SweepData进行平均和滤波处理
+           - 使用calculate_compensation_list计算每次校准的CompData
+           - 收集所有CompData的PointCompData用于cartesian模式绘图
+           - 绘制补偿数据直角坐标图（细节图）
+        3. 第三阶段：平均所有校准结果
+           - 对多个CompData进行平均，得到平均后的单个CompData
+           - 使用comp_to_tf将平均后的CompData转换为TFData
+        4. 第四阶段：绘制极坐标图和保存最终数据
+           - 使用平均后的TFData绘制传递函数极坐标图（概览图）
+           - 保存最终的CalibData文件
 
     ## 使用示例：
     ```python
@@ -185,7 +197,7 @@ class CaliberOctopus:
                     f"与当前配置({ao_channels})不一致"
                 )
 
-            # 使用get_sine_multi_chs生成多通道补偿波形
+            # 使用get_sine_multi_ch生成多通道补偿波形
             self._output_waveform = get_sine_multi_ch(
                 sampling_info=sampling_info,
                 sine_args=sine_args,
@@ -195,25 +207,41 @@ class CaliberOctopus:
                 f"使用校准数据生成多通道补偿波形，shape={self._output_waveform.shape}"
             )
         else:
-            # 使用get_sine_cycles生成单通道波形
-            self._output_waveform = get_sine_cycles(sampling_info, sine_args)
-            logger.info("使用get_sine_cycles生成单通道波形")
+            # 生成多通道未补偿波形（每个通道都是相同的正弦波）
+            # 首先生成单通道波形
+            single_channel_waveform = get_sine_cycles(sampling_info, sine_args)
+
+            # 创建多通道数组，每个通道都是相同的信号
+            num_channels = len(ao_channels)
+            multi_channel_data = np.tile(single_channel_waveform, (num_channels, 1))
+
+            # 创建多通道Waveform对象
+            self._output_waveform = Waveform(
+                input_array=multi_channel_data,
+                sampling_rate=sampling_info["sampling_rate"],
+                timestamp=single_channel_waveform.timestamp,
+                id=single_channel_waveform.id,
+                sine_args=sine_args,
+            )
+            logger.info(f"生成多通道未补偿波形，shape={self._output_waveform.shape}")
 
         # 计算默认的稳定等待时间（chunk时长 + 0.1秒）
         chunk_duration = self._output_waveform.duration
         self._default_settle_time = chunk_duration + 0.1
 
-        # 校准数据存储（使用SweepData格式）
-        self._result_raw_sweep_data: SweepData | None = None
+        # 内部状态变量（用于校准过程）
+        # 临时存储当前正在采集的SweepData（供_export_function使用）
+        self._current_sweep_data: SweepData | None = None
 
-        # 处理后的传递函数数据（绝对传递函数，未平均，保留所有启动次数的结果）
-        self._result_raw_tf_list: list[PointTFData] | None = None
+        # 校准结果存储
+        # 所有starts的补偿数据（未平均，用于cartesian模式绘图）
+        self._result_raw_comp_data: CompData | None = None
 
-        # 所有starts的补偿数据（未平均，保留所有启动次数的结果）
-        self._result_raw_comp_list: list[PointCompData] | None = None
+        # 平均后的传递函数数据（用于polar模式绘图）
+        self._result_averaged_tf_data: TFData | None = None
 
-        # 最终补偿数据结果（每个通道一个PointCompData，已平均）
-        self._result_final_comp_list: list[PointCompData] | None = None
+        # 最终补偿数据结果（已平均的CompData）
+        self._result_averaged_comp_data: CompData | None = None
 
         # 所有通道传递函数幅值比的平均值
         self._amp_ratio_mean: float | None = None
@@ -234,7 +262,7 @@ class CaliberOctopus:
         创建只启用一个通道的多通道波形
 
         生成一个多通道波形，其中只有指定通道输出信号，其他通道输出零。
-        如果初始化时提供了calib_data，则使用已补偿的波形数据；否则使用未补偿的波形。
+        从self._output_waveform（多通道波形）中提取指定通道的数据。
 
         Args:
             active_channel_idx: 要启用的通道索引（0-based）
@@ -252,28 +280,15 @@ class CaliberOctopus:
 
         # 创建多通道波形数组
         num_channels = len(self._ao_channels)
+        num_samples = self._output_waveform.samples_num
+        multi_channel_data = np.zeros((num_channels, num_samples), dtype=np.float64)
 
-        # 检查self._output_waveform是否为多通道波形（已应用校准补偿）
-        if self._output_waveform.ndim == 2:
-            # 多通道情况：使用已补偿的波形数据
-            num_samples = self._output_waveform.samples_num
-            multi_channel_data = np.zeros((num_channels, num_samples), dtype=np.float64)
-            # 只在指定通道填充已补偿的信号
-            multi_channel_data[active_channel_idx, :] = self._output_waveform[
-                active_channel_idx, :
-            ]
-            logger.debug(
-                f"使用已补偿的多通道波形数据创建单通道激活波形（通道 {active_channel_idx}）"
-            )
-        else:
-            # 单通道情况：使用未补偿的波形（所有通道使用相同的信号）
-            num_samples = self._output_waveform.samples_num
-            multi_channel_data = np.zeros((num_channels, num_samples), dtype=np.float64)
-            # 只在指定通道填充信号
-            multi_channel_data[active_channel_idx, :] = self._output_waveform
-            logger.debug(
-                f"使用未补偿的单通道波形数据创建单通道激活波形（通道 {active_channel_idx}）"
-            )
+        # 只在指定通道填充信号（从多通道波形中提取）
+        multi_channel_data[active_channel_idx, :] = self._output_waveform[
+            active_channel_idx, :
+        ]
+
+        logger.debug(f"创建单通道激活波形（通道 {active_channel_idx}）")
 
         # 创建Waveform对象
         waveform = Waveform(
@@ -307,10 +322,11 @@ class CaliberOctopus:
         """
         # 将数据添加到当前测量点
         if (
-            self._result_raw_sweep_data is not None
-            and len(self._result_raw_sweep_data["ai_data_list"]) > 0
+            hasattr(self, "_current_sweep_data")
+            and self._current_sweep_data is not None
+            and len(self._current_sweep_data["ai_data_list"]) > 0
         ):
-            current_point = self._result_raw_sweep_data["ai_data_list"][-1]
+            current_point = self._current_sweep_data["ai_data_list"][-1]
             current_point["ai_data"].append(ai_waveform)
             logger.debug(
                 f"采集到第 {chunks_num} 段数据，当前点: {current_point['position']}"
@@ -348,29 +364,24 @@ class CaliberOctopus:
     def _single_calibrate(
         self,
         chunks_per_start: int = 3,
-        apply_filter: bool = True,
-        lowcut: float = 100.0,
-        highcut: float = 20000.0,
         settle_time: float | None = None,
-    ) -> None:
+    ) -> SweepData:
         """
         执行单次校准流程（内部方法）
 
-        对每个通道采集多个连续chunk。
+        对每个通道采集多个连续chunk，返回原始的SweepData。
         数据存储为SweepData格式，x坐标固定为1，y坐标为通道序号。
 
-        校准结果以相对值形式存储：
-        - 相对幅值比：相对于所有通道平均值的补偿倍率
-        - 时间延迟：相对于所有通道平均相位的时间差（秒）
-        - 绝对幅值比平均值：所有通道传递函数幅值比的平均值
+        该方法只负责硬件控制和数据采集，不进行任何数据处理（平均、滤波、
+        计算传递函数等）。所有数据处理工作由calibrate方法统一完成。
 
         Args:
             chunks_per_start: 每次启动采集的连续chunk数，默认为3
-            apply_filter: 是否应用滤波，默认为True
-            lowcut: 滤波器低频截止频率（Hz），默认为100.0
-            highcut: 滤波器高频截止频率（Hz），默认为20000.0
             settle_time: 通道切换后的稳定等待时间（秒）。如果为None，则使用初始化时
                         计算的默认值（chunk时长 + 0.1秒）
+
+        Returns:
+            原始的SweepData，包含所有通道的采集数据
 
         Raises:
             ValueError: 当参数无效时
@@ -391,10 +402,13 @@ class CaliberOctopus:
         )
 
         # 初始化SweepData（显式类型标注）
-        self._result_raw_sweep_data: SweepData = {
+        sweep_data: SweepData = {
             "ai_data_list": [],
             "ao_data": self._output_waveform,
         }
+
+        # 临时存储当前sweep_data的引用，供export_function使用
+        self._current_sweep_data = sweep_data
 
         # 创建MultiChasCSIO对象（整个校准流程只创建一次）
         sync_io = MultiChasCSIO(
@@ -424,11 +438,11 @@ class CaliberOctopus:
                 )
 
                 # 创建新的测量点数据
-                point_data: PointRawData = {
+                point_data: PointSweepData = {
                     "position": virtual_position,
                     "ai_data": [],
                 }
-                self._result_raw_sweep_data["ai_data_list"].append(point_data)
+                sweep_data["ai_data_list"].append(point_data)
 
                 # 创建只启用当前通道的波形
                 single_channel_waveform = self._create_single_channel_waveform(
@@ -489,111 +503,11 @@ class CaliberOctopus:
             sync_io.stop()
             logger.info("MultiChasCSIO任务已停止")
 
-        # 数据处理
-        logger.info("开始处理校准数据...")
+        # 清理临时引用
+        self._current_sweep_data = None
 
-        # 1. 对每个点的多个chunk进行平均（先平均，减少数据量）
-        logger.info("对每个点的多个chunk进行平均")
-        averaged_data = average_sweep_data(self._result_raw_sweep_data)
-
-        # 2. 应用滤波（如果需要）（后滤波，符合信号处理最佳实践）
-        if apply_filter:
-            logger.info(f"应用带通滤波器: {lowcut}Hz - {highcut}Hz")
-            filtered_data = filter_sweep_data(
-                averaged_data,
-                lowcut=lowcut,
-                highcut=highcut,
-            )
-        else:
-            filtered_data = averaged_data
-
-        # 3. 计算传递函数（绝对传递函数：AI相对于AO）
-        logger.info("计算传递函数")
-        raw_tf_list = calculate_transfer_function(filtered_data)
-
-        # 保存原始传递函数列表（用于后续分析）
-        self._result_raw_tf_list = raw_tf_list
-
-        # 4. 提取每个通道的绝对幅值比和绝对相位差
-        logger.info("提取每个通道的传递函数数据")
-        channel_abs_amp_ratios = []  # 存储每个通道的绝对幅值比
-        channel_abs_phase_shifts = []  # 存储每个通道的绝对相位差
-
-        for channel_idx in range(len(self._ao_channels)):
-            # 找到该通道的测量点（应该只有一个，x=1, y=channel_idx+1）
-            channel_tf_data = next(
-                (
-                    tf_data
-                    for tf_data in raw_tf_list
-                    if tf_data["position"].y == channel_idx + 1
-                ),
-                None,
-            )
-
-            if channel_tf_data is not None:
-                # 提取幅值比和相位差（绝对值）
-                amp_ratio = channel_tf_data["amp_ratio"]
-                phase_shift = channel_tf_data["phase_shift"]
-
-                channel_abs_amp_ratios.append(amp_ratio)
-                channel_abs_phase_shifts.append(phase_shift)
-
-                logger.debug(
-                    f"通道 {channel_idx} ({self._ao_channels[channel_idx]}) "
-                    f"绝对幅值比={amp_ratio:.6f}, 绝对相位差={phase_shift:.6f}rad"
-                )
-            else:
-                logger.warning(f"通道 {channel_idx} 没有有效测量数据，使用默认值")
-                channel_abs_amp_ratios.append(1.0)
-                channel_abs_phase_shifts.append(0.0)
-
-        # 5. 计算所有通道的平均值
-        mean_amp_ratio = np.mean(channel_abs_amp_ratios)
-        mean_phase_shift = np.mean(channel_abs_phase_shifts)
-
-        logger.info(
-            f"所有通道平均值: 幅值比={mean_amp_ratio:.6f}, 相位差={mean_phase_shift:.6f}rad"
-        )
-
-        # 6. 计算补偿数据（相对于所有通道平均值的补偿参数）
-        logger.info("计算补偿数据")
-        self._result_final_comp_list = []
-        frequency = self._sine_args["frequency"]
-
-        for channel_idx in range(len(self._ao_channels)):
-            # 计算幅值补偿倍率（补偿到平均值需要乘以的倍率）
-            amp_comp_ratio = mean_amp_ratio / channel_abs_amp_ratios[channel_idx]
-
-            # 计算相对相位差（相对于平均值）
-            phase_shift_relative = (
-                mean_phase_shift - channel_abs_phase_shifts[channel_idx]
-            )
-
-            # 将相对相位差转换为时间延迟补偿值（秒）
-            # time_delay_comp = phase_shift_relative / (2π * frequency)
-            time_delay_comp = phase_shift_relative / (2.0 * np.pi * frequency)
-
-            # 创建虚拟位置（x=0, y=通道序号）
-            comp_position = Point2D(x=0.0, y=float(channel_idx + 1))
-
-            # 创建PointCompData（存储补偿参数）
-            comp_data: PointCompData = {
-                "position": comp_position,
-                "amp_ratio": amp_comp_ratio,
-                "time_delay": time_delay_comp,
-            }
-            self._result_final_comp_list.append(comp_data)
-
-            logger.info(
-                f"通道 {channel_idx} ({self._ao_channels[channel_idx]}) "
-                f"幅值补偿倍率={amp_comp_ratio:.6f}, "
-                f"时间延迟补偿={time_delay_comp * 1e6:.3f}μs"
-            )
-
-        # 保存平均幅值比（用于后续保存到CalibData）
-        self._amp_ratio_mean = mean_amp_ratio
-
-        logger.info("单次校准流程完成")
+        logger.info("单次校准流程完成，返回原始SweepData")
+        return sweep_data
 
     def calibrate(
         self,
@@ -608,9 +522,20 @@ class CaliberOctopus:
         """
         执行校准流程（多次独立校准并平均）
 
-        该方法会多次调用_single_calibrate方法进行独立校准，每次校准都经历完整的任务创建和删除流程。
-        每次校准完成后保存CalibData文件，最后读取所有文件并对每个通道的数据进行平均，
-        生成最终的CalibData文件和绘图。
+        该方法实现四阶段校准工作流程：
+        1. 第一阶段：循环调用_single_calibrate，采集并保存原始数据
+           - 多次执行独立校准（每次创建和销毁MultiChasCSIO对象）
+           - 每次校准返回原始SweepData，立即保存为raw_sweep_data_N.pkl文件
+        2. 第二阶段：处理SweepData，计算补偿数据
+           - 对每个SweepData进行平均和滤波处理
+           - 使用calculate_compensation_list计算每次校准的CompData
+           - 收集所有CompData的PointCompData用于绘制补偿数据直角坐标图（细节图）
+        3. 第三阶段：平均所有校准结果
+           - 对多个CompData进行平均，得到平均后的单个CompData
+           - 使用comp_to_tf将平均后的CompData转换为TFData
+        4. 第四阶段：绘制极坐标图和保存最终数据
+           - 使用平均后的TFData绘制传递函数极坐标图（概览图）
+           - 保存最终的CalibData文件
 
         Args:
             starts_num: 独立校准的次数，默认为10。
@@ -621,7 +546,7 @@ class CaliberOctopus:
             highcut: 滤波器高频截止频率（Hz），默认为20000.0
             result_folder: 可选，结果保存文件夹路径。如果为None，将使用默认路径
                           'storage/calib/calib_result_octopus'（相对于项目根目录）。
-                          最终将保存一个平均后的CalibData文件和polar模式绘图
+                          最终将保存多个raw_sweep_data_N.pkl文件、两幅绘图和一个平均后的CalibData文件
             settle_time: 通道切换后的稳定等待时间（秒）。如果为None，则使用初始化时
                         计算的默认值（chunk时长 + 0.1秒）
 
@@ -654,128 +579,186 @@ class CaliberOctopus:
         # 创建结果文件夹
         result_path.mkdir(parents=True, exist_ok=True)
 
-        # 创建临时文件夹用于存储每次校准的结果
-        temp_folder = result_path / "temp_calib_data"
-        temp_folder.mkdir(parents=True, exist_ok=True)
+        # 存储所有starts的SweepData
+        all_sweep_data_list: list[SweepData] = []
 
-        # 存储每次校准的CalibData文件路径
-        calib_data_files: list[Path] = []
-
-        # 存储所有starts的raw_comp_list（用于cartesian模式绘图）
-        all_raw_comp_list: list[PointCompData] = []
-
-        # 执行多次独立校准
+        # 执行多次独立校准，获取SweepData并立即保存
+        logger.info("=" * 60)
+        logger.info("第一阶段：循环调用_single_calibrate，采集并保存原始数据")
+        logger.info("=" * 60)
         for calib_idx in range(starts_num):
             logger.info(f"开始第 {calib_idx + 1}/{starts_num} 次独立校准")
 
-            # 调用_single_calibrate方法
-            self._single_calibrate(
+            # 调用_single_calibrate方法，获取SweepData
+            sweep_data = self._single_calibrate(
                 chunks_per_start=chunks_per_start,
-                apply_filter=apply_filter,
-                lowcut=lowcut,
-                highcut=highcut,
                 settle_time=settle_time,
             )
 
-            # 收集这次校准的raw_comp_list（添加start_idx信息）
-            if self._result_final_comp_list is not None:
-                for comp_data in self._result_final_comp_list:
-                    # 创建新的PointCompData，添加start_idx信息到position的x坐标
-                    raw_comp_data: PointCompData = {
-                        "position": Point2D(
-                            x=float(calib_idx),  # x坐标存储start索引
-                            y=comp_data["position"].y,  # y坐标存储通道索引
-                        ),
-                        "amp_ratio": comp_data["amp_ratio"],
-                        "time_delay": comp_data["time_delay"],
-                    }
-                    all_raw_comp_list.append(raw_comp_data)
-
-            # 保存这次校准的CalibData
-            calib_data_path = temp_folder / f"calib_data_{calib_idx + 1}.pkl"
-            self.save_calib_data(calib_data_path)
-            calib_data_files.append(calib_data_path)
-            logger.info(f"第 {calib_idx + 1} 次校准完成，已保存到: {calib_data_path}")
-
-        # 读取所有CalibData文件并进行平均
-        logger.info("开始平均所有校准结果...")
-
-        # 加载所有CalibData
-        all_calib_data: list[CalibData] = []
-        for calib_file in calib_data_files:
+            # 保存这次校准的原始SweepData
+            sweep_data_path = result_path / f"raw_sweep_data_{calib_idx + 1}.pkl"
             try:
-                with open(calib_file, "rb") as f:
-                    calib_data: CalibData = pickle.load(f)
-                    all_calib_data.append(calib_data)
-            except Exception as e:
-                logger.error(
-                    f"加载校准数据文件失败: {calib_file}, 错误: {e}", exc_info=True
+                with open(sweep_data_path, "wb") as f:
+                    pickle.dump(sweep_data, f)
+                logger.info(
+                    f"第 {calib_idx + 1} 次SweepData已保存到: {sweep_data_path}"
                 )
-                raise RuntimeError(f"加载校准数据文件失败: {calib_file}") from e
+            except Exception as e:
+                logger.error(f"保存SweepData失败: {e}", exc_info=True)
+                raise OSError(f"保存SweepData失败: {e}") from e
 
-        # 验证所有CalibData的通道数一致
+            # 将SweepData添加到列表中，供后续处理
+            all_sweep_data_list.append(sweep_data)
+
+        # 第二阶段：处理所有SweepData，计算CompData
+        logger.info("=" * 60)
+        logger.info("第二阶段：处理SweepData，计算补偿数据")
+        logger.info("=" * 60)
+
+        # 存储所有starts的CompData
+        all_comp_data_list: list[CompData] = []
+
+        for calib_idx, sweep_data in enumerate(all_sweep_data_list):
+            logger.info(f"处理第 {calib_idx + 1}/{starts_num} 次校准的数据")
+
+            # 1. 对每个点的多个chunk进行平均
+            logger.info("对每个点的多个chunk进行平均")
+            averaged_data = average_sweep_data(sweep_data)
+
+            # 2. 应用滤波（如果需要）
+            if apply_filter:
+                logger.info(f"应用带通滤波器: {lowcut}Hz - {highcut}Hz")
+                filtered_data = filter_sweep_data(
+                    averaged_data,
+                    lowcut=lowcut,
+                    highcut=highcut,
+                )
+            else:
+                filtered_data = averaged_data
+
+            # 3. 使用calculate_compensation_list计算补偿数据
+            logger.info("计算补偿数据")
+            comp_data = calculate_compensation_list(filtered_data)
+            all_comp_data_list.append(comp_data)
+
+            logger.info(
+                f"第 {calib_idx + 1} 次校准数据处理完成，"
+                f"频率={comp_data['frequency']:.2f}Hz, "
+                f"平均幅值比={comp_data['mean_amp_ratio']:.6f}"
+            )
+
+        # 从all_comp_data_list构建包含所有starts数据的CompData（用于cartesian模式绘图）
+        # 收集所有starts的comp_list，并修改position.x为start索引
+        all_raw_comp_list: list[PointCompData] = []
+        for calib_idx, comp_data in enumerate(all_comp_data_list):
+            for comp_point in comp_data["comp_list"]:
+                # 创建新的PointCompData，添加start_idx信息到position的x坐标
+                raw_comp_data: PointCompData = {
+                    "position": Point2D(
+                        x=float(calib_idx),  # x坐标存储start索引
+                        y=comp_point["position"].y,  # y坐标保持通道索引
+                    ),
+                    "amp_ratio": comp_point["amp_ratio"],
+                    "time_delay": comp_point["time_delay"],
+                }
+                all_raw_comp_list.append(raw_comp_data)
+
+        # 使用第一个CompData的元数据创建包含所有starts数据的CompData
+        self._result_raw_comp_data: CompData = {
+            "comp_list": all_raw_comp_list,
+            "frequency": all_comp_data_list[0]["frequency"],
+            "mean_amp_ratio": all_comp_data_list[0]["mean_amp_ratio"],
+            "mean_phase_shift": all_comp_data_list[0]["mean_phase_shift"],
+        }
+
+        # 绘制cartesian模式绘图（使用所有starts的详细数据）
+        logger.info("绘制补偿数据直角坐标图（细节图）")
+        cartesian_plot_path = result_path / "compensation_cartesian.png"
+        self.plot_transfer_functions(mode="cartesian", save_path=cartesian_plot_path)
+        logger.info(f"已保存cartesian模式绘图到: {cartesian_plot_path}")
+
+        # 第三阶段：平均所有CompData
+        logger.info("=" * 60)
+        logger.info("第三阶段：平均所有校准结果")
+        logger.info("=" * 60)
+
+        # 验证所有CompData的通道数一致
         channels_num = len(self._ao_channels)
-        for idx, calib_data in enumerate(all_calib_data):
-            if len(calib_data["comp_list"]) != channels_num:
+        for idx, comp_data in enumerate(all_comp_data_list):
+            if len(comp_data["comp_list"]) != channels_num:
                 raise RuntimeError(
-                    f"第 {idx + 1} 次校准的通道数({len(calib_data['comp_list'])}) "
+                    f"第 {idx + 1} 次校准的通道数({len(comp_data['comp_list'])}) "
                     f"与预期({channels_num})不一致"
                 )
 
-        # 对每个通道的数据进行平均
-        averaged_comp_list: list[PointCompData] = []
+        # 使用average_comp_data_list函数对所有CompData进行平均
+        logger.info("对所有CompData进行平均")
+        averaged_comp_data: CompData = average_comp_data_list(all_comp_data_list)
+
+        # 输出每个通道的平均结果日志
         for channel_idx in range(channels_num):
-            # 收集该通道在所有校准中的相对幅值补偿比和相对时间延迟
-            amp_ratios_relative = [
-                calib_data["comp_list"][channel_idx]["amp_ratio"]
-                for calib_data in all_calib_data
+            avg_amp_ratio_relative = averaged_comp_data["comp_list"][channel_idx][
+                "amp_ratio"
             ]
-            time_delays_relative = [
-                calib_data["comp_list"][channel_idx]["time_delay"]
-                for calib_data in all_calib_data
+            avg_time_delay_relative = averaged_comp_data["comp_list"][channel_idx][
+                "time_delay"
             ]
-
-            # 计算平均值
-            avg_amp_ratio_relative = np.mean(amp_ratios_relative)
-            avg_time_delay_relative = np.mean(time_delays_relative)
-
-            # 创建平均后的PointCompData
-            final_position = Point2D(x=0.0, y=float(channel_idx + 1))
-            averaged_comp_data: PointCompData = {
-                "position": final_position,
-                "amp_ratio": avg_amp_ratio_relative,
-                "time_delay": avg_time_delay_relative,
-            }
-            averaged_comp_list.append(averaged_comp_data)
-
             logger.info(
                 f"通道 {channel_idx} ({self._ao_channels[channel_idx]}) "
                 f"平均相对幅值补偿比={avg_amp_ratio_relative:.6f}, "
                 f"平均相对时间延迟={avg_time_delay_relative * 1e6:.3f}μs"
             )
 
-        # 计算平均的amp_ratio_mean
-        avg_amp_ratio_mean = np.mean(
-            [calib_data["amp_ratio_mean"] for calib_data in all_calib_data]
+        # 输出平均元数据日志
+        logger.info(
+            f"平均元数据: 频率={averaged_comp_data['frequency']:.2f}Hz, "
+            f"平均幅值比={averaged_comp_data['mean_amp_ratio']:.6f}, "
+            f"平均相位差={averaged_comp_data['mean_phase_shift']:.6f}rad"
         )
-        logger.info(f"平均绝对幅值比典型值: {avg_amp_ratio_mean:.6f}")
 
-        # 创建最终的CalibData
+        # 使用comp_to_tf将平均后的CompData转换为TFData
+        logger.info("将平均后的CompData转换为TFData")
+        averaged_tf_list: list[PointTFData] = []
+        for comp_point in averaged_comp_data["comp_list"]:
+            tf_point = comp_to_tf(
+                comp_data=comp_point,
+                frequency=averaged_comp_data["frequency"],
+                mean_amp_ratio=averaged_comp_data["mean_amp_ratio"],
+                mean_phase_shift=averaged_comp_data["mean_phase_shift"],
+            )
+            averaged_tf_list.append(tf_point)
+
+        # 构建平均后的TFData
+        averaged_tf_data: TFData = {
+            "tf_list": averaged_tf_list,
+            "frequency": averaged_comp_data["frequency"],
+            "mean_amp_ratio": averaged_comp_data["mean_amp_ratio"],
+            "mean_phase_shift": averaged_comp_data["mean_phase_shift"],
+        }
+
+        # 保存平均后的TFData到内部状态（用于polar模式绘图）
+        self._result_averaged_tf_data = averaged_tf_data
+
+        # 第四阶段：绘制极坐标图和保存最终数据
+        logger.info("=" * 60)
+        logger.info("第四阶段：绘制极坐标图和保存最终数据")
+        logger.info("=" * 60)
+
+        # 绘制polar模式绘图（使用平均后的TFData）
+        logger.info("绘制传递函数极坐标图（概览图）")
+        polar_plot_path = result_path / "transfer_function_polar.png"
+        self.plot_transfer_functions(mode="polar", save_path=polar_plot_path)
+        logger.info(f"已保存polar模式绘图到: {polar_plot_path}")
+
+        # 创建最终的CalibData（用于保存和后续使用）
         final_calib_data: CalibData = {
-            "comp_list": averaged_comp_list,
+            "comp_list": averaged_comp_data["comp_list"],
             "ao_channels": self._ao_channels,
             "ai_channel": self._ai_channel,
             "sampling_info": self._sampling_info,
             "sine_args": self._sine_args,
-            "amp_ratio_mean": avg_amp_ratio_mean,
+            "amp_ratio_mean": averaged_comp_data["mean_amp_ratio"],
         }
-
-        # 更新内部状态为平均后的结果（这样 plot_transfer_functions 的 overview 模式能使用真正的最终数据）
-        self._result_final_comp_list = averaged_comp_list
-        self._amp_ratio_mean = avg_amp_ratio_mean
-
-        # 保存所有starts的raw_comp_list（用于cartesian模式绘图）
-        self._result_raw_comp_list = all_raw_comp_list
 
         # 保存最终的CalibData
         final_calib_data_path = result_path / "calib_data.pkl"
@@ -787,30 +770,13 @@ class CaliberOctopus:
             logger.error(f"保存最终CalibData失败: {e}", exc_info=True)
             raise OSError(f"保存最终CalibData失败: {e}") from e
 
-        # 保存最后一次校准的原始SweepData（用于后续分析）
-        raw_sweep_data_path = result_path / "raw_sweep_data.pkl"
-        self.save_sweep_data(raw_sweep_data_path)
+        # 更新内部状态为平均后的结果
+        self._result_averaged_comp_data = averaged_comp_data
+        self._amp_ratio_mean = averaged_comp_data["mean_amp_ratio"]
 
-        # 绘制polar模式绘图（使用最终平均后的数据）
-        polar_plot_path = result_path / "transfer_function_polar.png"
-        self.plot_transfer_functions(mode="polar", save_path=polar_plot_path)
-        logger.info(f"已保存polar模式绘图到: {polar_plot_path}")
-
-        # 绘制cartesian模式绘图(使用最终平均后的数据)
-        cartesian_plot_path = result_path / "transfer_function_cartesian.png"
-        self.plot_transfer_functions(mode="cartesian", save_path=cartesian_plot_path)
-        logger.info(f"已保存cartesian模式绘图到: {cartesian_plot_path}")
-
-        # 删除临时文件夹及其内容
-        import shutil
-
-        try:
-            shutil.rmtree(temp_folder)
-            logger.info(f"已删除临时文件夹: {temp_folder}")
-        except Exception as e:
-            logger.warning(f"删除临时文件夹失败: {e}")
-
+        logger.info("=" * 60)
         logger.info(f"校准流程完成，所有结果已保存到: {result_path}")
+        logger.info("=" * 60)
 
     def save_calib_data(self, file_path: str | Path) -> None:
         """
@@ -825,7 +791,7 @@ class CaliberOctopus:
             RuntimeError: 当尚未执行校准时
             IOError: 当文件保存失败时
         """
-        if self._result_final_comp_list is None or self._amp_ratio_mean is None:
+        if self._result_averaged_comp_data is None or self._amp_ratio_mean is None:
             raise RuntimeError("尚未执行校准，无法保存结果")
 
         # 转换为Path对象
@@ -836,7 +802,7 @@ class CaliberOctopus:
 
         # 准备保存的数据（只保存最终平均后的补偿数据）
         calib_data: CalibData = {
-            "comp_list": self._result_final_comp_list,
+            "comp_list": self._result_averaged_comp_data["comp_list"],
             "ao_channels": self._ao_channels,
             "ai_channel": self._ai_channel,
             "sampling_info": self._sampling_info,
@@ -852,45 +818,17 @@ class CaliberOctopus:
             logger.error(f"保存校准结果失败: {e}", exc_info=True)
             raise OSError(f"保存校准结果失败: {e}") from e
 
-    def save_sweep_data(self, file_path: str | Path) -> None:
-        """
-        保存原始SweepData（未平均/滤波处理）到本地文件
-
-        Args:
-            file_path: 保存文件的路径（支持字符串或Path对象）
-
-        Raises:
-            RuntimeError: 当尚未执行校准时
-            IOError: 当文件保存失败时
-        """
-        if self._result_raw_sweep_data is None:
-            raise RuntimeError("尚未执行校准，无法保存数据")
-
-        # 转换为Path对象
-        save_path = Path(file_path)
-
-        # 确保父目录存在
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            with open(save_path, "wb") as f:
-                pickle.dump(self._result_raw_sweep_data, f)
-            logger.info(f"校准SweepData已保存到: {save_path}")
-        except Exception as e:
-            logger.error(f"保存SweepData失败: {e}", exc_info=True)
-            raise OSError(f"保存SweepData失败: {e}") from e
-
     def plot_transfer_functions(
         self,
         mode: Literal["polar", "cartesian"],
         save_path: str | Path | None = None,
     ) -> None:
         """
-        绘制补偿数据
+        绘制传递函数或补偿数据
 
         支持两种绘图模式：
-        - polar（极坐标）: 在极坐标系中显示所有补偿数据的分布情况，属于"概览图"
-        - cartesian（直角坐标）: 使用自适应坐标轴缩放显示测量点周围的细节，属于"细节图"
+        - polar（极坐标）: 使用平均后的TFData绘制传递函数极坐标图，属于"概览图"
+        - cartesian（直角坐标）: 使用所有starts的CompData绘制补偿数据直角坐标图，属于"细节图"
 
         Args:
             mode: 绘图模式，"polar"为极坐标图，"cartesian"为直角坐标图
@@ -899,41 +837,48 @@ class CaliberOctopus:
         Raises:
             RuntimeError: 当尚未执行校准时
         """
-        if self._result_final_comp_list is None:
-            raise RuntimeError("尚未执行校准，无法绘制结果")
-
-        # 获取频率用于时间延迟到相位的转换
-        frequency = self._sine_args["frequency"]
-
-        # 根据模式选择数据源
+        # 根据模式选择数据源和绘图方式
         if mode == "polar":
-            # polar模式使用平均后的最终结果
-            comp_data_list = self._result_final_comp_list
+            # polar模式使用平均后的TFData
+            if (
+                not hasattr(self, "_result_averaged_tf_data")
+                or self._result_averaged_tf_data is None
+            ):
+                raise RuntimeError("尚未执行校准，无法绘制极坐标图")
+
+            tf_data = self._result_averaged_tf_data
+
+            # 提取传递函数数据
+            amp_ratios = []
+            phase_shifts = []
+            channel_indices = []
+
+            for tf_point in tf_data["tf_list"]:
+                amp_ratios.append(tf_point["amp_ratio"])
+                phase_shifts.append(tf_point["phase_shift"])
+                channel_indices.append(int(tf_point["position"].y) - 1)
+
         elif mode == "cartesian":
-            # cartesian模式使用所有starts的详细数据
-            if self._result_raw_comp_list is None:
-                raise RuntimeError("尚未执行校准，无法绘制详细结果")
-            comp_data_list = self._result_raw_comp_list
+            # cartesian模式使用所有starts的CompData
+            if self._result_raw_comp_data is None:
+                raise RuntimeError("尚未执行校准，无法绘制直角坐标图")
+
+            comp_data = self._result_raw_comp_data
+
+            # 提取补偿数据
+            amp_ratios = []
+            time_delays = []
+            channel_indices = []
+            start_indices = []
+
+            for comp_point in comp_data["comp_list"]:
+                amp_ratios.append(comp_point["amp_ratio"])
+                time_delays.append(comp_point["time_delay"])
+                channel_indices.append(int(comp_point["position"].y) - 1)
+                start_indices.append(int(comp_point["position"].x))
+
         else:
             raise ValueError(f"不支持的绘图模式: {mode}")
-
-        # 提取所有数据
-        amp_ratios = []
-        time_delays = []
-        channel_indices = []
-        start_indices = []  # 用于cartesian模式标注
-
-        for comp_data in comp_data_list:
-            # 从PointCompData中提取相对幅值补偿倍率和时间延迟
-            amp_ratio_relative = comp_data["amp_ratio"]
-            time_delay = comp_data["time_delay"]
-            channel_idx = int(comp_data["position"].y) - 1
-            start_idx = int(comp_data["position"].x)  # x坐标存储start索引
-
-            amp_ratios.append(amp_ratio_relative)
-            time_delays.append(time_delay)
-            channel_indices.append(channel_idx)
-            start_indices.append(start_idx)
 
         if mode == "polar":
             logger.info("开始绘制传递函数极坐标图")
@@ -941,8 +886,8 @@ class CaliberOctopus:
             fig = plt.figure(figsize=(10, 10))
             ax = fig.add_subplot(111, projection="polar")
 
-            # 将时间延迟转换为相位（弧度）
-            angles = [2.0 * np.pi * frequency * td for td in time_delays]
+            # 使用相位差作为角度（已经是弧度）
+            angles = phase_shifts
 
             # 绘制散点
             scatter = ax.scatter(
@@ -978,7 +923,7 @@ class CaliberOctopus:
 
             # 设置标题
             ax.set_title(
-                f"补偿数据极坐标分布\n"
+                f"传递函数极坐标分布（平均后）\n"
                 f"频率: {self._sine_args['frequency']}Hz, "
                 f"幅值: {self._sine_args['amplitude']}V",
                 fontsize=14,
@@ -1034,13 +979,17 @@ class CaliberOctopus:
                     textcoords="offset points",
                     fontsize=8,
                     alpha=0.9,
-                    bbox=dict(boxstyle="round,pad=0.3", facecolor="wheat", alpha=0.7),
-                    arrowprops=dict(
-                        arrowstyle="->",
-                        connectionstyle="arc3,rad=0.2",
-                        color="gray",
-                        lw=1.5,
-                    ),
+                    bbox={
+                        "boxstyle": "round,pad=0.3",
+                        "facecolor": "wheat",
+                        "alpha": 0.7,
+                    },
+                    arrowprops={
+                        "arrowstyle": "->",
+                        "connectionstyle": "arc3,rad=0.2",
+                        "color": "gray",
+                        "lw": 1.5,
+                    },
                     zorder=4,
                 )
 
@@ -1101,67 +1050,56 @@ class CaliberOctopus:
         logger.info("补偿数据图绘制完成")
 
     @property
-    def result_raw_sweep_data(self) -> SweepData | None:
+    def result_averaged_tf_data(self) -> TFData | None:
         """
-        获取校准过程中采集的原始SweepData
+        获取平均后的传递函数数据
+
+        包含所有通道平均后的传递函数数据，用于polar模式绘图。
 
         Returns:
-            SweepData对象，如果尚未校准则返回None
+            TFData对象，如果尚未校准则返回None
         """
-        if self._result_raw_sweep_data is None:
+        if self._result_averaged_tf_data is None:
             return None
         # 深拷贝以避免外部修改
         import copy
 
-        return copy.deepcopy(self._result_raw_sweep_data)
+        return copy.deepcopy(self._result_averaged_tf_data)
 
     @property
-    def result_raw_tf_list(self) -> list[PointTFData] | None:
-        """
-        获取所有starts的传递函数数据（未平均）
-
-        包含所有独立校准运行的详细数据。例如，如果校准8个通道，运行3次starts，
-        则此列表包含3×8=24个PointTFData对象。每个对象的position.x存储start索引，
-        position.y存储通道索引+1。
-
-        此数据用于cartesian模式绘图，以显示所有测量点的细节。
-
-        Returns:
-            传递函数数据列表（包含所有starts的数据），如果尚未校准则返回None
-        """
-        if self._result_raw_tf_list is None:
-            return None
-        return self._result_raw_tf_list.copy()
-
-    @property
-    def result_raw_comp_list(self) -> list[PointCompData] | None:
+    def result_raw_comp_data(self) -> CompData | None:
         """
         获取所有starts的补偿数据（未平均）
 
-        包含所有独立校准运行的详细数据。例如，如果校准8个通道，运行3次starts，
-        则此列表包含3×8=24个PointCompData对象。每个对象的position.x存储start索引，
-        position.y存储通道索引+1。
+        包含所有独立校准运行的详细数据。CompData中的comp_list包含所有starts×通道数的
+        PointCompData对象。每个对象的position.x存储start索引，position.y存储通道索引+1。
 
         此数据用于cartesian模式绘图，以显示所有测量点的细节。
 
         Returns:
-            补偿数据列表（包含所有starts的数据），如果尚未校准则返回None
+            CompData对象（包含所有starts的数据），如果尚未校准则返回None
         """
-        if self._result_raw_comp_list is None:
+        if self._result_raw_comp_data is None:
             return None
-        return self._result_raw_comp_list.copy()
+        # 深拷贝以避免外部修改
+        import copy
+
+        return copy.deepcopy(self._result_raw_comp_data)
 
     @property
-    def result_final_comp_list(self) -> list[PointCompData] | None:
+    def result_final_comp_data(self) -> CompData | None:
         """
         获取最终的补偿数据（每个通道平均后的结果）
 
         Returns:
-            补偿数据列表（每个通道一个PointCompData），如果尚未校准则返回None
+            CompData对象（每个通道一个PointCompData），如果尚未校准则返回None
         """
-        if self._result_final_comp_list is None:
+        if self._result_averaged_comp_data is None:
             return None
-        return self._result_final_comp_list.copy()
+        # 深拷贝以避免外部修改
+        import copy
+
+        return copy.deepcopy(self._result_averaged_comp_data)
 
     @property
     def ao_channels(self) -> tuple[str, ...]:
@@ -1174,7 +1112,7 @@ class CaliberOctopus:
         return self._ao_channels
 
     @property
-    def ai_channels(self) -> tuple[str, ...]:
+    def ai_channel(self) -> str:
         """
         获取AI通道列表
 

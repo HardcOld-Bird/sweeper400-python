@@ -205,7 +205,7 @@ def load_sweep_data(file_path: str | Path) -> SweepData:
 
     Returns:
         SweepData: 包含以下键的字典：
-            - "ai_data_list": List[PointRawData]，每个PointRawData包含：
+            - "ai_data_list": List[PointSweepData]，每个PointRawData包含：
                 - "position": Point2D对象，表示该点的坐标
                 - "ai_data": List[Waveform]，该点采集的所有AI波形
             - "ao_data": Waveform，扫场过程中使用的输出波形
@@ -1054,7 +1054,7 @@ class Sweeper:
 
         数据结构：
         {
-            "ai_data_list": List[PointRawData]，每个PointRawData包含：
+            "ai_data_list": List[PointSweepData]，每个PointRawData包含：
                 - "position": Point2D对象，表示该点的坐标
                 - "ai_data": List[Waveform]，该点采集的所有AI波形
             "ao_data": Waveform，扫场过程中使用的输出波形

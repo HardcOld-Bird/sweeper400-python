@@ -515,7 +515,7 @@ class Point2D(NamedTuple):
 
 
 # 定义Sweeper采集的单点原始数据格式
-class PointRawData(TypedDict):
+class PointSweepData(TypedDict):
     """
     Sweeper采集的单点原始数据格式
 
@@ -538,7 +538,7 @@ class SweepData(TypedDict):
         **ao_data**: 输出波形
     """
 
-    ai_data_list: list[PointRawData]
+    ai_data_list: list[PointSweepData]
     ao_data: Waveform
 
 
@@ -587,6 +587,48 @@ class PointCompData(TypedDict):
     position: "Point2D"
     amp_ratio: float
     time_delay: float
+
+
+# 定义传递函数计算结果容器格式
+class TFData(TypedDict):
+    """
+    传递函数计算结果容器格式
+
+    该类型包含传递函数计算的完整结果，包括所有测量点的传递函数数据
+    以及计算过程中的关键参数（频率、平均幅值比、平均相位差）。
+
+    ## 内部组成:
+        **tf_list**: 传递函数数据列表，每个元素为PointTFData
+        **frequency**: 信号频率（Hz）
+        **mean_amp_ratio**: 所有点的平均幅值比
+        **mean_phase_shift**: 所有点的平均相位差（弧度制）
+    """
+
+    tf_list: list["PointTFData"]
+    frequency: float
+    mean_amp_ratio: float
+    mean_phase_shift: float
+
+
+# 定义补偿参数计算结果容器格式
+class CompData(TypedDict):
+    """
+    补偿参数计算结果容器格式
+
+    该类型包含补偿参数计算的完整结果，包括所有测量点的补偿数据
+    以及计算过程中的关键参数（频率、平均幅值比、平均相位差）。
+
+    ## 内部组成:
+        **comp_list**: 补偿参数数据列表，每个元素为PointCompData
+        **frequency**: 信号频率（Hz）
+        **mean_amp_ratio**: 所有点的平均幅值比
+        **mean_phase_shift**: 所有点的平均相位差（弧度制）
+    """
+
+    comp_list: list["PointCompData"]
+    frequency: float
+    mean_amp_ratio: float
+    mean_phase_shift: float
 
 
 # 定义校准数据格式
