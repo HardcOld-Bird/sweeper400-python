@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from ..logger import get_logger
-from .my_dtypes import CalibData, Waveform
+from .my_dtypes import CompData, Waveform
 
 # 获取模块日志器
 logger = get_logger(__name__)
@@ -22,17 +22,17 @@ logger = get_logger(__name__)
 
 def calib_multi_ch_wf(
     input_waveform: Waveform,
-    calib_data_path: str | Path,
+    comp_data_path: str | Path,
 ) -> Waveform:
     """
-    基于校准数据对多通道波形进行幅值和时间补偿
+    基于补偿数据对多通道波形进行幅值和时间补偿
 
-    该函数接收一个多通道Waveform和一个CalibData文件路径，
-    根据校准数据对每个通道进行幅值和时间补偿。
+    该函数接收一个多通道Waveform和一个CompData文件路径，
+    根据补偿数据对每个通道进行幅值和时间补偿。
 
     **重要假设**：
     - 输入波形的每个通道内容在时间上是首尾相接的（循环信号）
-    - 输入波形的通道数必须与CalibData的通道数一致
+    - 输入波形的通道数必须与CompData的通道数一致
     - 时间补偿通过循环移位实现，遵循"只切割开头，不切割末尾"的原则
 
     **补偿原理**：
@@ -45,16 +45,16 @@ def calib_multi_ch_wf(
 
     Args:
         input_waveform: 输入的多通道波形（二维数组，每行对应一个通道）
-        calib_data_path: CalibData文件的路径（.pkl文件）
+        comp_data_path: CompData文件的路径（.pkl文件）
 
     Returns:
         output_waveform: 补偿后的多通道波形
 
     Raises:
         ValueError: 当输入波形不是多通道时
-        ValueError: 当通道数与CalibData不匹配时
-        FileNotFoundError: 当CalibData文件不存在时
-        RuntimeError: 当加载CalibData失败时
+        ValueError: 当通道数与CompData不匹配时
+        FileNotFoundError: 当CompData文件不存在时
+        RuntimeError: 当加载CompData失败时
 
     Examples:
         ```python
@@ -64,7 +64,7 @@ def calib_multi_ch_wf(
         >>> # 应用校准补偿
         >>> calibrated_waveform = calib_multi_ch_wf(
         ...     noise_waveform,
-        ...     "calib_data.pkl"
+        ...     "comp_data.pkl"
         ... )
         >>> print(calibrated_waveform.shape)  # (8, 10000)
         ```
@@ -76,7 +76,7 @@ def calib_multi_ch_wf(
         f"开始多通道波形校准补偿: "
         f"waveform_shape={input_waveform.shape}, "
         f"sampling_rate={input_waveform.sampling_rate}Hz, "
-        f"calib_data_path={calib_data_path}"
+        f"comp_data_path={comp_data_path}"
     )
 
     # 1. 验证输入波形是多通道
@@ -95,29 +95,29 @@ def calib_multi_ch_wf(
 
     logger.debug(f"输入波形: {channels_num}通道, {samples_num}采样点")
 
-    # 2. 加载校准数据
-    calib_data_path = Path(calib_data_path)
-    if not calib_data_path.exists():
-        logger.error(f"校准数据文件不存在: {calib_data_path}", exc_info=True)
-        raise FileNotFoundError(f"校准数据文件不存在: {calib_data_path}")
+    # 2. 加载补偿数据
+    comp_data_path = Path(comp_data_path)
+    if not comp_data_path.exists():
+        logger.error(f"补偿数据文件不存在: {comp_data_path}", exc_info=True)
+        raise FileNotFoundError(f"补偿数据文件不存在: {comp_data_path}")
 
     try:
-        with open(calib_data_path, "rb") as f:
-            calib_data: CalibData = pickle.load(f)
-        logger.info(f"成功加载校准数据文件: {calib_data_path}")
+        with open(comp_data_path, "rb") as f:
+            comp_data: CompData = pickle.load(f)
+        logger.info(f"成功加载补偿数据文件: {comp_data_path}")
     except Exception as e:
-        logger.error(f"加载校准数据文件失败: {e}", exc_info=True)
-        raise RuntimeError(f"加载校准数据文件失败: {e}") from e
+        logger.error(f"加载补偿数据文件失败: {e}", exc_info=True)
+        raise RuntimeError(f"加载补偿数据文件失败: {e}") from e
 
     # 3. 验证通道数一致性
-    calib_channels_num = len(calib_data["tf_list"])
-    if channels_num != calib_channels_num:
+    comp_channels_num = len(comp_data["comp_list"])
+    if channels_num != comp_channels_num:
         logger.error(
-            f"输入波形通道数({channels_num})与校准数据通道数({calib_channels_num})不匹配",
+            f"输入波形通道数({channels_num})与补偿数据通道数({comp_channels_num})不匹配",
             exc_info=True,
         )
         raise ValueError(
-            f"输入波形通道数({channels_num})与校准数据通道数({calib_channels_num})不匹配"
+            f"输入波形通道数({channels_num})与补偿数据通道数({comp_channels_num})不匹配"
         )
 
     logger.debug(f"通道数验证通过: {channels_num}通道")
@@ -127,33 +127,31 @@ def calib_multi_ch_wf(
 
     # 5. 对每个通道进行补偿
     for ch_idx in range(channels_num):
-        # 提取传递函数参数
-        tf_data = calib_data["tf_list"][ch_idx]
-        amp_ratio = tf_data["amp_ratio"]
-        phase_shift = tf_data["phase_shift"]
+        # 提取补偿参数
+        point_comp_data = comp_data["comp_list"][ch_idx]
+        amp_ratio = point_comp_data["amp_ratio"]
+        time_delay = point_comp_data["time_delay"]
 
         logger.debug(
-            f"通道 {ch_idx}: 幅值比={amp_ratio:.6f}, 相位差={phase_shift:.6f}rad"
+            f"通道 {ch_idx}: 幅值比={amp_ratio:.6f}, 时间延迟={time_delay*1e6:.3f}μs"
         )
 
         # 5.1 幅值补偿
-        # 输出幅值 = 输入幅值 / 传递函数幅值比
-        compensated_amplitude = input_waveform[ch_idx, :] / amp_ratio
+        # 输出幅值 = 输入幅值 * 幅值补偿比
+        compensated_amplitude = input_waveform[ch_idx, :] * amp_ratio
 
         # 5.2 时间补偿（通过循环移位）
-        # 从校准数据中提取频率信息来计算时间延迟
-        # 时间延迟 = 相位差 / (2π * 频率)
-        # 正的phase_shift表示系统会让信号延迟，需要补偿（让输入提前）
-        frequency = calib_data["sine_args"]["frequency"]
-        time_delay = phase_shift / (2 * np.pi * frequency)
+        # 从补偿数据中直接使用时间延迟
+        # 时间延迟已经在补偿数据中计算好了
+        # 正的time_delay表示需要让信号提前（向左移）
+        frequency = comp_data["sine_args"]["frequency"]
 
         # 计算采样点延迟（四舍五入以获得整数采样点）
-        # 为了补偿系统的延迟，我们需要让输入信号提前（向左移）
+        # time_delay已经是需要补偿的时间延迟
         # np.roll的shift参数：正值向右移（延迟），负值向左移（提前）
-        # 因此，sample_delay = -time_delay * sampling_rate
-        # 这样正的phase_shift会导致负的sample_delay（向左移，提前）
-        # 遵循"只切割开头，不切割末尾"原则：向左移会将开头移到末尾
-        sample_delay = int(np.round(-time_delay * sampling_rate))
+        # 正的time_delay表示需要让信号提前，所以sample_delay应该为正（向右移）
+        # 遵循"只切割开头，不切割末尾"原则
+        sample_delay = int(np.round(time_delay * sampling_rate))
 
         logger.debug(
             f"通道 {ch_idx}: 时间延迟={time_delay*1e6:.3f}μs, "

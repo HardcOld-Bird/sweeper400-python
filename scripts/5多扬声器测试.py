@@ -5,7 +5,7 @@ from sweeper400.analyze import (
     init_sine_args,
 )
 from sweeper400.measure import (
-    MultiChasCSIO,
+    SingleChasCSIO,
 )
 
 # %% 创建输出波形
@@ -24,7 +24,7 @@ def export_data(ai_waveform, chunks_num):
 # %%
 
 # 创建Sweeper对象
-csio = MultiChasCSIO(
+csio = SingleChasCSIO(
     ai_channel="PXI2Slot2/ai0",
     ao_channels=(
         "PXI2Slot2/ao0",

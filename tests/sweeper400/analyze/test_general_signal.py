@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from sweeper400.analyze import (
-    CalibData,
+    CompData,
     Point2D,
     PointCompData,
     SamplingInfo,
@@ -35,8 +35,8 @@ class TestCalibMultiChWf:
         return init_sine_args(frequency=100.0, amplitude=1.0, phase=0.0)
 
     @pytest.fixture
-    def calib_data(self, sine_args: SineArgs, sampling_info: SamplingInfo) -> CalibData:
-        """创建测试用的校准数据"""
+    def comp_data(self, sine_args: SineArgs, sampling_info: SamplingInfo) -> CompData:
+        """创建测试用的补偿数据"""
         # 创建4个通道的补偿数据
         comp_list: list[PointCompData] = []
         frequency = sine_args["frequency"]
@@ -45,32 +45,33 @@ class TestCalibMultiChWf:
             # 根据相位差计算时间延迟
             time_delay = phase_shift / (2.0 * np.pi * frequency)
 
-            comp_data: PointCompData = {
+            point_comp_data: PointCompData = {
                 "position": Point2D(x=0.0, y=float(ch_idx + 1)),
                 "amp_ratio": 0.8 + ch_idx * 0.05,  # 不同通道有不同的幅值补偿倍率
                 "time_delay": time_delay,  # 相对时间延迟
             }
-            comp_list.append(comp_data)
+            comp_list.append(point_comp_data)
 
-        calib_data: CalibData = {
+        comp_data: CompData = {
             "comp_list": comp_list,
+            "sine_args": sine_args,
+            "mean_amp_ratio": 0.825,
+            "mean_phase_shift": 0.15,
             "ao_channels": ("ao0", "ao1", "ao2", "ao3"),
             "ai_channel": "ai0",
             "sampling_info": sampling_info,
-            "sine_args": sine_args,
-            "amp_ratio_mean": 0.825,  # 添加amp_ratio_mean字段（4个通道的平均值）
         }
-        return calib_data
+        return comp_data
 
     @pytest.fixture
-    def calib_data_file(
-        self, calib_data: CalibData, tmp_path: Path
+    def comp_data_file(
+        self, comp_data: CompData, tmp_path: Path
     ) -> Path:
-        """创建临时的校准数据文件"""
-        calib_file = tmp_path / "test_calib_data.pkl"
-        with open(calib_file, "wb") as f:
-            pickle.dump(calib_data, f)
-        return calib_file
+        """创建临时的补偿数据文件"""
+        comp_file = tmp_path / "test_comp_data.pkl"
+        with open(comp_file, "wb") as f:
+            pickle.dump(comp_data, f)
+        return comp_file
 
     @pytest.fixture
     def multi_ch_waveform(self, sampling_info: SamplingInfo) -> Waveform:
@@ -87,13 +88,13 @@ class TestCalibMultiChWf:
     def test_basic_functionality(
         self,
         multi_ch_waveform: Waveform,
-        calib_data_file: Path,
+        comp_data_file: Path,
     ) -> None:
         """测试基本功能"""
         print("\n=== 测试基本功能 ===")
 
         # 调用函数
-        output_waveform = calib_multi_ch_wf(multi_ch_waveform, calib_data_file)
+        output_waveform = calib_multi_ch_wf(multi_ch_waveform, comp_data_file)
 
         # 验证输出形状
         assert output_waveform.shape == multi_ch_waveform.shape
@@ -108,24 +109,24 @@ class TestCalibMultiChWf:
     def test_amplitude_compensation(
         self,
         multi_ch_waveform: Waveform,
-        calib_data_file: Path,
-        calib_data: CalibData,
+        comp_data_file: Path,
+        comp_data: CompData,
     ) -> None:
         """测试幅值补偿"""
         print("\n=== 测试幅值补偿 ===")
 
         # 调用函数
-        output_waveform = calib_multi_ch_wf(multi_ch_waveform, calib_data_file)
+        output_waveform = calib_multi_ch_wf(multi_ch_waveform, comp_data_file)
 
         # 验证幅值补偿
         for ch_idx in range(multi_ch_waveform.channels_num):
-            amp_ratio = calib_data["tf_list"][ch_idx]["amp_ratio"]
-            # 输出应该是输入除以幅值比
-            expected_amplitude = multi_ch_waveform[ch_idx, :] / amp_ratio
+            amp_ratio = comp_data["comp_list"][ch_idx]["amp_ratio"]
+            # 输出应该是输入乘以幅值补偿比
+            expected_amplitude = multi_ch_waveform[ch_idx, :] * amp_ratio
             # 由于还有时间补偿（循环移位），我们只检查RMS值
             input_rms = np.sqrt(np.mean(multi_ch_waveform[ch_idx, :] ** 2))
             output_rms = np.sqrt(np.mean(output_waveform[ch_idx, :] ** 2))
-            expected_rms = input_rms / amp_ratio
+            expected_rms = input_rms * amp_ratio
 
             print(
                 f"通道 {ch_idx}: 输入RMS={input_rms:.6f}, "
@@ -138,7 +139,7 @@ class TestCalibMultiChWf:
         print("幅值补偿测试通过")
 
     def test_invalid_input_single_channel(
-        self, sampling_info: SamplingInfo, calib_data_file: Path
+        self, sampling_info: SamplingInfo, comp_data_file: Path
     ) -> None:
         """测试单通道输入应该抛出错误"""
         print("\n=== 测试单通道输入错误处理 ===")
@@ -152,17 +153,17 @@ class TestCalibMultiChWf:
 
         # 应该抛出ValueError
         with pytest.raises(ValueError, match="输入波形必须是多通道"):
-            calib_multi_ch_wf(single_ch_waveform, calib_data_file)
+            calib_multi_ch_wf(single_ch_waveform, comp_data_file)
 
         print("单通道输入错误处理测试通过")
 
     def test_channel_mismatch(
-        self, sampling_info: SamplingInfo, calib_data_file: Path
+        self, sampling_info: SamplingInfo, comp_data_file: Path
     ) -> None:
         """测试通道数不匹配应该抛出错误"""
         print("\n=== 测试通道数不匹配错误处理 ===")
 
-        # 创建8通道波形（而校准数据只有4通道）
+        # 创建8通道波形（而补偿数据只有4通道）
         wrong_ch_data = np.random.randn(8, sampling_info["samples_num"])
         wrong_ch_waveform = Waveform(
             input_array=wrong_ch_data,
@@ -171,6 +172,6 @@ class TestCalibMultiChWf:
 
         # 应该抛出ValueError
         with pytest.raises(ValueError, match="通道数.*不匹配"):
-            calib_multi_ch_wf(wrong_ch_waveform, calib_data_file)
+            calib_multi_ch_wf(wrong_ch_waveform, comp_data_file)
 
         print("通道数不匹配错误处理测试通过")

@@ -3,9 +3,11 @@
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
 exclude = [
-    "参考资料/**",
-    "tests/**",
+    "htmlcov/**",
     "scripts/**",
+    "storage/**",
+    "tests/**",
+    "参考资料/**",
     "src/sweeper400/analyze/plot.py"
 ]
 reportMissingTypeStubs = "none"

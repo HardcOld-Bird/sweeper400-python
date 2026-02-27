@@ -10,12 +10,12 @@
 import numpy as np
 
 from ..logger import get_logger
-from .basic_sine import extract_single_tone_information_vvi
 from .my_dtypes import (
+    ChannelCompData,
+    ChannelTFData,
     CompData,
-    PointCompData,
     PointSweepData,
-    PointTFData,
+    SineArgs,
     SweepData,
     TFData,
     Waveform,
@@ -32,7 +32,10 @@ def average_sweep_data(
     对SweepData中的所有波形进行按位相加并取平均
 
     该函数对SweepData中的所有AI波形进行按位相加并取平均，
-    以减少随机噪声的影响。
+    以减少随机噪声的影响。支持单通道和多通道波形。
+
+    对于单通道波形（1D数组），返回1D平均波形。
+    对于多通道波形（2D数组），对每个通道分别平均，返回2D平均波形。
 
     Args:
         sweep_data: 原始的扫场测量数据
@@ -41,36 +44,84 @@ def average_sweep_data(
         处理后的SweepData，结构与输入完全相同，但每个点只有一条AI波形
 
     Raises:
-        ValueError: 当输入数据为空时
+        ValueError: 当输入数据为空或波形维度不一致时
     """
 
     # 获取必要参数
     ai_data_list = sweep_data["ai_data_list"]
-    sampling_rate = ai_data_list[0]["ai_data"][0].sampling_rate
-    samples_num = ai_data_list[0]["ai_data"][0].samples_num
+
+    if not ai_data_list or not ai_data_list[0]["ai_data"]:
+        raise ValueError("输入的SweepData为空")
+
+    first_waveform = ai_data_list[0]["ai_data"][0]
+    sampling_rate = first_waveform.sampling_rate
+    samples_num = first_waveform.samples_num
+    is_multi_channel = first_waveform.ndim == 2
+
+    if is_multi_channel:
+        num_channels = first_waveform.shape[0]
+        logger.debug(f"检测到多通道波形，通道数: {num_channels}")
+    else:
+        logger.debug("检测到单通道波形")
 
     averaged_ai_data_list = []
     # 遍历每个测量点
     for _, point_data in enumerate(ai_data_list):
         # 将所有波形数据按位相加
         ai_waveforms = point_data["ai_data"]
-        summed_data = np.zeros(samples_num, dtype=np.float64)
-        for wf in ai_waveforms:
-            # 处理多通道数据，只使用第一个通道
-            if wf.ndim == 2:
-                summed_data += wf[0, :]
-            else:
+
+        if is_multi_channel:
+            # 多通道情况：对每个通道分别平均
+            # 初始化累加数组 (num_channels, samples_num)
+            summed_data = np.zeros((num_channels, samples_num), dtype=np.float64)
+
+            for wf in ai_waveforms:
+                # 验证波形维度
+                if wf.ndim != 2 or wf.shape[0] != num_channels:
+                    raise ValueError(
+                        f"波形维度不一致：期望 (num_channels={num_channels}, samples_num={samples_num})，"
+                        f"实际 shape={wf.shape}"
+                    )
                 summed_data += wf
 
-        # 取平均
-        averaged_data = summed_data / len(ai_waveforms)
+            # 取平均
+            averaged_data = summed_data / len(ai_waveforms)
 
-        # 创建平均后的Waveform对象
-        averaged_ai_waveform = Waveform(
-            input_array=averaged_data,
-            sampling_rate=sampling_rate,
-            timestamp=ai_waveforms[0].timestamp,  # 使用第一个波形的时间戳
-        )
+            # 创建平均后的Waveform对象（保留channel_names元数据）
+            averaged_ai_waveform = Waveform(
+                input_array=averaged_data,
+                sampling_rate=sampling_rate,
+                timestamp=ai_waveforms[0].timestamp,
+                channel_names=ai_waveforms[0].channel_names
+                if hasattr(ai_waveforms[0], "channel_names")
+                else None,
+            )
+        else:
+            # 单通道情况：直接平均
+            summed_data = np.zeros(samples_num, dtype=np.float64)
+
+            for wf in ai_waveforms:
+                # 验证波形维度
+                if wf.ndim == 2:
+                    # 如果是2D但只有1个通道，提取第一个通道
+                    if wf.shape[0] == 1:
+                        summed_data += wf[0, :]
+                    else:
+                        raise ValueError(
+                            f"波形维度不一致：期望单通道，实际 shape={wf.shape}"
+                        )
+                else:
+                    summed_data += wf
+
+            # 取平均
+            averaged_data = summed_data / len(ai_waveforms)
+
+            # 创建平均后的Waveform对象
+            averaged_ai_waveform = Waveform(
+                input_array=averaged_data,
+                sampling_rate=sampling_rate,
+                timestamp=ai_waveforms[0].timestamp,
+            )
 
         # 创建平均后的点数据
         averaged_point_data: PointSweepData = {
@@ -85,275 +136,59 @@ def average_sweep_data(
         "ao_data": sweep_data["ao_data"],
     }
 
+    logger.info(
+        f"SweepData平均完成，共处理{len(averaged_ai_data_list)}个测量点，"
+        f"{'多通道' if is_multi_channel else '单通道'}模式"
+    )
+
     return averaged_sweep_data
 
 
-def calculate_transfer_function(
-    sweep_data: SweepData,
-) -> TFData:
-    """
-    计算Sweeper采集数据的传递函数
-
-    对每个测量点的原始数据进行处理，计算输入输出信号的复数传递函数 H(ω) = A·e^(jφ)。
-    具体步骤：
-    1. 若存在多个AI波形chunks，进行按位相加并取平均
-    2. 使用extract_single_tone_information_vvi提取AI信号的正弦波参数
-    3. 使用共用的AO波形的正弦波参数
-    4. 计算传递函数：幅值比 = AI幅值 / AO幅值，相位差 = AI相位 - AO相位
-    5. 计算所有点的平均幅值比和平均相位差
-
-    Args:
-        sweep_data: Sweeper采集的完整测量数据，包含ai_data_list和ao_data
-
-    Returns:
-        TFData，包含以下字段：
-            - tf_list: 传递函数数据列表，每个元素为PointTFData
-            - frequency: 信号频率（Hz）
-            - mean_amp_ratio: 所有点的平均幅值比
-            - mean_phase_shift: 所有点的平均相位差（弧度制）
-
-    Raises:
-        ValueError: 当输入数据为空或格式不正确时
-        RuntimeError: 当AO数据没有sine_args属性时
-
-    Examples:
-        ```python
-        >>> # 假设已有采集的原始数据
-        >>> sweep_data = sweeper.get_data()  # noqa
-        >>> # 计算传递函数
-        >>> tf_result = calculate_transfer_function(sweep_data)
-        >>> for tf_data in tf_result["tf_list"]:
-        ...     print(
-        ...         f"位置: {tf_data['position']}, "
-        ...         f"幅值比: {tf_data['amp_ratio']:.4f}, "
-        ...         f"相位差: {tf_data['phase_shift']:.4f}rad"
-        ...     )
-        >>> print(f"频率: {tf_result['frequency']:.2f}Hz")
-        >>> print(f"平均幅值比: {tf_result['mean_amp_ratio']:.6f}")
-        ```
-    """
-    logger.info(f"开始计算传递函数，共 {len(sweep_data['ai_data_list'])} 个测量点。")
-
-    # 处理AI数据：如果有多个波形，按位相加并取平均
-    if len(sweep_data["ai_data_list"][0]["ai_data"]) > 1:
-        logger.warning("检测到多个AI波形，将进行按位相加并取平均")
-        sweep_data = average_sweep_data(sweep_data)
-
-    # 验证AO数据的sine_args
-    if sweep_data["ao_data"].sine_args is None:
-        logger.error("AO波形没有sine_args属性")
-        raise RuntimeError("AO波形必须包含sine_args属性")
-    else:
-        ao_sine_args = sweep_data["ao_data"].sine_args
-        logger.debug(
-            f"使用AO波形参数: 频率={ao_sine_args['frequency']:.2f}Hz, "
-            f"幅值={ao_sine_args['amplitude']:.4f}"
-        )
-
-    # 获取原始数据列表
-    ai_data_list = sweep_data["ai_data_list"]
-
-    # 存储结果
-    results: list[PointTFData] = []
-
-    # 遍历每个测量点
-    for point_idx, point_data in enumerate(ai_data_list):
-        # 只在处理较少点数时或每10个点输出一次进度信息
-        if len(ai_data_list) <= 20 or (point_idx + 1) % 10 == 0:
-            logger.debug(
-                f"处理第 {point_idx + 1}/{len(ai_data_list)} 个点: "
-                f"{point_data['position']}"
-            )
-
-        try:
-            ai_waveforms = point_data["ai_data"][0]
-
-            # 1. 提取AI信号的正弦波参数
-            ai_sine_args = extract_single_tone_information_vvi(ai_waveforms)
-
-            # 2. 计算传递函数
-            # 幅值比 = AI幅值 / AO幅值
-            amp_ratio = ai_sine_args["amplitude"] / ao_sine_args["amplitude"]
-
-            # 相位差 = AI相位 - AO相位（弧度制）
-            phase_shift = ai_sine_args["phase"] - ao_sine_args["phase"]
-
-            # 将相位差归一化到 [-π, π] 区间
-            phase_shift = np.arctan2(np.sin(phase_shift), np.cos(phase_shift))
-
-            # 3. 存储结果
-            result: PointTFData = {
-                "position": point_data["position"],
-                "amp_ratio": float(amp_ratio),
-                "phase_shift": float(phase_shift),
-            }
-            results.append(result)
-
-        except Exception as e:
-            logger.error(f"处理点 {point_idx} 时发生错误: {e}", exc_info=True)
-            # 继续处理下一个点
-            continue
-
-    logger.info(f"传递函数计算完成，成功处理 {len(results)}/{len(ai_data_list)} 个点")
-
-    # 计算平均幅值比和平均相位差
-    amp_ratios = [tf["amp_ratio"] for tf in results]
-    phase_shifts = [tf["phase_shift"] for tf in results]
-
-    mean_amp_ratio = float(np.mean(amp_ratios))
-    mean_phase_shift = float(np.mean(phase_shifts))
-
-    logger.debug(
-        f"平均幅值比: {mean_amp_ratio:.6f}, 平均相位差: {mean_phase_shift:.6f}rad"
-    )
-
-    # 返回包含结果列表和元数据的TFResult
-    tf_result: TFData = {
-        "tf_list": results,
-        "frequency": ao_sine_args["frequency"],
-        "mean_amp_ratio": mean_amp_ratio,
-        "mean_phase_shift": mean_phase_shift,
-    }
-
-    return tf_result
-
-
-def calculate_compensation_list(
-    sweep_data: SweepData,
-) -> CompData:
-    """
-    计算Sweeper采集数据的补偿参数列表
-
-    对每个测量点的原始数据进行处理，计算相对于所有点平均值的补偿参数。
-    具体步骤：
-    1. 调用calculate_transfer_function获取所有点的传递函数及其元数据
-    2. 对每个点计算相对于平均值的补偿参数：
-       - 幅值补偿倍率 = 平均幅值比 / 该点幅值比
-       - 时间延迟补偿 = (平均相位差 - 该点相位差) / (2π × 频率)
-
-    Args:
-        sweep_data: Sweeper采集的完整测量数据，包含ai_data_list和ao_data
-
-    Returns:
-        CompData，包含以下字段：
-            - comp_list: 补偿参数数据列表，每个元素为PointCompData
-            - frequency: 信号频率（Hz）
-            - mean_amp_ratio: 所有点的平均幅值比
-            - mean_phase_shift: 所有点的平均相位差（弧度制）
-
-    Raises:
-        ValueError: 当输入数据为空或格式不正确时
-        RuntimeError: 当AO数据没有sine_args属性时
-
-    Examples:
-        ```python
-        >>> # 假设已有采集的原始数据
-        >>> sweep_data = sweeper.get_data()  # noqa
-        >>> # 计算补偿参数
-        >>> comp_result = calculate_compensation_list(sweep_data)
-        >>> for comp_data in comp_result["comp_list"]:
-        ...     print(
-        ...         f"位置: {comp_data['position']}, "
-        ...         f"幅值补偿倍率: {comp_data['amp_ratio']:.4f}, "
-        ...         f"时间延迟补偿: {comp_data['time_delay']*1e6:.3f}μs"
-        ...     )
-        >>> print(f"频率: {comp_result['frequency']:.2f}Hz")
-        ```
-    """
-    logger.info(f"开始计算补偿参数，共 {len(sweep_data['ai_data_list'])} 个测量点。")
-
-    # 1. 首先计算所有点的传递函数
-    tf_result = calculate_transfer_function(sweep_data)
-
-    tf_list = tf_result["tf_list"]
-    frequency = tf_result["frequency"]
-    mean_amp_ratio = tf_result["mean_amp_ratio"]
-    mean_phase_shift = tf_result["mean_phase_shift"]
-
-    if not tf_list:
-        logger.error("传递函数列表为空，无法计算补偿参数")
-        raise ValueError("传递函数列表为空，无法计算补偿参数")
-
-    logger.debug(f"使用频率: {frequency:.2f}Hz")
-
-    # 2. 使用tf_to_comp工具函数计算每个点的补偿参数
-    results: list[PointCompData] = []
-
-    for tf_data in tf_list:
-        try:
-            # 使用工具函数进行转换
-            comp_data = tf_to_comp(
-                tf_data=tf_data,
-                frequency=frequency,
-                mean_amp_ratio=mean_amp_ratio,
-                mean_phase_shift=mean_phase_shift,
-            )
-            results.append(comp_data)
-
-        except Exception as e:
-            logger.error(f"处理点 {tf_data['position']} 时发生错误: {e}", exc_info=True)
-            # 继续处理下一个点
-            continue
-
-    logger.info(f"补偿参数计算完成，成功处理 {len(results)}/{len(tf_list)} 个点")
-
-    # 返回包含结果列表和元数据的CompResult
-    comp_result: CompData = {
-        "comp_list": results,
-        "frequency": frequency,
-        "mean_amp_ratio": mean_amp_ratio,
-        "mean_phase_shift": mean_phase_shift,
-    }
-
-    return comp_result
-
-
 def tf_to_comp(
-    tf_data: PointTFData,
-    frequency: float,
+    tf_data: ChannelTFData,
+    sine_args: SineArgs,
     mean_amp_ratio: float,
     mean_phase_shift: float,
-) -> PointCompData:
-    """
-    将传递函数数据转换为补偿数据
+) -> ChannelCompData:
+    """将通道对传递函数数据转换为通道对补偿数据。
 
-    将PointTFData（绝对传递函数）转换为PointCompData（相对于平均值的补偿参数）。
+    将 :class:`ChannelTFData`（绝对传递函数）转换为
+    :class:`ChannelCompData`（相对于平均值的补偿参数）。
+
     转换公式：
-    - 幅值补偿倍率 = 平均幅值比 / 该点幅值比
-    - 时间延迟补偿 = (平均相位差 - 该点相位差) / (2π × 频率)
 
-    Args:
-        tf_data: 传递函数数据（包含绝对幅值比和相位差）
-        frequency: 信号频率（Hz），用于将相位差转换为时间延迟
-        mean_amp_ratio: 所有点的平均幅值比
-        mean_phase_shift: 所有点的平均相位差（弧度制）
+    - 幅值补偿倍率 = 平均幅值比 / 该通道对幅值比
+    - 时间延迟补偿 = (平均相位差 - 该通道对相位差) / (2π × 频率)
 
-    Returns:
-        补偿数据，包含相对于平均值的幅值补偿倍率和时间延迟补偿值
+    参数:
+        tf_data: 单个通道对的传递函数数据（包含绝对幅值比和相位差）。
+        sine_args: 正弦波参数（包含频率、幅值和相位信息），用于将相位差转换为时间延迟。
+        mean_amp_ratio: 所有通道对的平均幅值比。
+        mean_phase_shift: 所有通道对的平均相位差（弧度制）。
 
-    Raises:
-        ValueError: 当频率为0或负数时
-        ZeroDivisionError: 当该点幅值比为0时
+    返回:
+        对应该通道对的补偿数据，包含相对于平均值的幅值补偿倍率和时间延迟补偿值。
 
-    Examples:
-        ```python
-        >>> tf_data = {
-        ...     "position": Point2D(x=0.0, y=1.0),
-        ...     "amp_ratio": 0.9,
-        ...     "phase_shift": 0.1,
-        ... }
-        >>> comp_data = tf_to_comp(tf_data, frequency=1000.0,
-        ...                         mean_amp_ratio=0.95, mean_phase_shift=0.05)
-        >>> print(comp_data)
-        ```
+    异常:
+        ValueError: 当频率为 0 或负数时。
+        ZeroDivisionError: 当该通道对幅值比为 0 时。
     """
+    frequency = sine_args["frequency"]
+
     if frequency <= 0:
         logger.error(f"频率必须为正数，收到: {frequency}")
         raise ValueError(f"频率必须为正数，收到: {frequency}")
 
     if tf_data["amp_ratio"] == 0:
-        logger.error(f"幅值比不能为0，位置: {tf_data['position']}")
-        raise ZeroDivisionError(f"幅值比不能为0，位置: {tf_data['position']}")
+        logger.error(
+            "幅值比不能为0，通道对: AO=%s, AI=%s",
+            tf_data.get("ao_channel"),
+            tf_data.get("ai_channel"),
+        )
+        raise ZeroDivisionError(
+            f"幅值比不能为0，通道对: AO={tf_data.get('ao_channel')}, "
+            f"AI={tf_data.get('ai_channel')}"
+        )
 
     # 计算幅值补偿倍率
     amp_comp_ratio = mean_amp_ratio / tf_data["amp_ratio"]
@@ -364,9 +199,10 @@ def tf_to_comp(
     # 将相位差补偿转换为时间延迟补偿（秒）
     time_delay_comp = phase_shift_comp / (2.0 * np.pi * frequency)
 
-    # 创建补偿数据
-    comp_data: PointCompData = {
-        "position": tf_data["position"],
+    # 创建补偿数据（保持通道对标识不变）
+    comp_data: ChannelCompData = {
+        "ai_channel": tf_data["ai_channel"],
+        "ao_channel": tf_data["ao_channel"],
         "amp_ratio": float(amp_comp_ratio),
         "time_delay": float(time_delay_comp),
     }
@@ -375,52 +211,47 @@ def tf_to_comp(
 
 
 def comp_to_tf(
-    comp_data: PointCompData,
-    frequency: float,
+    comp_data: ChannelCompData,
+    sine_args: "SineArgs",
     mean_amp_ratio: float,
     mean_phase_shift: float,
-) -> PointTFData:
-    """
-    将补偿数据转换为传递函数数据
+) -> ChannelTFData:
+    """将通道对补偿数据转换回通道对传递函数数据。
 
-    将PointCompData（相对于平均值的补偿参数）转换为PointTFData（绝对传递函数）。
-    这是tf_to_comp函数的逆操作。
-    转换公式：
+    这是 :func:`tf_to_comp` 的逆操作：
+
     - 幅值比 = 平均幅值比 / 幅值补偿倍率
     - 相位差 = 平均相位差 - (时间延迟补偿 × 2π × 频率)
 
-    Args:
-        comp_data: 补偿数据（包含相对于平均值的补偿参数）
-        frequency: 信号频率（Hz），用于将时间延迟转换为相位差
-        mean_amp_ratio: 所有点的平均幅值比
-        mean_phase_shift: 所有点的平均相位差（弧度制）
+    参数:
+        comp_data: 单个通道对的补偿数据（包含相对于平均值的补偿参数）。
+        sine_args: 正弦波参数（包含频率、幅值和相位信息），用于将时间延迟转换为相位差。
+        mean_amp_ratio: 所有通道对的平均幅值比。
+        mean_phase_shift: 所有通道对的平均相位差（弧度制）。
 
-    Returns:
-        传递函数数据，包含绝对幅值比和相位差
+    返回:
+        对应该通道对的传递函数数据，包含绝对幅值比和相位差。
 
-    Raises:
-        ValueError: 当频率为0或负数时
-        ZeroDivisionError: 当幅值补偿倍率为0时
-
-    Examples:
-        ```python
-        >>> comp_data = {
-        ...     "position": Point2D(x=0.0, y=1.0),
-        ...     "amp_ratio": 1.05,
-        ...     "time_delay": 1e-5,
-        ... }
-        >>> tf_data = comp_to_tf(comp_data, frequency=1000.0,
-        ...                       mean_amp_ratio=0.95, mean_phase_shift=0.05)
-        >>> print(tf_data)
-        ```
+    异常:
+        ValueError: 当频率为 0 或负数时。
+        ZeroDivisionError: 当幅值补偿倍率为 0 时。
     """
+    frequency = sine_args["frequency"]
+
     if frequency <= 0:
         logger.error(f"频率必须为正数，收到: {frequency}")
         raise ValueError(f"频率必须为正数，收到: {frequency}")
 
     if comp_data["amp_ratio"] == 0:
-        logger.error(f"幅值补偿倍率不能为0，位置: {comp_data['position']}")
-        raise ZeroDivisionError(f"幅值补偿倍率不能为0，位置: {comp_data['position']}")
+        logger.error(
+            "幅值补偿倍率不能为0，通道对: AO=%s, AI=%s",
+            comp_data.get("ao_channel"),
+            comp_data.get("ai_channel"),
+        )
+        raise ZeroDivisionError(
+            f"幅值补偿倍率不能为0，通道对: AO={comp_data.get('ao_channel')}, "
+            f"AI={comp_data.get('ai_channel')}"
+        )
 
     # 计算幅值比（逆运算）
     amp_ratio = mean_amp_ratio / comp_data["amp_ratio"]
@@ -434,9 +265,10 @@ def comp_to_tf(
     # 将相位差归一化到 [-π, π] 区间
     phase_shift = np.arctan2(np.sin(phase_shift), np.cos(phase_shift))
 
-    # 创建传递函数数据
-    tf_data: PointTFData = {
-        "position": comp_data["position"],
+    # 创建传递函数数据（保持通道对标识不变）
+    tf_data: ChannelTFData = {
+        "ai_channel": comp_data["ai_channel"],
+        "ao_channel": comp_data["ao_channel"],
         "amp_ratio": float(amp_ratio),
         "phase_shift": float(phase_shift),
     }
@@ -455,12 +287,12 @@ def average_comp_data_list(comp_data_list: list[CompData]) -> CompData:
         comp_data_list: CompData列表,要求:
             - 列表非空
             - 所有CompData的comp_list长度必须一致
-            - 所有CompData的frequency应该相同(函数会使用第一个的frequency)
+            - 所有CompData的sine_args应该相同(函数会使用第一个的sine_args)
 
     Returns:
         CompData: 平均后的补偿数据,包含:
             - comp_list: 每个通道位置的平均补偿参数
-            - frequency: 使用第一个CompData的频率
+            - sine_args: 使用第一个CompData的正弦波参数
             - mean_amp_ratio: 所有CompData的mean_amp_ratio的平均值
             - mean_phase_shift: 所有CompData的mean_phase_shift的平均值
 
@@ -496,9 +328,9 @@ def average_comp_data_list(comp_data_list: list[CompData]) -> CompData:
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-    # 对每个通道位置进行平均
+    # 对每个通道对进行平均
     channels_num = first_length
-    averaged_comp_list: list[PointCompData] = []
+    averaged_comp_list: list[ChannelCompData] = []
 
     for channel_idx in range(channels_num):
         # 收集该通道在所有CompData中的amp_ratio和time_delay
@@ -515,9 +347,10 @@ def average_comp_data_list(comp_data_list: list[CompData]) -> CompData:
         avg_amp_ratio = float(np.mean(amp_ratios))
         avg_time_delay = float(np.mean(time_delays))
 
-        # 创建平均后的PointCompData,position复用第一个CompData的position
-        averaged_point: PointCompData = {
-            "position": comp_data_list[0]["comp_list"][channel_idx]["position"],
+        # 创建平均后的 ChannelCompData, 通道信息复用第一个 CompData 中对应通道对
+        averaged_point: ChannelCompData = {
+            "ai_channel": comp_data_list[0]["comp_list"][channel_idx]["ai_channel"],
+            "ao_channel": comp_data_list[0]["comp_list"][channel_idx]["ao_channel"],
             "amp_ratio": avg_amp_ratio,
             "time_delay": avg_time_delay,
         }
@@ -535,18 +368,27 @@ def average_comp_data_list(comp_data_list: list[CompData]) -> CompData:
     avg_mean_phase_shift = float(
         np.mean([comp_data["mean_phase_shift"] for comp_data in comp_data_list])
     )
-    avg_frequency = comp_data_list[0]["frequency"]  # 使用第一个的频率
+
+    # 采样信息和正弦波参数: 假定所有 CompData 一致, 使用第一个
+    if "sampling_info" not in comp_data_list[0]:
+        error_msg = "平均 CompData 失败: 缺少 sampling_info 字段"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+
+    avg_sampling_info = comp_data_list[0]["sampling_info"]
+    avg_sine_args = comp_data_list[0]["sine_args"]
 
     logger.info(
-        f"平均完成: 频率={avg_frequency:.2f}Hz, "
+        f"平均完成: 频率={avg_sine_args['frequency']:.2f}Hz, "
         f"平均mean_amp_ratio={avg_mean_amp_ratio:.6f}, "
         f"平均mean_phase_shift={avg_mean_phase_shift:.6f}rad"
     )
 
-    # 创建平均后的CompData
+    # 创建平均后的CompData（匹配新的类型定义）
     averaged_comp_data: CompData = {
         "comp_list": averaged_comp_list,
-        "frequency": avg_frequency,
+        "sampling_info": avg_sampling_info,
+        "sine_args": avg_sine_args,
         "mean_amp_ratio": avg_mean_amp_ratio,
         "mean_phase_shift": avg_mean_phase_shift,
     }
@@ -565,12 +407,12 @@ def average_tf_data_list(tf_data_list: list[TFData]) -> TFData:
         tf_data_list: TFData列表,要求:
             - 列表非空
             - 所有TFData的tf_list长度必须一致
-            - 所有TFData的frequency应该相同(函数会使用第一个的frequency)
+            - 所有TFData的sine_args应该相同(函数会使用第一个的sine_args)
 
     Returns:
         TFData: 平均后的传递函数数据,包含:
             - tf_list: 每个通道位置的平均传递函数参数
-            - frequency: 使用第一个TFData的频率
+            - sine_args: 使用第一个TFData的正弦波参数
             - mean_amp_ratio: 所有TFData的mean_amp_ratio的平均值
             - mean_phase_shift: 所有TFData的mean_phase_shift的平均值
 
@@ -606,9 +448,9 @@ def average_tf_data_list(tf_data_list: list[TFData]) -> TFData:
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-    # 对每个通道位置进行平均
+    # 对每个通道对进行平均
     channels_num = first_length
-    averaged_tf_list: list[PointTFData] = []
+    averaged_tf_list: list[ChannelTFData] = []
 
     for channel_idx in range(channels_num):
         # 收集该通道在所有TFData中的amp_ratio和phase_shift
@@ -623,9 +465,10 @@ def average_tf_data_list(tf_data_list: list[TFData]) -> TFData:
         avg_amp_ratio = float(np.mean(amp_ratios))
         avg_phase_shift = float(np.mean(phase_shifts))
 
-        # 创建平均后的PointTFData,position复用第一个TFData的position
-        averaged_point: PointTFData = {
-            "position": tf_data_list[0]["tf_list"][channel_idx]["position"],
+        # 创建平均后的 ChannelTFData, 通道信息复用第一个 TFData 中对应通道对
+        averaged_point: ChannelTFData = {
+            "ai_channel": tf_data_list[0]["tf_list"][channel_idx]["ai_channel"],
+            "ao_channel": tf_data_list[0]["tf_list"][channel_idx]["ao_channel"],
             "amp_ratio": avg_amp_ratio,
             "phase_shift": avg_phase_shift,
         }
@@ -643,18 +486,27 @@ def average_tf_data_list(tf_data_list: list[TFData]) -> TFData:
     avg_mean_phase_shift = float(
         np.mean([tf_data["mean_phase_shift"] for tf_data in tf_data_list])
     )
-    avg_frequency = tf_data_list[0]["frequency"]  # 使用第一个的频率
+
+    # 采样信息和正弦波参数: 假定所有 TFData 一致, 使用第一个
+    if "sampling_info" not in tf_data_list[0]:
+        error_msg = "平均 TFData 失败: 缺少 sampling_info 字段"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+
+    avg_sampling_info = tf_data_list[0]["sampling_info"]
+    avg_sine_args = tf_data_list[0]["sine_args"]
 
     logger.info(
-        f"平均完成: 频率={avg_frequency:.2f}Hz, "
+        f"平均完成: 频率={avg_sine_args['frequency']:.2f}Hz, "
         f"平均mean_amp_ratio={avg_mean_amp_ratio:.6f}, "
         f"平均mean_phase_shift={avg_mean_phase_shift:.6f}rad"
     )
 
-    # 创建平均后的TFData
+    # 创建平均后的TFData（匹配新的类型定义）
     averaged_tf_data: TFData = {
         "tf_list": averaged_tf_list,
-        "frequency": avg_frequency,
+        "sampling_info": avg_sampling_info,
+        "sine_args": avg_sine_args,
         "mean_amp_ratio": avg_mean_amp_ratio,
         "mean_phase_shift": avg_mean_phase_shift,
     }

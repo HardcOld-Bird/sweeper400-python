@@ -543,48 +543,44 @@ class SweepData(TypedDict):
 
 
 # 数据后处理相关数据类型
-# 定义传递函数结果数据格式
-class PointTFData(TypedDict):
+# 定义**通道对**的传递函数结果数据格式
+class ChannelTFData(TypedDict):
     """
-    传递函数计算结果格式（描述复数传递函数）
+    通道间传递函数计算结果格式（描述复数传递函数）。
 
-    该类型描述AI信号相对于AO信号的传递函数 H(ω) = A·e^(jφ)，
-    用于分析信号传播特性和频率响应。
+    该类型描述**某一对 AO 通道与 AI 通道之间**的传递函数
+    H(ω) = A·e^(jφ)，用于分析通道间的频率响应特性。
 
     ## 内部组成:
-        **position**: 测量点的二维坐标
-        **amp_ratio**: 绝对幅值比（AI幅值 / AO幅值）
-        **phase_shift**: 绝对相位差（AI相位 - AO相位，弧度制）
-
-    ## 注意:
-        - 此类型不包含time_delay字段，因为时间延迟依赖于特定频率
-        - 如需补偿参数（包含时间延迟），请使用PointCompData类型
+        **ai_channel**: AI 通道完整名称（如 "PXI1Slot2/ai0"）
+        **ao_channel**: AO 通道完整名称（如 "PXI1Slot3/ao1"）
+        **amp_ratio**: 绝对幅值比（AI 幅值 / AO 幅值）
+        **phase_shift**: 绝对相位差（AI 相位 - AO 相位，弧度制）
     """
 
-    position: "Point2D"
+    ai_channel: str
+    ao_channel: str
     amp_ratio: float
     phase_shift: float
 
 
-# 定义补偿数据格式
-class PointCompData(TypedDict):
+# 定义**通道对**的补偿数据格式
+class ChannelCompData(TypedDict):
     """
-    单通道补偿数据格式
+    单通道对补偿数据格式。
 
-    该类型描述每个通道相对于所有通道平均值的补偿参数，
-    用于多通道系统的校准，使所有通道响应一致。
+    该类型描述某一对 AO/AI 通道相对于所有通道平均值的补偿参数，
+    用于多通道系统的校准，使所有通道响应尽可能一致。
 
     ## 内部组成:
-        **position**: 测量点的二维坐标（通常用于标识通道）
+        **ai_channel**: AI 通道完整名称（如 "PXI1Slot2/ai0"）
+        **ao_channel**: AO 通道完整名称（如 "PXI1Slot3/ao1"）
         **amp_ratio**: 幅值补偿倍率（补偿到平均值需要乘以的倍率）
         **time_delay**: 时间延迟补偿值（相对于平均值的时间差，单位：秒）
-
-    ## 注意:
-        - 此类型不包含phase_shift字段，因为补偿信息不包含频率
-        - 如需传递函数数据（包含相位差），请使用PointTFData类型
     """
 
-    position: "Point2D"
+    ai_channel: str
+    ao_channel: str
     amp_ratio: float
     time_delay: float
 
@@ -592,20 +588,26 @@ class PointCompData(TypedDict):
 # 定义传递函数计算结果容器格式
 class TFData(TypedDict):
     """
-    传递函数计算结果容器格式
+    传递函数计算结果容器格式。
 
-    该类型包含传递函数计算的完整结果，包括所有测量点的传递函数数据
-    以及计算过程中的关键参数（频率、平均幅值比、平均相位差）。
+    该类型包含传递函数计算的完整结果，包括所有通道对的传递函数数据
+    以及计算过程中的关键参数（采样信息、正弦波参数、平均幅值比、平均相位差）。
 
     ## 内部组成:
-        **tf_list**: 传递函数数据列表，每个元素为PointTFData
-        **frequency**: 信号频率（Hz）
-        **mean_amp_ratio**: 所有点的平均幅值比
-        **mean_phase_shift**: 所有点的平均相位差（弧度制）
+        **tf_list**: 传递函数数据列表，每个元素为 ChannelTFData
+        **sampling_info**: 采样信息（必选）
+        **sine_args**: 正弦波参数（包含频率、幅值和相位信息）
+        **mean_amp_ratio**: 所有通道对的平均幅值比
+        **mean_phase_shift**: 所有通道对的平均相位差（弧度制）
+
+    说明：
+        - TFData 专注于描述「通道对」的频率响应本身，不再显式携带
+          AO/AI 通道列表等冗余信息，这些通常由更高层对象（如 Caliber 系列类）管理。
     """
 
-    tf_list: list["PointTFData"]
-    frequency: float
+    tf_list: list[ChannelTFData]
+    sampling_info: SamplingInfo
+    sine_args: SineArgs
     mean_amp_ratio: float
     mean_phase_shift: float
 
@@ -613,43 +615,25 @@ class TFData(TypedDict):
 # 定义补偿参数计算结果容器格式
 class CompData(TypedDict):
     """
-    补偿参数计算结果容器格式
+    补偿参数计算结果容器格式（也用作校准数据格式）。
 
-    该类型包含补偿参数计算的完整结果，包括所有测量点的补偿数据
-    以及计算过程中的关键参数（频率、平均幅值比、平均相位差）。
-
-    ## 内部组成:
-        **comp_list**: 补偿参数数据列表，每个元素为PointCompData
-        **frequency**: 信号频率（Hz）
-        **mean_amp_ratio**: 所有点的平均幅值比
-        **mean_phase_shift**: 所有点的平均相位差（弧度制）
-    """
-
-    comp_list: list["PointCompData"]
-    frequency: float
-    mean_amp_ratio: float
-    mean_phase_shift: float
-
-
-# 定义校准数据格式
-class CalibData(TypedDict):
-    """
-    多通道校准数据格式
-
-    该类型定义了校准结果的标准化格式，包含补偿参数、通道信息和测量参数。
+    该类型包含补偿参数计算的完整结果，包括所有通道对的补偿数据
+    以及计算过程中的关键参数（采样信息、正弦波参数、平均幅值比、平均相位差）。
 
     ## 内部组成:
-        **comp_list**: 补偿参数列表（每个通道一个PointCompData）
-        **ao_channels**: AO通道名称元组
-        **ai_channel**: AI通道名称
-        **sampling_info**: 采样信息
-        **sine_args**: 正弦波参数
-        **amp_ratio_mean**: 所有通道传递函数幅值比的平均值（绝对幅值比的典型值）
+        **comp_list**: 补偿参数数据列表，每个元素为 ChannelCompData
+        **sampling_info**: 采样信息（必选）
+        **sine_args**: 正弦波参数（包含频率、幅值和相位信息）
+        **mean_amp_ratio**: 所有通道对的平均幅值比
+        **mean_phase_shift**: 所有通道对的平均相位差（弧度制）
+
+    说明：
+        - CompData 同样只关注「通道对」本身的补偿信息，
+          AO/AI 通道列表等全局信息由上层组件维护。
     """
 
-    comp_list: list["PointCompData"]
-    ao_channels: tuple[str, ...]
-    ai_channel: str
+    comp_list: list["ChannelCompData"]
     sampling_info: SamplingInfo
     sine_args: SineArgs
-    amp_ratio_mean: float
+    mean_amp_ratio: float
+    mean_phase_shift: float

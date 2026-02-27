@@ -21,12 +21,11 @@ from .filter import (
 )
 from .general_signal import calib_multi_ch_wf
 from .my_dtypes import (
-    CalibData,
+    ChannelCompData,
+    ChannelTFData,
     CompData,
     Point2D,
-    PointCompData,
     PointSweepData,
-    PointTFData,
     PositiveFloat,
     PositiveInt,
     SamplingInfo,
@@ -45,11 +44,9 @@ from .plot import (
     plot_waveform,
 )
 from .post_process import (
-    average_sweep_data,
     average_comp_data_list,
+    average_sweep_data,
     average_tf_data_list,
-    calculate_compensation_list,
-    calculate_transfer_function,
     comp_to_tf,
     tf_to_comp,
 )
@@ -60,7 +57,8 @@ __all__ = [
     "average_sweep_data",
     "average_comp_data_list",
     "average_tf_data_list",
-    "CalibData",
+    "ChannelCompData",
+    "ChannelTFData",
     "CompData",
     "PositiveInt",
     "PositiveFloat",
@@ -70,7 +68,6 @@ __all__ = [
     "init_sine_args",
     "Waveform",
     "Point2D",
-    "PointCompData",
     "PointSweepData",
     "SweepData",
     "TFData",
@@ -81,9 +78,6 @@ __all__ = [
     "extract_single_tone_information_vvi",
     "WaveformGenerator",
     "SineGenerator",
-    "PointTFData",
-    "calculate_compensation_list",
-    "calculate_transfer_function",
     "tf_to_comp",
     "comp_to_tf",
     "filter_sweep_data",

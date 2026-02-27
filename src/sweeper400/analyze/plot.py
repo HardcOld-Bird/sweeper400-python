@@ -7,6 +7,8 @@
 包含对采集数据进行可视化处理的函数和类。
 """
 
+from typing import TypedDict
+
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
@@ -15,7 +17,25 @@ from matplotlib.patches import Rectangle
 from scipy.interpolate import griddata
 
 from ..logger import get_logger
-from .my_dtypes import PointTFData, SweepData, Waveform
+from .my_dtypes import Point2D, SweepData, Waveform
+
+
+# 本地定义的空间点传递函数数据类型，专用于空间扫场绘图函数。
+# 注意：此类型与 ChannelTFData 不同，它包含空间坐标 position，
+# 用于描述空间中某一测量点的传递函数结果。
+class PointTFData(TypedDict):
+    """
+    空间点传递函数数据格式（仅供 plot.py 内部绘图函数使用）。
+
+    ## 内部组成:
+        **position**: 测量点的二维空间坐标（mm）
+        **amp_ratio**: 幅值比
+        **phase_shift**: 相位差（弧度制）
+    """
+
+    position: Point2D
+    amp_ratio: float
+    phase_shift: float
 
 # 获取模块日志器
 logger = get_logger(__name__)

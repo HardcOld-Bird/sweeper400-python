@@ -7,9 +7,9 @@
 """
 
 # 将模块功能提升至包级别，可缩短外部import语句
-from .cont_sync_io import MultiChasCSIO
+from .cont_sync_io import SingleChasCSIO
 
 # 控制 import * 的行为
 __all__ = [
-    "MultiChasCSIO",
+    "SingleChasCSIO",
 ]

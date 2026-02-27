@@ -107,14 +107,14 @@ class TestCaliberOctopus:
         )
 
         # 验证校准结果
-        assert caliber.result_final_comp_list is not None
-        assert len(caliber.result_final_comp_list) == len(ao_channels)
+        assert caliber.result_final_comp_data is not None
+        assert len(caliber.result_final_comp_data["comp_list"]) == len(ao_channels)
 
-        print(f"校准完成，生成了 {len(caliber.result_final_comp_list)} 个通道的补偿数据")
+        print(f"校准完成，生成了 {len(caliber.result_final_comp_data['comp_list'])} 个通道的补偿数据")
 
         # 验证结果文件已保存
-        assert (temp_result_folder / "calib_data.pkl").exists()
-        assert (temp_result_folder / "raw_sweep_data.pkl").exists()
+        assert (temp_result_folder / "comp_data.pkl").exists()
+        assert (temp_result_folder / "raw_sweep_data_1.pkl").exists()
         assert (temp_result_folder / "transfer_function_polar.png").exists()
         assert (temp_result_folder / "transfer_function_cartesian.png").exists()
 
@@ -151,8 +151,8 @@ class TestCaliberOctopus:
         )
 
         # 验证校准结果
-        assert caliber.result_final_comp_list is not None
-        assert len(caliber.result_final_comp_list) == len(ao_channels)
+        assert caliber.result_final_comp_data is not None
+        assert len(caliber.result_final_comp_data["comp_list"]) == len(ao_channels)
 
         print("自定义稳定时间校准完成")
 
@@ -183,13 +183,13 @@ class TestCaliberOctopus:
         )
 
         # 验证校准结果
-        assert caliber.result_final_comp_list is not None
-        assert len(caliber.result_final_comp_list) == len(ao_channels)
+        assert caliber.result_final_comp_data is not None
+        assert len(caliber.result_final_comp_data["comp_list"]) == len(ao_channels)
 
         print("不使用滤波的校准完成")
 
     @pytest.mark.hardware
-    def test_save_and_load_calib_data(
+    def test_save_and_load_comp_data(
         self,
         ai_channels,
         ao_channels,
@@ -197,7 +197,7 @@ class TestCaliberOctopus:
         sine_args,
         temp_result_folder,
     ):
-        """测试保存和加载校准数据"""
+        """测试保存和加载补偿数据"""
         # 第一步：执行校准并保存
         caliber1 = CaliberOctopus(
             ai_channels=ai_channels,
@@ -214,28 +214,28 @@ class TestCaliberOctopus:
             result_folder=None,  # 不自动保存
         )
 
-        # 手动保存校准数据
-        calib_data_path = temp_result_folder / "test_calib_data.pkl"
-        caliber1.save_calib_data(calib_data_path)
-        print(f"校准数据已保存到: {calib_data_path}")
+        # 手动保存补偿数据
+        comp_data_path = temp_result_folder / "test_comp_data.pkl"
+        caliber1.save_comp_data(comp_data_path)
+        print(f"补偿数据已保存到: {comp_data_path}")
 
         # 验证文件存在
-        assert calib_data_path.exists()
+        assert comp_data_path.exists()
 
-        # 第二步：使用保存的校准数据创建新的CaliberOctopus实例
-        print("\n使用校准数据创建新实例...")
+        # 第二步：使用保存的补偿数据创建新的CaliberOctopus实例
+        print("\n使用补偿数据创建新实例...")
         caliber2 = CaliberOctopus(
             ai_channels=ai_channels,
             ao_channels=ao_channels,
             sampling_info=sampling_info,
             sine_args=sine_args,
-            calib_data=calib_data_path,
+            comp_data=comp_data_path,
         )
 
         # 验证新实例的输出波形已经过补偿
         assert caliber2._output_waveform.channels_num == len(ao_channels)
         print(
-            f"使用校准数据创建实例成功，输出波形通道数: {caliber2._output_waveform.channels_num}"
+            f"使用补偿数据创建实例成功，输出波形通道数: {caliber2._output_waveform.channels_num}"
         )
 
     @pytest.mark.hardware
@@ -295,7 +295,7 @@ class TestCaliberOctopus:
         # 校准前，结果应为None
         assert caliber.result_raw_sweep_data is None
         assert caliber.result_raw_tf_list is None
-        assert caliber.result_final_comp_list is None
+        assert caliber.result_final_comp_data is None
 
         # 执行校准（使用临时文件夹避免污染默认路径）
         print("\n执行校准...")
@@ -310,8 +310,8 @@ class TestCaliberOctopus:
 
         # 校准后，结果应不为None
         assert caliber.result_raw_sweep_data is not None
-        assert caliber.result_final_comp_list is not None
-        assert len(caliber.result_final_comp_list) == len(ao_channels)
+        assert caliber.result_final_comp_data is not None
+        assert len(caliber.result_final_comp_data["comp_list"]) == len(ao_channels)
 
         print("结果属性访问测试通过")
 
@@ -343,17 +343,168 @@ class TestCaliberOctopus:
         )
 
         # 验证校准结果
-        assert caliber.result_final_comp_list is not None
-        assert len(caliber.result_final_comp_list) == len(ao_channels)
+        assert caliber.result_final_comp_data is not None
+        assert len(caliber.result_final_comp_data["comp_list"]) == len(ao_channels)
 
         # 验证默认路径下的文件已保存
         # 默认路径应该是项目根目录的 storage/calib/calib_result_octopus
         default_path = Path(__file__).resolve().parents[3] / "storage" / "calib" / "calib_result_octopus"
 
         assert default_path.exists(), f"默认路径不存在: {default_path}"
-        assert (default_path / "calib_data.pkl").exists(), "calib_data.pkl未保存"
-        assert (default_path / "raw_sweep_data.pkl").exists(), "raw_sweep_data.pkl未保存"
+        assert (default_path / "comp_data.pkl").exists(), "comp_data.pkl未保存"
+        assert (default_path / "raw_sweep_data_1.pkl").exists(), "raw_sweep_data_1.pkl未保存"
         assert (default_path / "transfer_function_polar.png").exists(), "polar图未保存"
         assert (default_path / "transfer_function_cartesian.png").exists(), "cartesian图未保存"
 
         print(f"默认路径校准完成，所有文件已保存到: {default_path}")
+
+    @pytest.mark.hardware
+    def test_calibration_improvement_workflow(
+        self,
+        ai_channels,
+        ao_channels,
+        sampling_info,
+        sine_args,
+        temp_result_folder,
+    ):
+        """
+        测试完整的校准改善流程（参考scripts/6chs_calib_test.py）
+
+        流程：
+        1. 第一次校准（无补偿）- 观察各通道的不一致性
+        2. 使用第一次的comp_data进行第二次校准 - 观察通道一致性的改善
+        3. 验证补偿效果
+        """
+        # ============================================================
+        # 第一阶段：初始校准（无补偿）
+        # ============================================================
+        print("\n" + "=" * 60)
+        print("第一阶段：初始校准（无补偿）")
+        print("=" * 60)
+
+        before_calib_folder = temp_result_folder / "before_calib"
+        before_calib_folder.mkdir(parents=True, exist_ok=True)
+
+        caliber_before = CaliberOctopus(
+            ai_channel=ai_channels[0],  # 使用单个AI通道
+            ao_channels=ao_channels,
+            sampling_info=sampling_info,
+            sine_args=sine_args,
+        )
+
+        # 执行初始校准
+        print("\n开始初始校准...")
+        caliber_before.calibrate(
+            starts_num=2,
+            chunks_per_start=3,
+            apply_filter=True,
+            result_folder=before_calib_folder,
+        )
+
+        # 验证初始校准结果
+        assert caliber_before.result_final_comp_data is not None
+        assert len(caliber_before.result_final_comp_data["comp_list"]) == len(ao_channels)
+        assert (before_calib_folder / "comp_data.pkl").exists()
+
+        # 获取初始校准的传递函数数据（用于后续对比）
+        tf_data_before = caliber_before.result_averaged_tf_data
+        assert tf_data_before is not None
+
+        # 计算初始校准的幅值比标准差（衡量通道不一致性）
+        amp_ratios_before = [point["amp_ratio"] for point in tf_data_before["tf_list"]]
+        import numpy as np
+        amp_std_before = np.std(amp_ratios_before)
+        amp_mean_before = np.mean(amp_ratios_before)
+
+        print(f"\n初始校准结果:")
+        print(f"  幅值比平均值: {amp_mean_before:.6f}")
+        print(f"  幅值比标准差: {amp_std_before:.6f}")
+        print(f"  幅值比范围: [{min(amp_ratios_before):.6f}, {max(amp_ratios_before):.6f}]")
+
+        # ============================================================
+        # 第二阶段：使用补偿数据再次校准
+        # ============================================================
+        print("\n" + "=" * 60)
+        print("第二阶段：使用补偿数据再次校准")
+        print("=" * 60)
+
+        after_calib_folder = temp_result_folder / "after_calib"
+        after_calib_folder.mkdir(parents=True, exist_ok=True)
+
+        comp_data_path = before_calib_folder / "comp_data.pkl"
+
+        caliber_after = CaliberOctopus(
+            ai_channel=ai_channels[0],
+            ao_channels=ao_channels,
+            sampling_info=sampling_info,
+            sine_args=sine_args,
+            comp_data=comp_data_path,  # 使用第一次校准的补偿数据
+        )
+
+        # 执行补偿后的校准
+        print(f"\n使用补偿数据: {comp_data_path}")
+        print("开始补偿后的校准...")
+        caliber_after.calibrate(
+            starts_num=2,
+            chunks_per_start=3,
+            apply_filter=True,
+            result_folder=after_calib_folder,
+        )
+
+        # 验证补偿后的校准结果
+        assert caliber_after.result_final_comp_data is not None
+        assert len(caliber_after.result_final_comp_data["comp_list"]) == len(ao_channels)
+
+        # 获取补偿后的传递函数数据
+        tf_data_after = caliber_after.result_averaged_tf_data
+        assert tf_data_after is not None
+
+        # 计算补偿后的幅值比标准差
+        amp_ratios_after = [point["amp_ratio"] for point in tf_data_after["tf_list"]]
+        amp_std_after = np.std(amp_ratios_after)
+        amp_mean_after = np.mean(amp_ratios_after)
+
+        print(f"\n补偿后校准结果:")
+        print(f"  幅值比平均值: {amp_mean_after:.6f}")
+        print(f"  幅值比标准差: {amp_std_after:.6f}")
+        print(f"  幅值比范围: [{min(amp_ratios_after):.6f}, {max(amp_ratios_after):.6f}]")
+
+        # ============================================================
+        # 第三阶段：验证补偿效果
+        # ============================================================
+        print("\n" + "=" * 60)
+        print("第三阶段：验证补偿效果")
+        print("=" * 60)
+
+        # 计算改善程度
+        std_improvement = (amp_std_before - amp_std_after) / amp_std_before * 100
+
+        print(f"\n通道一致性改善情况:")
+        print(f"  初始标准差: {amp_std_before:.6f}")
+        print(f"  补偿后标准差: {amp_std_after:.6f}")
+        print(f"  改善程度: {std_improvement:.2f}%")
+
+        # 验证补偿确实改善了通道一致性
+        # 补偿后的标准差应该显著小于补偿前
+        assert amp_std_after < amp_std_before, (
+            f"补偿后的标准差({amp_std_after:.6f})应小于补偿前({amp_std_before:.6f})"
+        )
+
+        # 期望至少有30%的改善（这是一个合理的阈值）
+        assert std_improvement > 30, (
+            f"标准差改善程度({std_improvement:.2f}%)应大于30%"
+        )
+
+        print(f"\n✓ 补偿效果验证通过!")
+        print(f"  标准差减少了 {std_improvement:.2f}%")
+        print(f"  通道一致性显著改善")
+
+        # 验证所有结果文件都已保存
+        assert (before_calib_folder / "comp_data.pkl").exists()
+        assert (before_calib_folder / "transfer_function_polar.png").exists()
+        assert (after_calib_folder / "comp_data.pkl").exists()
+        assert (after_calib_folder / "transfer_function_polar.png").exists()
+
+        print(f"\n所有结果文件已保存:")
+        print(f"  补偿前: {before_calib_folder}")
+        print(f"  补偿后: {after_calib_folder}")

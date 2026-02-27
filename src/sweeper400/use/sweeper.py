@@ -28,7 +28,7 @@ from ..analyze import (
     init_sine_args,
 )
 from ..logger import get_logger
-from ..measure import MultiChasCSIO
+from ..measure import SingleChasCSIO
 from ..move import MotorController
 
 # 获取模块日志器
@@ -403,7 +403,7 @@ class Sweeper:
 
         try:
             logger.debug("正在初始化数据采集控制器...")
-            self._measure_controller = MultiChasCSIO(
+            self._measure_controller = SingleChasCSIO(
                 ai_channel=ai_channel,
                 ao_channels=(ao_channel,),  # 转换为tuple
                 output_waveform=output_waveform,
@@ -648,7 +648,7 @@ class Sweeper:
         # 创建新的数据采集控制器
         try:
             logger.info("正在创建新的数据采集控制器...")
-            self._measure_controller = MultiChasCSIO(
+            self._measure_controller = SingleChasCSIO(
                 ai_channel=ai_channel,
                 ao_channels=(ao_channel,),  # 转换为tuple
                 output_waveform=output_waveform,

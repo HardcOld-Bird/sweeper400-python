@@ -15,14 +15,14 @@ sine_args = init_sine_args(frequency=3430.0, amplitude=0.01, phase=0.0)  # 3430H
 # 定义通道配置
 ai_channel = "PXI1Slot2/ai0"
 ao_channels = (
-    "PXI2Slot2/ao0",
-    "PXI2Slot2/ao1",
-    "PXI2Slot3/ao0",
-    "PXI2Slot3/ao1",
-    "PXI3Slot2/ao0",
-    "PXI3Slot2/ao1",
-    "PXI3Slot3/ao0",
-    "PXI3Slot3/ao1",
+    "PXI1Slot3/ao0",
+    "PXI1Slot3/ao1",
+    "PXI1Slot4/ao0",
+    "PXI1Slot4/ao1",
+    "PXI1Slot5/ao0",
+    "PXI1Slot5/ao1",
+    "PXI1Slot6/ao0",
+    "PXI1Slot6/ao1",
 )
 
 # 创建校准对象
@@ -35,7 +35,7 @@ caliber = CaliberOctopus(
 
 # %% 执行校准
 caliber.calibrate(
-    starts_num=3,
+    starts_num=2,
     chunks_per_start=3,
     result_folder="D:\\EveryoneDownloaded\\before_calib",
 )
@@ -55,11 +55,27 @@ caliber = CaliberOctopus(
     ao_channels=ao_channels,
     sampling_info=sampling_info,
     sine_args=sine_args,
-    calib_data="D:\\EveryoneDownloaded\\before_calib\\calib_data.pkl",
+    comp_data="D:\\EveryoneDownloaded\\before_calib\\comp_data.pkl",
 )
 
 caliber.calibrate(
-    starts_num=3,
+    starts_num=2,
     chunks_per_start=3,
     result_folder="D:\\EveryoneDownloaded\\after_calib",
+)
+
+# %% 执行最终校准
+
+# 创建无补偿校准对象
+caliber = CaliberOctopus(
+    ai_channel=ai_channel,
+    ao_channels=ao_channels,
+    sampling_info=sampling_info,
+    sine_args=sine_args,
+)
+
+# 执行校准，结果存储在项目storage目录下
+caliber.calibrate(
+    starts_num=10,
+    chunks_per_start=3,
 )

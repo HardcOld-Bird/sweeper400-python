@@ -1,9 +1,9 @@
 """
-# MultiChasCSIO 类测试模块
+# SingleChasCSIO 类测试模块
 
 测试路径：`tests/sweeper400/measure/test_cont_sync_io.py`
 
-本模块包含对 MultiChasCSIO 类的系统化测试，验证其核心功能是否正常工作。
+本模块包含对 SingleChasCSIO 类的系统化测试，验证其核心功能是否正常工作。
 """
 
 import time
@@ -18,11 +18,11 @@ from sweeper400.analyze import (
     init_sampling_info,
     init_sine_args,
 )
-from sweeper400.measure import MultiChasCSIO
+from sweeper400.measure import SingleChasCSIO
 
 
-class TestMultiChasCSIO:
-    """MultiChasCSIO 类的测试套件"""
+class TestSingleChasCSIO:
+    """SingleChasCSIO 类的测试套件"""
 
     @staticmethod
     def _dummy_feedback_function(ai_waveform: Waveform) -> Waveform:
@@ -112,8 +112,8 @@ class TestMultiChasCSIO:
         export_data_collector,
     ):
         """测试单机箱基本操作"""
-        # 创建MultiChasCSIO实例
-        sync_io = MultiChasCSIO(
+        # 创建SingleChasCSIO实例
+        sync_io = SingleChasCSIO(
             ai_channels=ai_channels_single,
             ao_channels_static=ao_channels_single_chassis,
             ao_channels_feedback=(),  # 无反馈通道
@@ -155,8 +155,8 @@ class TestMultiChasCSIO:
         export_data_collector,
     ):
         """测试跨机箱基本操作（实际硬件配置）"""
-        # 创建MultiChasCSIO实例
-        sync_io = MultiChasCSIO(
+        # 创建SingleChasCSIO实例
+        sync_io = SingleChasCSIO(
             ai_channels=ai_channels_single,
             ao_channels_static=ao_channels_multi_chassis,
             ao_channels_feedback=(),
@@ -198,7 +198,7 @@ class TestMultiChasCSIO:
         export_data_collector,
     ):
         """测试数据导出编号重置逻辑"""
-        sync_io = MultiChasCSIO(
+        sync_io = SingleChasCSIO(
             ai_channels=ai_channels_single,
             ao_channels_static=ao_channels_single_chassis,
             ao_channels_feedback=(),
@@ -267,7 +267,7 @@ class TestMultiChasCSIO:
         sine_args,
     ):
         """测试信号质量：验证采集到的信号是否为预期的单频正弦波"""
-        sync_io = MultiChasCSIO(
+        sync_io = SingleChasCSIO(
             ai_channels=ai_channels_single,
             ao_channels_static=ao_channels_single_chassis,
             ao_channels_feedback=(),
@@ -333,7 +333,7 @@ class TestMultiChasCSIO:
         sine_args,
     ):
         """测试动态更新输出波形功能"""
-        sync_io = MultiChasCSIO(
+        sync_io = SingleChasCSIO(
             ai_channels=ai_channels_single,
             ao_channels_static=ao_channels_multi_chassis,
             ao_channels_feedback=(),
@@ -382,7 +382,7 @@ class TestMultiChasCSIO:
         export_data_collector,
     ):
         """测试多次启动和停止"""
-        sync_io = MultiChasCSIO(
+        sync_io = SingleChasCSIO(
             ai_channels=ai_channels_single,
             ao_channels_static=ao_channels_single_chassis,
             ao_channels_feedback=(),
@@ -436,7 +436,7 @@ class TestMultiChasCSIO:
         export_data_collector,
     ):
         """测试数据连续性：验证采集的数据段是连续的"""
-        sync_io = MultiChasCSIO(
+        sync_io = SingleChasCSIO(
             ai_channels=ai_channels_single,
             ao_channels_static=ao_channels_single_chassis,
             ao_channels_feedback=(),
@@ -483,7 +483,7 @@ class TestMultiChasCSIO:
         export_data_collector,
     ):
         """测试长时间运行稳定性"""
-        sync_io = MultiChasCSIO(
+        sync_io = SingleChasCSIO(
             ai_channels=ai_channels_single,
             ao_channels_static=ao_channels_multi_chassis,
             ao_channels_feedback=(),
@@ -542,7 +542,7 @@ class TestMultiChasCSIO:
         export_data_collector,
     ):
         """测试采集波形的形状一致性"""
-        sync_io = MultiChasCSIO(
+        sync_io = SingleChasCSIO(
             ai_channels=ai_channels_single,
             ao_channels_static=ao_channels_single_chassis,
             ao_channels_feedback=(),
@@ -607,8 +607,8 @@ class TestMultiChasCSIO:
         print("测试StartTrigger导出和接收同步")
         print("=" * 80)
 
-        # 创建MultiChasCSIO实例
-        sync_io = MultiChasCSIO(
+        # 创建SingleChasCSIO实例
+        sync_io = SingleChasCSIO(
             ai_channels=ai_channels_single,
             ao_channels_static=ao_channels_multi_chassis,
             ao_channels_feedback=(),
