@@ -145,9 +145,6 @@ class TestCaliberFishNet:
         assert (temp_result_folder / "raw_sweep_data_1.pkl").exists()
         assert (temp_result_folder / "raw_sweep_data_2.pkl").exists()
 
-
-
-
     @pytest.mark.hardware
     def test_position_encoding(
         self,
@@ -265,7 +262,7 @@ class TestCaliberFishNet:
 
         # 绘制并保存图表
         plot_path = temp_result_folder / "test_plot.png"
-        caliber.plot_transfer_functions(save_path=plot_path)
+        caliber.plot_comp_data(save_path=plot_path)
 
         # 验证图像文件存在
         assert plot_path.exists()

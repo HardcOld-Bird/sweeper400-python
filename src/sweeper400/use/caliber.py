@@ -113,7 +113,7 @@ class CaliberOctopus:
     caliber.save_comp_data("calibration_results.pkl")
 
     # 绘制极坐标图
-    caliber.plot_transfer_functions(mode="polar")
+    caliber.plot_comp_data(mode="polar")
 
     # 校准验证：使用已有补偿数据进行二次校准
     caliber_verify = CaliberOctopus(
@@ -140,7 +140,7 @@ class CaliberOctopus:
 
     def __init__(
         self,
-        ai_channel: str,
+        ai_channels: tuple[str, ...],
         ao_channels: tuple[str, ...],
         sampling_info: SamplingInfo,
         sine_args: SineArgs,
@@ -150,14 +150,16 @@ class CaliberOctopus:
         初始化校准对象
 
         Args:
-            ai_channel: AI 通道名称字符串（例如 "PXI2Slot2/ai0"）
+            ai_channels: AI 通道名称元组（例如 ("PXI2Slot2/ai0",)）。
+                         章鱼模式下通常只使用第一个元素，其余元素将被忽略。
             ao_channels: AO 通道名称元组（例如 ("PXI2Slot2/ao0", "PXI2Slot2/ao1", ...)）
             sampling_info: 采样信息，包含采样率和采样点数
             sine_args: 正弦波参数，包含频率、幅值和相位信息
             comp_data: 可选，补偿数据文件路径。如果指定，将加载该文件并使用
-                       get_sine_multi_ch生成已补偿的多通道波形。在校准测量时，
-                       每个通道将发送其对应的补偿信号（而非相同的未补偿信号），
-                       从而验证校准补偿的有效性
+                       补偿波形。支持部分补偿：comp_data中可以只包含部分AO通道，
+                       未包含的通道将使用未补偿信号。在校准测量时，每个通道将
+                       发送其对应的补偿信号（而非相同的未补偿信号），从而验证
+                       校准补偿的有效性
 
         Raises:
             ValueError: 当参数无效时
@@ -165,13 +167,13 @@ class CaliberOctopus:
             RuntimeError: 当comp_data文件加载失败时
         """
         # 验证参数
-        if not ai_channel:
-            raise ValueError("AI 通道不能为空")
+        if not ai_channels:
+            raise ValueError("AI 通道列表不能为空")
         if not ao_channels:
             raise ValueError("AO 通道列表不能为空")
 
         # 保存配置参数
-        self._ai_channel = ai_channel  # 校准时通常只使用一个AI通道
+        self._ai_channels = ai_channels  # 章鱼模式下默认使用第一个元素
         self._ao_channels = ao_channels
         self._sampling_info = sampling_info
         self._sine_args = sine_args
@@ -191,25 +193,61 @@ class CaliberOctopus:
                 logger.error(f"加载补偿数据文件失败: {e}", exc_info=True)
                 raise RuntimeError(f"加载补偿数据文件失败: {e}") from e
 
-            # 验证补偿数据与当前配置的一致性
+            # 从 comp_list 中提取已有补偿数据的 AO 通道名称集合
             # 新的 CompData 不再有 ao_channels 字段，通道名存储在每个 ChannelCompData 中
-            comp_ao_channels_in_data = tuple(
-                cp["ao_channel"] for cp in loaded_comp_data["comp_list"]
-            )
-            if comp_ao_channels_in_data != ao_channels:
-                logger.warning(
-                    f"补偿数据中的AO通道({comp_ao_channels_in_data}) "
-                    f"与当前配置({ao_channels})不一致"
-                )
+            comp_channel_map: dict[str, int] = {
+                comp_point["ao_channel"]: idx
+                for idx, comp_point in enumerate(loaded_comp_data["comp_list"])
+            }
+            comp_ao_channels = set(comp_channel_map.keys())
 
-            # 使用get_sine_multi_ch生成多通道补偿波形
-            self._output_waveform = get_sine_multi_ch(
-                sampling_info=sampling_info,
+            # 生成多通道波形（支持部分补偿）
+            # 首先生成未补偿的单通道波形
+            single_channel_waveform = get_sine_cycles(sampling_info, sine_args)
+
+            # 创建多通道数组
+            num_channels = len(ao_channels)
+            multi_channel_data = np.zeros(
+                (num_channels, single_channel_waveform.samples_num), dtype=np.float64
+            )
+
+            # 对每个通道，检查是否在comp_data中
+            compensated_count = 0
+            for idx, channel_name in enumerate(ao_channels):
+                if channel_name in comp_ao_channels:
+                    # 该通道在comp_data中，使用补偿波形
+                    comp_idx = comp_channel_map[channel_name]
+                    temp_comp_data: CompData = {
+                        "comp_list": [loaded_comp_data["comp_list"][comp_idx]],
+                        "sampling_info": loaded_comp_data["sampling_info"],
+                        "sine_args": loaded_comp_data["sine_args"],
+                        "mean_amp_ratio": loaded_comp_data["mean_amp_ratio"],
+                        "mean_phase_shift": loaded_comp_data["mean_phase_shift"],
+                    }
+                    compensated_waveform = get_sine_multi_ch(
+                        sampling_info=sampling_info,
+                        sine_args=sine_args,
+                        comp_data=temp_comp_data,
+                    )
+                    multi_channel_data[idx, :] = compensated_waveform[0, :]
+                    compensated_count += 1
+                    logger.debug(f"通道 {channel_name} 使用补偿波形")
+                else:
+                    # 该通道不在comp_data中，使用未补偿波形
+                    multi_channel_data[idx, :] = single_channel_waveform
+                    logger.debug(f"通道 {channel_name} 使用未补偿波形")
+
+            # 创建多通道Waveform对象
+            self._output_waveform = Waveform(
+                input_array=multi_channel_data,
+                sampling_rate=sampling_info["sampling_rate"],
+                timestamp=single_channel_waveform.timestamp,
+                id=single_channel_waveform.id,
                 sine_args=sine_args,
-                comp_data=loaded_comp_data,
             )
             logger.info(
-                f"使用补偿数据生成多通道补偿波形，shape={self._output_waveform.shape}"
+                f"使用部分补偿数据生成多通道波形，shape={self._output_waveform.shape}，"
+                f"补偿通道数={compensated_count}/{len(ao_channels)}"
             )
         else:
             # 生成多通道未补偿波形（每个通道都是相同的正弦波）
@@ -238,6 +276,10 @@ class CaliberOctopus:
         # 临时存储当前正在采集的SweepData（供_export_function使用）
         self._current_sweep_data: SweepData | None = None
 
+        # 数据采集控制变量
+        self._target_chunks: int = 0  # 目标采集chunk数量
+        self._chunk_collection_complete: bool = False  # chunk采集完成标志
+
         # 校准结果存储
         # 所有starts的补偿数据（未平均，用于cartesian模式绘图）
         self._result_raw_comp_data: CompData | None = None
@@ -252,8 +294,8 @@ class CaliberOctopus:
         self._amp_ratio_mean: float | None = None
 
         logger.info(
-            f"CaliberOctopus 实例已创建 - "
-            f"AI: {ai_channel}, "
+            f"Caliber 实例已创建 - "
+            f"AI通道数: {len(ai_channels)}, "
             f"AO通道数: {len(ao_channels)}, "
             f"频率: {sine_args['frequency']}Hz, "
             f"幅值: {sine_args['amplitude']}V, "
@@ -375,7 +417,8 @@ class CaliberOctopus:
         从已滤波/平均的 SweepData 计算补偿数据（CompData）。
 
         该方法替代了原全局函数 calculate_compensation_list，将计算逻辑内聚到类内部，
-        因为计算过程需要访问类内部的通道配置信息（self._ai_channel、self._ao_channels）。
+        因为计算过程需要访问类内部的通道配置信息（self._ai_channels[0]、self._ao_channels）。
+        章鱼模式下固定使用 self._ai_channels[0] 作为参考 AI 通道。
 
         计算流程：
         1. 对每个 AO 通道（SweepData 中的每个测量点），提取 AI 波形并计算传递函数
@@ -427,7 +470,7 @@ class CaliberOctopus:
             phase_shift = float(np.arctan2(np.sin(phase_shift), np.cos(phase_shift)))
 
             tf_point: ChannelTFData = {
-                "ai_channel": self._ai_channel,
+                "ai_channel": self._ai_channels[0],
                 "ao_channel": ao_channel_name,
                 "amp_ratio": float(amp_ratio),
                 "phase_shift": phase_shift,
@@ -435,7 +478,7 @@ class CaliberOctopus:
             tf_list.append(tf_point)
 
             logger.debug(
-                f"AO通道 {ao_channel_name} -> AI通道 {self._ai_channel}: "
+                f"AO通道 {ao_channel_name} -> AI通道 {self._ai_channels[0]}: "
                 f"amp_ratio={amp_ratio:.6f}, phase_shift={phase_shift:.6f}rad"
             )
 
@@ -483,7 +526,7 @@ class CaliberOctopus:
         执行单次校准流程（内部方法）
 
         对每个通道采集多个连续chunk，返回原始的SweepData。
-        数据存储为SweepData格式，x坐标固定为0，y坐标为通道索引（0-based）。
+        数据存储为SweepData格式，x坐标为通道索引（0-based），y坐标固定为0固定为0。
 
         该方法只负责硬件控制和数据采集，不进行任何数据处理（平均、滤波、
         计算传递函数等）。所有数据处理工作由calibrate方法统一完成。
@@ -509,7 +552,8 @@ class CaliberOctopus:
 
         logger.info(
             f"开始单次校准流程 - "
-            f"通道数: {len(self._ao_channels)}, "
+            f"AO通道数: {len(self._ao_channels)}, "
+            f"AI通道数: {len(self._ai_channels)}, "
             f"每次启动chunk数: {chunks_per_start}, "
             f"稳定时间: {actual_settle_time:.3f}s"
         )
@@ -525,7 +569,7 @@ class CaliberOctopus:
 
         # 创建SingleChasCSIO对象（整个校准流程只创建一次）
         sync_io = SingleChasCSIO(
-            ai_channels=(self._ai_channel,),
+            ai_channels=self._ai_channels,
             ao_channels_static=self._ao_channels,
             ao_channels_feedback=(),  # 校准不使用反馈通道
             static_output_waveform=self._output_waveform,
@@ -541,23 +585,22 @@ class CaliberOctopus:
             # 等待系统初始化稳定
             time.sleep(2.0)
 
-            # 执行测量循环（遍历所有通道）
+            # 执行测量循环（遍历所有AO通道）
             for channel_idx in range(len(self._ao_channels)):
                 ao_channel_name = self._ao_channels[channel_idx]
 
-                logger.info(f"测量通道 {channel_idx} ({ao_channel_name})")
+                logger.info(f"测量AO通道 {channel_idx} ({ao_channel_name})")
 
-                # 创建新的测量点数据（使用通道名作为 position 的语义标识）
-                # 注意：此处仍使用 PointSweepData 格式存储原始采集数据，
-                # position 字段用 x=0, y=channel_idx 作为临时索引，
-                # 后续处理时通过 channel_idx 映射到真实通道名
+                # 创建新的测量点数据（使用 PointSweepData 格式存储原始采集数据）
+                # position 字段用 x=channel_idx, y=0.0 作为临时索引，
+                # 后续处理时通过 position.x 映射到真实 AO 通道名
                 point_data: PointSweepData = {
-                    "position": Point2D(x=0.0, y=float(channel_idx)),
+                    "position": Point2D(x=float(channel_idx), y=0.0),
                     "ai_data": [],
                 }
                 sweep_data["ai_data_list"].append(point_data)
 
-                # 创建只启用当前通道的波形
+                # 创建只启用当前AO通道的波形
                 single_channel_waveform = self._create_single_channel_waveform(
                     channel_idx
                 )
@@ -565,7 +608,7 @@ class CaliberOctopus:
                 # 更新静态输出波形
                 sync_io.update_static_output_waveform(single_channel_waveform)
                 logger.debug(
-                    f"已更新波形，启用通道 {channel_idx} ({self._ao_channels[channel_idx]})"
+                    f"已更新波形，启用AO通道 {channel_idx} ({self._ao_channels[channel_idx]})"
                 )
 
                 # 等待通道切换稳定
@@ -598,7 +641,7 @@ class CaliberOctopus:
                 # 检查采集到的数据数量
                 collected_chunks = len(point_data["ai_data"])
                 logger.info(
-                    f"通道 {channel_idx} 采集完成，共 {collected_chunks} 个chunk"
+                    f"AO通道 {channel_idx} 采集完成，共 {collected_chunks} 个chunk"
                 )
 
                 # 验证采集到的chunk数量
@@ -763,7 +806,7 @@ class CaliberOctopus:
         # 从all_comp_data_list构建包含所有starts数据的CompData（用于cartesian模式绘图）
         # 收集所有starts的comp_list，为每个 ChannelCompData 附加 start_idx 信息
         # 注意：ChannelCompData 本身不含 start_idx，此处将所有 starts 的数据合并到一个列表，
-        # 供 plot_transfer_functions(mode="cartesian") 使用时按 ao_channel 分组
+        # 供 plot_comp_data(mode="cartesian") 使用时按 ao_channel 分组
         all_raw_comp_list: list[ChannelCompData] = []
         for comp_data in all_comp_data_list:
             all_raw_comp_list.extend(comp_data["comp_list"])
@@ -780,7 +823,7 @@ class CaliberOctopus:
         # 绘制cartesian模式绘图（使用所有starts的详细数据）
         logger.info("绘制补偿数据直角坐标图（细节图）")
         cartesian_plot_path = result_path / "compensation_cartesian.png"
-        self.plot_transfer_functions(mode="cartesian", save_path=cartesian_plot_path)
+        self.plot_comp_data(mode="cartesian", save_path=cartesian_plot_path)
         logger.info(f"已保存cartesian模式绘图到: {cartesian_plot_path}")
 
         # 第三阶段：平均所有CompData
@@ -854,7 +897,7 @@ class CaliberOctopus:
         # 绘制polar模式绘图（使用平均后的TFData）
         logger.info("绘制传递函数极坐标图（概览图）")
         polar_plot_path = result_path / "transfer_function_polar.png"
-        self.plot_transfer_functions(mode="polar", save_path=polar_plot_path)
+        self.plot_comp_data(mode="polar", save_path=polar_plot_path)
         logger.info(f"已保存polar模式绘图到: {polar_plot_path}")
 
         # 创建最终的CompData（符合新类型定义，不含 ao_channels/ai_channel 冗余字段）
@@ -923,7 +966,7 @@ class CaliberOctopus:
             logger.error(f"保存校准结果失败: {e}", exc_info=True)
             raise OSError(f"保存校准结果失败: {e}") from e
 
-    def plot_transfer_functions(
+    def plot_comp_data(
         self,
         mode: Literal["polar", "cartesian"],
         save_path: str | Path | None = None,
@@ -1226,14 +1269,16 @@ class CaliberOctopus:
         return self._ao_channels
 
     @property
-    def ai_channel(self) -> str:
+    def ai_channels(self) -> tuple[str, ...]:
         """
         获取AI通道列表
+
+        章鱼模式下通常只有一个元素，渔网模式下可能有多个元素。
 
         Returns:
             AI通道名称元组
         """
-        return self._ai_channel
+        return self._ai_channels
 
 
 class CaliberFishNet(CaliberOctopus):
@@ -1267,7 +1312,7 @@ class CaliberFishNet(CaliberOctopus):
              f. 返回原始SweepData并立即保存到文件
         2. 第二阶段：处理SweepData，计算传递函数数据
            - 对每个SweepData进行平均和滤波处理
-           - 使用类内部方法 _process_multi_ai_sweep_data 计算每次校准的TFData
+           - 使用类内部方法 _calculate_tf_data 计算每次校准的TFData
            - 每个 ChannelTFData 通过 ao_channel/ai_channel 字段标识通道对
         3. 第三阶段：平均所有校准结果
            - 对多个TFData进行平均，得到平均后的单个TFData
@@ -1309,7 +1354,7 @@ class CaliberFishNet(CaliberOctopus):
     caliber.save_tf_data("calibration_results.pkl")
 
     # 绘制传递函数图
-    caliber.plot_transfer_functions()
+    caliber.plot_comp_data()
     ```
 
     ## 注意事项：
@@ -1334,368 +1379,77 @@ class CaliberFishNet(CaliberOctopus):
         """
         初始化校准对象
 
+        调用父类 CaliberOctopus.__init__ 完成通用初始化（参数验证、波形生成、
+        状态变量初始化等），然后补充 FishNet 独有的结果存储变量。
+
         Args:
-            ai_channels: AI 通道名称元组（例如 ("PXI1Slot2/ai0", "PXI2Slot2/ai0", ...)）
+            ai_channels: AI 通道名称元组（例如 ("PXI1Slot2/ai0", "PXI2Slot2/ai0", ...)）。
+                         渔网模式下通常包含多个 AI 通道，以测量完整的传递函数矩阵。
             ao_channels: AO 通道名称元组（例如 ("PXI2Slot2/ao0", "PXI2Slot2/ao1", ...)）
             sampling_info: 采样信息，包含采样率和采样点数
             sine_args: 正弦波参数，包含频率、幅值和相位信息
             comp_data: 可选，补偿数据文件路径。如果指定，将加载该文件并使用
-                       get_sine_multi_ch生成已补偿的多通道波形。支持部分通道补偿：
-                       comp_data中可以只包含部分AO通道，未包含的通道将使用未补偿信号
+                       补偿波形。支持部分通道补偿：comp_data中可以只包含部分AO通道，
+                       未包含的通道将使用未补偿信号
 
         Raises:
             ValueError: 当参数无效时
             FileNotFoundError: 当comp_data文件不存在时
             RuntimeError: 当comp_data文件加载失败时
         """
-        # 验证参数
-        if not ai_channels:
-            raise ValueError("AI 通道列表不能为空")
-        if not ao_channels:
-            raise ValueError("AO 通道列表不能为空")
+        # 调用父类初始化（完成参数验证、波形生成、通用状态变量初始化）
+        super().__init__(
+            ai_channels=ai_channels,
+            ao_channels=ao_channels,
+            sampling_info=sampling_info,
+            sine_args=sine_args,
+            comp_data=comp_data,
+        )
 
-        # 保存配置参数
-        self._ai_channels = ai_channels  # 多个AI通道
-        self._ao_channels = ao_channels
-        self._sampling_info = sampling_info
-        self._sine_args = sine_args
-
-        # 生成输出波形
-        if comp_data is not None:
-            # 加载补偿数据文件
-            comp_data_path = Path(comp_data)
-            if not comp_data_path.exists():
-                raise FileNotFoundError(f"补偿数据文件不存在: {comp_data_path}")
-
-            try:
-                with open(comp_data_path, "rb") as f:
-                    loaded_comp_data: CompData = pickle.load(f)
-                logger.info(f"成功加载补偿数据文件: {comp_data_path}")
-            except Exception as e:
-                logger.error(f"加载补偿数据文件失败: {e}", exc_info=True)
-                raise RuntimeError(f"加载补偿数据文件失败: {e}") from e
-
-            # 从 comp_list 中提取已有补偿数据的 AO 通道名称集合
-            # 新的 CompData 不再有 ao_channels 字段，通道名存储在每个 ChannelCompData 中
-            comp_channel_map: dict[str, int] = {
-                comp_point["ao_channel"]: idx
-                for idx, comp_point in enumerate(loaded_comp_data["comp_list"])
-            }
-            comp_ao_channels = set(comp_channel_map.keys())
-
-            # 生成多通道波形（部分补偿）
-            # 首先生成未补偿的单通道波形
-            single_channel_waveform = get_sine_cycles(sampling_info, sine_args)
-
-            # 创建多通道数组
-            num_channels = len(ao_channels)
-            multi_channel_data = np.zeros(
-                (num_channels, single_channel_waveform.samples_num), dtype=np.float64
-            )
-
-            # 对每个通道，检查是否在comp_data中
-            compensated_count = 0
-            for idx, channel_name in enumerate(ao_channels):
-                if channel_name in comp_ao_channels:
-                    # 该通道在comp_data中，使用补偿波形
-                    comp_idx = comp_channel_map[channel_name]
-                    # 使用get_sine_multi_ch生成补偿波形（仅针对该通道）
-                    temp_comp_data: CompData = {
-                        "comp_list": [loaded_comp_data["comp_list"][comp_idx]],
-                        "sampling_info": loaded_comp_data["sampling_info"],
-                        "sine_args": loaded_comp_data["sine_args"],
-                        "mean_amp_ratio": loaded_comp_data["mean_amp_ratio"],
-                        "mean_phase_shift": loaded_comp_data["mean_phase_shift"],
-                    }
-                    compensated_waveform = get_sine_multi_ch(
-                        sampling_info=sampling_info,
-                        sine_args=sine_args,
-                        comp_data=temp_comp_data,
-                    )
-                    multi_channel_data[idx, :] = compensated_waveform[0, :]
-                    compensated_count += 1
-                    logger.debug(f"通道 {channel_name} 使用补偿波形")
-                else:
-                    # 该通道不在comp_data中，使用未补偿波形
-                    multi_channel_data[idx, :] = single_channel_waveform
-                    logger.debug(f"通道 {channel_name} 使用未补偿波形")
-
-            # 创建多通道Waveform对象
-            self._output_waveform = Waveform(
-                input_array=multi_channel_data,
-                sampling_rate=sampling_info["sampling_rate"],
-                timestamp=single_channel_waveform.timestamp,
-                id=single_channel_waveform.id,
-                sine_args=sine_args,
-            )
-            logger.info(
-                f"使用部分补偿数据生成多通道波形，shape={self._output_waveform.shape}，"
-                f"补偿通道数={compensated_count}/{len(ao_channels)}"
-            )
-        else:
-            # 生成多通道未补偿波形（每个通道都是相同的正弦波）
-            # 首先生成单通道波形
-            single_channel_waveform = get_sine_cycles(sampling_info, sine_args)
-
-            # 创建多通道数组，每个通道都是相同的信号
-            num_channels = len(ao_channels)
-            multi_channel_data = np.tile(single_channel_waveform, (num_channels, 1))
-
-            # 创建多通道Waveform对象
-            self._output_waveform = Waveform(
-                input_array=multi_channel_data,
-                sampling_rate=sampling_info["sampling_rate"],
-                timestamp=single_channel_waveform.timestamp,
-                id=single_channel_waveform.id,
-                sine_args=sine_args,
-            )
-            logger.info(f"生成多通道未补偿波形，shape={self._output_waveform.shape}")
-
-        # 计算默认的稳定等待时间（chunk时长 + 0.1秒）
-        chunk_duration = self._output_waveform.duration
-        self._default_settle_time = chunk_duration + 0.1
-
-        # 内部状态变量（用于校准过程）
-        # 临时存储当前正在采集的SweepData（供_export_function使用）
-        self._current_sweep_data: SweepData | None = None
-
-        # 数据采集控制变量
-        self._target_chunks: int = 0  # 目标采集chunk数量
-        self._chunk_collection_complete: bool = False  # chunk采集完成标志
-
-        # 校准结果存储
+        # FishNet 独有的校准结果存储变量
         # 所有starts的传递函数数据（未平均，用于绘制细节图）
         self._result_raw_tf_data: TFData | None = None
 
-        # 平均后的传递函数数据（用于绘图和保存）
-        self._result_averaged_tf_data: TFData | None = None
+        # 注意：_result_averaged_tf_data 已由父类初始化为 None，此处无需重复声明
 
-        logger.info(
-            f"CaliberFishNet 实例已创建 - "
-            f"AI通道数: {len(ai_channels)}, "
-            f"AO通道数: {len(ao_channels)}, "
-            f"频率: {sine_args['frequency']}Hz, "
-            f"幅值: {sine_args['amplitude']}V, "
-            f"采样率: {sampling_info['sampling_rate']}Hz, "
-            f"默认稳定时间: {self._default_settle_time:.3f}s, "
-            f"使用补偿数据: {comp_data is not None}"
-        )
-
-    @property
-    def ai_channels(self) -> tuple[str, ...]:
-        """
-        获取AI通道列表
-
-        Returns:
-            AI通道名称元组
-        """
-        return self._ai_channels
-
-    def _single_calibrate(
+    def _calculate_tf_data(
         self,
-        chunks_per_start: int = 3,
-        settle_time: float | None = None,
-    ) -> SweepData:
-        """
-        执行单次校准流程（内部方法）
-
-        对每个AO通道采集多个连续chunk，同时采集所有AI通道的数据。
-        返回原始的SweepData，其中每个点的ai_data包含多通道Waveform。
-        数据存储为SweepData格式，position.x为AO通道索引，position.y固定为0。
-
-        该方法只负责硬件控制和数据采集，不进行任何数据处理（平均、滤波、
-        计算传递函数等）。所有数据处理工作由calibrate方法统一完成。
-
-        Args:
-            chunks_per_start: 每次启动采集的连续chunk数，默认为3
-            settle_time: 通道切换后的稳定等待时间（秒）。如果为None，则使用初始化时
-                        计算的默认值（chunk时长 + 0.1秒）
-
-        Returns:
-            原始的SweepData，包含所有AO通道的采集数据（每个点包含多通道AI波形）
-
-        Raises:
-            ValueError: 当参数无效时
-        """
-        if chunks_per_start < 1:
-            raise ValueError("每次启动的chunk数必须至少为1")
-
-        # 确定使用的稳定等待时间
-        actual_settle_time = (
-            settle_time if settle_time is not None else self._default_settle_time
-        )
-
-        logger.info(
-            f"开始单次校准流程 - "
-            f"AO通道数: {len(self._ao_channels)}, "
-            f"AI通道数: {len(self._ai_channels)}, "
-            f"每次启动chunk数: {chunks_per_start}, "
-            f"稳定时间: {actual_settle_time:.3f}s"
-        )
-
-        # 初始化SweepData（显式类型标注）
-        sweep_data: SweepData = {
-            "ai_data_list": [],
-            "ao_data": self._output_waveform,
-        }
-
-        # 临时存储当前sweep_data的引用，供export_function使用
-        self._current_sweep_data = sweep_data
-
-        # 创建SingleChasCSIO对象（整个校准流程只创建一次）
-        sync_io = SingleChasCSIO(
-            ai_channels=self._ai_channels,  # 多个AI通道
-            ao_channels_static=self._ao_channels,
-            ao_channels_feedback=(),  # 校准不使用反馈通道
-            static_output_waveform=self._output_waveform,
-            feedback_function=self._feedback_function,
-            export_function=self._export_function,
-        )
-
-        try:
-            # 启动任务
-            sync_io.start()
-            logger.info("SingleChasCSIO任务已启动")
-
-            # 等待系统初始化稳定
-            time.sleep(2.0)
-
-            # 执行测量循环（遍历所有AO通道）
-            for channel_idx in range(len(self._ao_channels)):
-                ao_channel_name = self._ao_channels[channel_idx]
-
-                logger.info(f"测量AO通道 {channel_idx} ({ao_channel_name})")
-
-                # 创建新的测量点数据（使用 position.x=channel_idx 作为临时索引，
-                # 后续处理时通过 channel_idx 映射到真实通道名）
-                point_data: PointSweepData = {
-                    "position": Point2D(x=float(channel_idx), y=0.0),
-                    "ai_data": [],
-                }
-                sweep_data["ai_data_list"].append(point_data)
-
-                # 创建只启用当前AO通道的波形
-                single_channel_waveform = self._create_single_channel_waveform(
-                    channel_idx
-                )
-
-                # 更新静态输出波形
-                sync_io.update_static_output_waveform(single_channel_waveform)
-                logger.debug(
-                    f"已更新波形，启用AO通道 {channel_idx} ({self._ao_channels[channel_idx]})"
-                )
-
-                # 等待通道切换稳定
-                logger.debug(f"等待通道切换稳定 {actual_settle_time:.3f}s")
-                time.sleep(actual_settle_time)
-
-                # 设置目标chunk数量和完成标志
-                self._target_chunks = chunks_per_start
-                self._chunk_collection_complete = False
-
-                # 启用数据导出
-                sync_io.enable_export = True
-
-                # 等待采集指定数量的chunk（使用轮询方式）
-                chunk_duration = self._output_waveform.duration
-                max_wait_time = chunk_duration * chunks_per_start * 2.0  # 最大等待时间
-                poll_interval = 0.05  # 轮询间隔50ms
-                elapsed_time = 0.0
-
-                logger.debug(f"开始采集 {chunks_per_start} 个chunk")
-                while (
-                    not self._chunk_collection_complete and elapsed_time < max_wait_time
-                ):
-                    time.sleep(poll_interval)
-                    elapsed_time += poll_interval
-
-                # 禁用数据导出
-                sync_io.enable_export = False
-
-                # 检查采集到的数据数量
-                collected_chunks = len(point_data["ai_data"])
-                logger.info(
-                    f"AO通道 {channel_idx} 采集完成，共 {collected_chunks} 个chunk"
-                )
-
-                # 验证采集到的chunk数量
-                if collected_chunks != chunks_per_start:
-                    logger.warning(
-                        f"预期采集 {chunks_per_start} 个chunk，"
-                        f"实际采集 {collected_chunks} 个chunk"
-                    )
-
-                # 短暂等待
-                time.sleep(0.1)
-
-        finally:
-            # 停止任务
-            sync_io.stop()
-            logger.info("SingleChasCSIO任务已停止")
-
-        # 清理临时引用
-        self._current_sweep_data = None
-
-        logger.info("单次校准流程完成，返回原始SweepData")
-        return sweep_data
-
-    def _process_multi_ai_sweep_data(
-        self,
-        sweep_data: SweepData,
-        apply_filter: bool = True,
-        lowcut: float = 100.0,
-        highcut: float = 20000.0,
+        filtered_sweep_data: SweepData,
     ) -> list[ChannelTFData]:
         """
-        处理包含多通道AI数据的SweepData，计算传递函数
+        从已滤波/平均的 SweepData 计算传递函数数据（ChannelTFData 列表）。
 
-        该方法将SweepData中的多通道AI波形分解为多个单通道传递函数。
-        对于每个AO通道（每个测量点），提取所有AI通道的数据并计算传递函数。
+        该方法将 SweepData 中的多通道 AI 波形分解为多个单通道传递函数，
+        对应父类的 _calculate_comp_data 方法。该方法只负责计算，不进行
+        平均或滤波处理——这些预处理工作由调用方（calibrate）负责完成。
 
         SweepData 中的测量点顺序与 self._ao_channels 的顺序一致，
         每个测量点的 position.x 存储 AO 通道索引（0-based），用于映射到真实通道名。
 
         Args:
-            sweep_data: 包含多通道AI数据的SweepData
-            apply_filter: 是否应用滤波
-            lowcut: 滤波器低频截止频率（Hz）
-            highcut: 滤波器高频截止频率（Hz）
+            filtered_sweep_data: 已经过平均和滤波处理的 SweepData，
+                每个测量点的 ai_data 列表中只有一条波形（已平均）。
 
         Returns:
-            ChannelTFData列表，每个元素对应一个 AI-AO 通道对的传递函数，
+            ChannelTFData 列表，每个元素对应一个 AI-AO 通道对的传递函数，
             包含 ai_channel 和 ao_channel 字段（真实通道名称字符串）
 
         Raises:
             RuntimeError: 当 AO 波形没有 sine_args 属性时
             ValueError: 当 AI 波形维度或通道数不符合预期时
         """
-        logger.info("开始处理多通道AI数据的SweepData")
+        logger.info("开始计算多通道AI数据的传递函数")
 
-        # 1. 对每个点的多个chunk进行平均
-        logger.info("对每个点的多个chunk进行平均")
-        averaged_data = average_sweep_data(sweep_data)
-
-        # 2. 应用滤波（如果需要）
-        if apply_filter:
-            logger.info(f"应用带通滤波器: {lowcut}Hz - {highcut}Hz")
-            filtered_data = filter_sweep_data(
-                averaged_data,
-                lowcut=lowcut,
-                highcut=highcut,
-            )
-        else:
-            filtered_data = averaged_data
-
-        # 3. 提取AO波形的正弦波参数
-        ao_waveform = filtered_data["ao_data"]
+        # 1. 提取AO波形的正弦波参数
+        ao_waveform = filtered_sweep_data["ao_data"]
         if ao_waveform.sine_args is None:
             raise RuntimeError("AO波形没有sine_args属性")
         ao_sine_args = ao_waveform.sine_args
 
-        # 4. 对每个AO通道（每个测量点），提取所有AI通道的传递函数
+        # 2. 对每个AO通道（每个测量点），提取所有AI通道的传递函数
         all_tf_points: list[ChannelTFData] = []
 
-        for point_data in filtered_data["ai_data_list"]:
+        for point_data in filtered_sweep_data["ai_data_list"]:
             ao_channel_idx = int(point_data["position"].x)  # AO通道索引（0-based）
             ao_channel_name = self._ao_channels[ao_channel_idx]  # 真实AO通道名
             ai_waveform = point_data["ai_data"][0]  # 已平均的多通道AI波形
@@ -1752,7 +1506,7 @@ class CaliberFishNet(CaliberOctopus):
                     f"amp_ratio={amp_ratio:.6f}, phase_shift={phase_shift:.6f}rad"
                 )
 
-        logger.info(f"多通道AI数据处理完成，共计算{len(all_tf_points)}个传递函数")
+        logger.info(f"传递函数计算完成，共计算 {len(all_tf_points)} 个通道对")
         return all_tf_points
 
     def calibrate(
@@ -1774,7 +1528,7 @@ class CaliberFishNet(CaliberOctopus):
            - 每次校准返回原始SweepData，立即保存为raw_sweep_data_N.pkl文件
         2. 第二阶段：处理SweepData，计算传递函数数据
            - 对每个SweepData进行平均和滤波处理
-           - 使用_process_multi_ai_sweep_data计算每次校准的TFData
+           - 对每个SweepData进行平均和滤波，再调用_calculate_tf_data计算TFData
         3. 第三阶段：平均所有校准结果
            - 对多个TFData进行平均，得到平均后的单个TFData
         4. 第四阶段：绘制图表和保存最终数据
@@ -1865,13 +1619,23 @@ class CaliberFishNet(CaliberOctopus):
         for calib_idx, sweep_data in enumerate(all_sweep_data_list):
             logger.info(f"处理第 {calib_idx + 1}/{starts_num} 次校准的数据")
 
-            # 使用_process_multi_ai_sweep_data处理多通道AI数据
-            tf_points = self._process_multi_ai_sweep_data(
-                sweep_data,
-                apply_filter=apply_filter,
-                lowcut=lowcut,
-                highcut=highcut,
-            )
+            # 1. 对每个点的多个chunk进行平均
+            logger.info("对每个点的多个chunk进行平均")
+            averaged_data = average_sweep_data(sweep_data)
+
+            # 2. 应用滤波（如果需要）
+            if apply_filter:
+                logger.info(f"应用带通滤波器: {lowcut}Hz - {highcut}Hz")
+                filtered_data = filter_sweep_data(
+                    averaged_data,
+                    lowcut=lowcut,
+                    highcut=highcut,
+                )
+            else:
+                filtered_data = averaged_data
+
+            # 3. 使用 _calculate_tf_data 计算传递函数
+            tf_points = self._calculate_tf_data(filtered_data)
 
             # 计算平均幅值比和平均相位差
             amp_ratios = [tf["amp_ratio"] for tf in tf_points]
@@ -1923,7 +1687,7 @@ class CaliberFishNet(CaliberOctopus):
         # 绘制传递函数图
         logger.info("绘制传递函数图")
         plot_path = result_path / "transfer_functions.png"
-        self.plot_transfer_functions(save_path=plot_path)
+        self.plot_tf_data(save_path=plot_path)
         logger.info(f"已保存传递函数图到: {plot_path}")
 
         # 保存最终的TFData
@@ -1987,7 +1751,7 @@ class CaliberFishNet(CaliberOctopus):
 
         return copy.deepcopy(self._result_averaged_tf_data)
 
-    def plot_transfer_functions(
+    def plot_tf_data(
         self,
         save_path: str | Path | None = None,
     ) -> None:

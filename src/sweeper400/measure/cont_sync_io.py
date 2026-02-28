@@ -19,6 +19,7 @@ from nidaqmx.constants import (
     ExcitationSource,
     RegenerationMode,
     SoundPressureUnits,
+    WriteRelativeTo,
 )
 
 from ..analyze import (
@@ -53,8 +54,10 @@ class SingleChasCSIO:
 
     ## 同步机制：
         - 所有通道位于同一机箱，使用相同的采样时钟
-        - 硬件自动同步，无需额外的触发配置
-        - 简化的任务管理和数据处理流程
+        - AI 任务启动时，通过 PXI_Trig7 背板线路向 AO 任务发送硬件触发信号
+        - AO 任务预先配置为等待该触发信号，确保 AI/AO 精确同步启动
+        - 使用 `export_signals` 显式路由触发信号，避免 DSA 多设备同步时的时序引擎资源冲突
+          （技术背景详见：`参考资料/NI-DAQmx_DSA多设备同步时序引擎冲突问题分析.md`）
 
     ## 使用示例：
     ```python
@@ -511,18 +514,26 @@ class SingleChasCSIO:
     def _write_ao_task_waveform_static(self):
         """
         向Static AO任务写入波形数据
+
+        使用 WriteRelativeTo.FIRST_SAMPLE 从缓冲区起始位置覆盖写入，
+        这是在 ALLOW_REGENERATION 模式运行中更新波形的正确方法。
+        若使用默认的 CURRENT_WRITE_POSITION，在缓冲区首次写满后，
+        后续写入将因无可用空间而超时失败（错误码 -200292）。
         """
         if self._ao_task_static is None:
             return
 
         try:
             # 提取波形数据
-            if self._static_output_waveform.ndim == 1:
-                # 单通道
-                waveform_data = np.asarray(self._static_output_waveform)
-            else:
-                # 多通道
-                waveform_data = np.asarray(self._static_output_waveform)
+            waveform_data = np.asarray(self._static_output_waveform)
+
+            # 从缓冲区起始位置（position 0）覆盖写入新波形。
+            # 这是在 ALLOW_REGENERATION 模式下更新波形的标准做法：
+            # 由于再生模式不释放缓冲区空间，默认的 CURRENT_WRITE_POSITION
+            # 会永远阻塞（CurrWritePos 一直停在缓冲区末尾），而 FIRST_SAMPLE
+            # 则直接覆盖写入，下一个再生周期即生效。
+            self._ao_task_static.out_stream.relative_to = WriteRelativeTo.FIRST_SAMPLE  # type: ignore
+            self._ao_task_static.out_stream.offset = 0  # type: ignore
 
             # 写入数据
             self._ao_task_static.write(waveform_data, auto_start=False)  # type: ignore
@@ -757,12 +768,32 @@ class SingleChasCSIO:
             # 创建并配置 AI 任务
             self._setup_ai_task()
 
-            # 获取AI任务的开始触发器终端名称，用于同步AO任务
+            # 将 AI 的 StartTrigger 事件显式导出到 PXI_Trig7，供 AO 任务同步触发使用。
+            #
+            # 【背景】当 AI 任务跨多个 Slot 时，NI-DAQmx 会启动 DSA 多设备同步协议，
+            # 在主设备（通常为最低编号 Slot）上自动分配时序引擎：
+            #   te0 → AI 主采样时钟（Master Sample Clock）
+            #   te2 → AI DSA 同步脉冲分发（Sync Pulse Distribution）
+            #   te3 → AO 任务自身的主时序引擎（AO Master Timing Engine）
+            # 因此，te0/te2 被 AI 占用（直接监听会造成运行时硬件冲突，报错 -200292），
+            # te3 是 AO 自身引擎（若用作 AO 的触发源会构成循环自引用，立即报错 -89131）。
+            # 于是无法通过任何 te 的 StartTrigger 终端安全地实现跨任务同步。
+            #
+            # 【方案】改用独立的 PXI 背板触发线 PXI_Trig7：
+            #   1. 通过 export_signals.start_trig_output_term 将 AI 的 StartTrigger
+            #      显式路由到 PXI_Trig7（一条与时序引擎资源完全隔离的独立信号线）
+            #   2. AO 任务监听同一条 PXI_Trig7 线路，等待并接收 AI 的启动事件
+            # DSA 内部同步通常仅占用 PXI_Trig0~Trig2，选择高编号 Trig7 以最大化
+            # 与 DSA 内部分配冲突的安全裕量。
+            # 技术细节详见：参考资料/多板卡同步时序引擎冲突问题分析.md
             ai_start_trigger_terminal = self._get_terminal_name_with_dev_prefix(
                 self._ai_task,
-                "te0/StartTrigger",  # type: ignore
+                "PXI_Trig7",
             )
-            logger.debug(f"AI开始触发器终端: {ai_start_trigger_terminal}")
+            self._ai_task.export_signals.start_trig_output_term = (
+                ai_start_trigger_terminal
+            )
+            logger.debug(f"AI StartTrigger 已显式导出至: {ai_start_trigger_terminal}")
 
             # 创建并配置 Static AO 任务（使用AI触发器同步）
             self._setup_ao_task(

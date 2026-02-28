@@ -120,8 +120,6 @@ class TestCaliberOctopus:
 
         print(f"所有结果文件已保存到: {temp_result_folder}")
 
-
-
     @pytest.mark.hardware
     def test_calibrate_with_custom_settle_time(
         self,
@@ -234,9 +232,7 @@ class TestCaliberOctopus:
 
         # 验证新实例的输出波形已经过补偿
         assert caliber2._output_waveform.channels_num == len(ao_channels)
-        print(
-            f"使用补偿数据创建实例成功，输出波形通道数: {caliber2._output_waveform.channels_num}"
-        )
+        print(f"使用补偿数据创建实例成功，输出波形通道数: {caliber2._output_waveform.channels_num}")
 
     @pytest.mark.hardware
     def test_plot_transfer_functions(
@@ -266,13 +262,13 @@ class TestCaliberOctopus:
 
         # 测试极坐标模式绘图
         polar_path = temp_result_folder / "test_polar.png"
-        caliber.plot_transfer_functions(mode="polar", save_path=polar_path)
+        caliber.plot_comp_data(mode="polar", save_path=polar_path)
         assert polar_path.exists()
         print(f"极坐标图已保存到: {polar_path}")
 
         # 测试直角坐标模式绘图
         cartesian_path = temp_result_folder / "test_cartesian.png"
-        caliber.plot_transfer_functions(mode="cartesian", save_path=cartesian_path)
+        caliber.plot_comp_data(mode="cartesian", save_path=cartesian_path)
         assert cartesian_path.exists()
         print(f"直角坐标图已保存到: {cartesian_path}")
 
@@ -300,6 +296,7 @@ class TestCaliberOctopus:
         # 执行校准（使用临时文件夹避免污染默认路径）
         print("\n执行校准...")
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmpdir:
             caliber.calibrate(
                 starts_num=1,
@@ -413,10 +410,11 @@ class TestCaliberOctopus:
         # 计算初始校准的幅值比标准差（衡量通道不一致性）
         amp_ratios_before = [point["amp_ratio"] for point in tf_data_before["tf_list"]]
         import numpy as np
+
         amp_std_before = np.std(amp_ratios_before)
         amp_mean_before = np.mean(amp_ratios_before)
 
-        print(f"\n初始校准结果:")
+        print("\n初始校准结果:")
         print(f"  幅值比平均值: {amp_mean_before:.6f}")
         print(f"  幅值比标准差: {amp_std_before:.6f}")
         print(f"  幅值比范围: [{min(amp_ratios_before):.6f}, {max(amp_ratios_before):.6f}]")
@@ -464,7 +462,7 @@ class TestCaliberOctopus:
         amp_std_after = np.std(amp_ratios_after)
         amp_mean_after = np.mean(amp_ratios_after)
 
-        print(f"\n补偿后校准结果:")
+        print("\n补偿后校准结果:")
         print(f"  幅值比平均值: {amp_mean_after:.6f}")
         print(f"  幅值比标准差: {amp_std_after:.6f}")
         print(f"  幅值比范围: [{min(amp_ratios_after):.6f}, {max(amp_ratios_after):.6f}]")
@@ -479,7 +477,7 @@ class TestCaliberOctopus:
         # 计算改善程度
         std_improvement = (amp_std_before - amp_std_after) / amp_std_before * 100
 
-        print(f"\n通道一致性改善情况:")
+        print("\n通道一致性改善情况:")
         print(f"  初始标准差: {amp_std_before:.6f}")
         print(f"  补偿后标准差: {amp_std_after:.6f}")
         print(f"  改善程度: {std_improvement:.2f}%")
@@ -491,13 +489,11 @@ class TestCaliberOctopus:
         )
 
         # 期望至少有30%的改善（这是一个合理的阈值）
-        assert std_improvement > 30, (
-            f"标准差改善程度({std_improvement:.2f}%)应大于30%"
-        )
+        assert std_improvement > 30, f"标准差改善程度({std_improvement:.2f}%)应大于30%"
 
-        print(f"\n✓ 补偿效果验证通过!")
+        print("\n✓ 补偿效果验证通过!")
         print(f"  标准差减少了 {std_improvement:.2f}%")
-        print(f"  通道一致性显著改善")
+        print("  通道一致性显著改善")
 
         # 验证所有结果文件都已保存
         assert (before_calib_folder / "comp_data.pkl").exists()
@@ -505,6 +501,6 @@ class TestCaliberOctopus:
         assert (after_calib_folder / "comp_data.pkl").exists()
         assert (after_calib_folder / "transfer_function_polar.png").exists()
 
-        print(f"\n所有结果文件已保存:")
+        print("\n所有结果文件已保存:")
         print(f"  补偿前: {before_calib_folder}")
         print(f"  补偿后: {after_calib_folder}")
