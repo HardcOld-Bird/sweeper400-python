@@ -293,7 +293,7 @@ class SweepProgress(TypedDict):
     average_time_per_point: float | None
 
 
-class Sweeper:
+class SweeperCore:
     """
     # 声学扫场测量控制器
 
@@ -322,7 +322,7 @@ class Sweeper:
     output_waveform = get_sine_cycles(sampling_info, sine_args, cycles=100)
 
     # 创建扫场测量器（自动管理硬件控制器）
-    sweeper = Sweeper(
+    sweeper = SweeperCore(
         ai_channel="400Slot2/ai0",
         ao_channels="400Slot2/ao0",
         output_waveform=output_waveform,
@@ -355,7 +355,7 @@ class Sweeper:
     """
 
     # 获取类日志器
-    logger = get_logger(f"{__name__}.Sweeper")
+    logger = get_logger(f"{__name__}.SweeperCore")
 
     def __init__(
         self,
@@ -459,7 +459,7 @@ class Sweeper:
         self._time_lock = threading.Lock()  # 保护时间变量的线程锁
 
         logger.info(
-            f"Sweeper 初始化完成 - "
+            f"SweeperCore 初始化完成 - "
             f"测量点数: {len(self._point_list)}, "
             f"每点chunk数: {self._CHUNKS_PER_POINT}, "
             f"稳定时间: {self._SETTLE_TIME}s"
@@ -523,7 +523,7 @@ class Sweeper:
             RuntimeError: 当步进电机控制器未初始化时
 
         Examples:
-            >>> sweeper = Sweeper("ai0", "ao0")
+            >>> sweeper = SweeperCore("ai0", "ao0")
             >>> x_pos, y_pos = sweeper.where()
             >>> print(f"当前位置: ({x_pos:.3f}, {y_pos:.3f}) mm")
         """
@@ -553,7 +553,7 @@ class Sweeper:
             RuntimeError: 当步进电机控制器未初始化时
 
         Examples:
-            >>> sweeper = Sweeper("ai0", "ao0")
+            >>> sweeper = SweeperCore("ai0", "ao0")
             >>> success = sweeper.move_to(100.0, 50.0)
             >>> if success:
             ...     print("移动成功")
@@ -578,7 +578,7 @@ class Sweeper:
             RuntimeError: 当步进电机控制器未初始化时
 
         Examples:
-            >>> sweeper = Sweeper("ai0", "ao0")
+            >>> sweeper = SweeperCore("ai0", "ao0")
             >>> success = sweeper.calib()
             >>> if success:
             ...     print("校准成功")
@@ -599,7 +599,7 @@ class Sweeper:
             point_list: 新的测量点阵，Point2D对象的列表
 
         Examples:
-            >>> sweeper = Sweeper("ai0", "ao0")
+            >>> sweeper = SweeperCore("ai0", "ao0")
             >>> new_point_list = [Point2D(100.0, 50.0), Point2D(200.0, 100.0)]
             >>> sweeper.new_point_list(new_point_list)
         """
@@ -624,7 +624,7 @@ class Sweeper:
             RuntimeError: 当创建新的HiPerfCSSIO失败时
 
         Examples:
-            >>> sweeper = Sweeper("ai0", "ao0")
+            >>> sweeper = SweeperCore("ai0", "ao0")
             >>> # 创建新的输出波形
             >>> sampling_info = init_sampling_info(48000.0, 4800)
             >>> sine_args = init_sine_args(2000.0, 0.02, 0.0)
@@ -691,7 +691,7 @@ class Sweeper:
         self._enough_chunks_event.clear()
         self._set_state(SweepState.IDLE)
 
-        logger.info("Sweeper 状态已重置")
+        logger.info("SweeperCore 状态已重置")
 
     def sweep(self) -> bool:
         """
@@ -1126,7 +1126,7 @@ class Sweeper:
         except Exception as e:
             logger.error(f"重置状态时出错: {e}")
 
-        logger.info("Sweeper 资源清理完成")
+        logger.info("SweeperCore 资源清理完成")
 
     def __del__(self):
         """析构函数，确保资源被正确释放"""

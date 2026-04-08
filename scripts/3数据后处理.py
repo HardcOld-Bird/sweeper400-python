@@ -5,7 +5,7 @@ from sweeper400.analyze import (
     plot_transfer_function_instantaneous_field,
     plot_transfer_function_interpolated_distribution,
 )
-from sweeper400.use.sweeper import (
+from sweeper400.use.sweeper_core import (
     load_sweep_data,
 )
 

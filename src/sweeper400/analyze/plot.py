@@ -18,6 +18,7 @@ from scipy.interpolate import griddata
 
 from ..logger import get_logger
 from .my_dtypes import Point2D, SweepData, Waveform
+from .post_process import average_sweep_data
 
 
 # 本地定义的空间点传递函数数据类型，专用于空间扫场绘图函数。
@@ -36,6 +37,7 @@ class PointTFData(TypedDict):
     position: Point2D
     amp_ratio: float
     phase_shift: float
+
 
 # 获取模块日志器
 logger = get_logger(__name__)
@@ -936,3 +938,187 @@ def plot_sweep_waveforms(
     logger.info(f"所有波形图已保存至: {output_folder}")
 
     return str(output_folder)
+
+
+def plot_sweepdata_as_single_waveform(
+    sweep_data: SweepData,
+    figsize: tuple[float, float] = (12, 6),
+    title: str | None = None,
+    save_path: str | None = None,
+    show_grid: bool = True,
+    zoom_factor: float = 1.0,
+) -> tuple[Figure, Axes]:
+    """
+    绘制SweepData的融合波形图
+
+    该函数接收一个SweepData对象，先使用average_sweep_data函数对其进行平均，
+    然后将所有测量点的所有AI通道波形按位相加并取平均，融合为单一的Waveform，
+    最后使用plot_waveform函数绘制这个融合波形。
+
+    融合逻辑：
+    1. 首先对SweepData调用average_sweep_data，将每个测量点的多个波形平均为一个波形
+    2. 然后遍历所有测量点的ai_data，将所有波形按位相加
+    3. 最后除以总波形数，得到全局融合的单一波形
+    4. 使用plot_waveform函数绘制这个融合波形
+
+    Args:
+        sweep_data: 要可视化的SweepData对象
+        figsize: 图形尺寸 (宽, 高)，单位为英寸，默认为 (12, 6)
+        title: 图形标题，如果为None则使用默认标题，默认为None
+        save_path: 保存图片的路径，如果为None则不保存，默认为None
+        show_grid: 是否显示网格，默认为True
+        zoom_factor: 时间轴缩放因子，传递给plot_waveform函数，默认为1.0
+
+    Returns:
+        fig: matplotlib Figure对象
+        ax: Axes对象
+
+    Raises:
+        ValueError: 当输入的sweep_data为空时
+
+    Examples:
+        ```python
+        # 假设已有一个SweepData对象
+        >>> sweep_data = load_sweep_data("measurement.pkl")  # noqa
+        >>> fig, ax = plot_sweepdata_as_single_waveform(sweep_data)
+        >>> plt.show()
+        # 或者保存图片并放大10倍
+        >>> fig, ax = plot_sweepdata_as_single_waveform(
+        ...     sweep_data,
+        ...     save_path="fusion_waveform.png",
+        ...     zoom_factor=10
+        ... )
+        ```
+    """
+    logger.info("开始绘制SweepData的融合波形图")
+
+    # 验证输入
+    ai_data_list = sweep_data["ai_data_list"]
+    if not ai_data_list:
+        logger.error("输入的SweepData对象为空，无法绘图")
+        raise ValueError("SweepData对象不能为空")
+
+    logger.info(f"输入SweepData包含 {len(ai_data_list)} 个测量点")
+
+    # 第一步：对SweepData进行平均（每个测量点的多个波形平均为一个波形）
+    logger.info("对SweepData进行平均处理")
+    averaged_sweep_data = average_sweep_data(sweep_data)
+
+    # 第二步：获取参考波形的元数据
+    first_point_waveform = averaged_sweep_data["ai_data_list"][0]["ai_data"][0]
+    sampling_rate = first_point_waveform.sampling_rate
+    samples_num = first_point_waveform.samples_num
+    is_multi_channel = first_point_waveform.ndim == 2
+
+    if is_multi_channel:
+        num_channels = first_point_waveform.shape[0]
+        logger.debug(
+            f"检测到多通道波形，通道数: {num_channels}，采样点数: {samples_num}"
+        )
+    else:
+        logger.debug(f"检测到单通道波形，采样点数: {samples_num}")
+
+    # 第三步：按位相加所有测量点的所有AI波形
+    total_waveforms = 0  # 计算总波形数
+
+    if is_multi_channel:
+        # 多通道情况：初始化累加数组 (num_channels, samples_num)
+        summed_data = np.zeros((num_channels, samples_num), dtype=np.float64)
+
+        for point_data in averaged_sweep_data["ai_data_list"]:
+            for waveform in point_data["ai_data"]:
+                # 验证波形维度
+                if waveform.ndim != 2 or waveform.shape != (num_channels, samples_num):
+                    logger.warning(
+                        f"波形维度不一致：期望 ({num_channels}, {samples_num})，"
+                        f"实际 shape={waveform.shape}，跳过此波形"
+                    )
+                    continue
+                summed_data += waveform
+                total_waveforms += 1
+
+        # 取平均
+        if total_waveforms == 0:
+            logger.error("没有有效的波形数据可供融合")
+            raise ValueError("没有有效的波形数据可供融合")
+
+        averaged_data = summed_data / total_waveforms
+
+        # 创建融合后的Waveform对象（保留channel_names元数据）
+        fusion_waveform = Waveform(
+            input_array=averaged_data,
+            sampling_rate=sampling_rate,
+            timestamp=first_point_waveform.timestamp,
+            channel_names=first_point_waveform.channel_names
+            if hasattr(first_point_waveform, "channel_names")
+            else None,
+        )
+
+        logger.info(
+            f"融合完成：多通道模式，{num_channels}个通道，融合了{total_waveforms}个波形"
+        )
+    else:
+        # 单通道情况：初始化累加数组
+        summed_data = np.zeros(samples_num, dtype=np.float64)
+
+        for point_data in averaged_sweep_data["ai_data_list"]:
+            for waveform in point_data["ai_data"]:
+                # 验证波形维度
+                if waveform.ndim == 2:
+                    # 如果是2D但只有1个通道，提取第一个通道
+                    if waveform.shape[0] == 1:
+                        summed_data += waveform[0, :]
+                    else:
+                        logger.warning(
+                            f"波形维度不一致：期望单通道，实际 shape={waveform.shape}，"
+                            f"跳过此波形"
+                        )
+                        continue
+                else:
+                    if waveform.shape != (samples_num,):
+                        logger.warning(
+                            f"波形维度不一致：期望 ({samples_num},)，"
+                            f"实际 shape={waveform.shape}，跳过此波形"
+                        )
+                        continue
+                    summed_data += waveform
+                total_waveforms += 1
+
+        # 取平均
+        if total_waveforms == 0:
+            logger.error("没有有效的波形数据可供融合")
+            raise ValueError("没有有效的波形数据可供融合")
+
+        averaged_data = summed_data / total_waveforms
+
+        # 创建融合后的Waveform对象
+        fusion_waveform = Waveform(
+            input_array=averaged_data,
+            sampling_rate=sampling_rate,
+            timestamp=first_point_waveform.timestamp,
+        )
+
+        logger.info(f"融合完成：单通道模式，融合了{total_waveforms}个波形")
+
+    # 第四步：使用plot_waveform函数绘制融合波形
+    logger.info("绘制融合波形")
+
+    # 构建默认标题（如果未指定）
+    if title is None:
+        title = (
+            f"融合波形图 - 融合了{total_waveforms}个波形 | "
+            f"采样率: {sampling_rate:.0f} Hz"
+        )
+
+    fig, ax = plot_waveform(
+        waveform=fusion_waveform,
+        figsize=figsize,
+        title=title,
+        save_path=save_path,
+        show_grid=show_grid,
+        zoom_factor=zoom_factor,
+    )
+
+    logger.info("SweepData融合波形图绘制完成")
+
+    return fig, ax

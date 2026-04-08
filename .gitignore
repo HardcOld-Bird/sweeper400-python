@@ -1,13 +1,18 @@
 # pycache
 __pycache__/
 
+# Build artifacts
+*.egg-info/
+
 # dirs
 /.idea/
 /.vscode/
 /.augment/
+/.kilocode/
+/.qoder/
 /htmlcov/
 /参考资料/
 /storage/
 
-# Build artifacts
-*.egg-info/
+# big files
+/src/sweeper400/sim/gainEP_10in16out.mph

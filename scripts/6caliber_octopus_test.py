@@ -54,7 +54,7 @@ caliber = CaliberOctopus(
     ao_channels=ao_channels,
     sampling_info=sampling_info,
     sine_args=sine_args,
-    comp_data="D:\\EveryoneDownloaded\\before_calib\\comp_data.pkl",
+    ao_comp_data="D:\\EveryoneDownloaded\\before_calib\\ao_comp_data.pkl",
 )
 
 caliber.calibrate(

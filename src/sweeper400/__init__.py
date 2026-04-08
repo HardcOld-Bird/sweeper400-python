@@ -23,7 +23,7 @@ from .logger import (
 )
 
 # 将模块功能提升至包级别，可缩短外部import语句
-from .use import Sweeper
+from .use import SweeperCore
 
 __version__ = "0.1.0"
 __author__ = "402"
@@ -35,5 +35,5 @@ _package_logger.info("sweeper400 包已加载")
 # 控制 import * 的行为
 __all__ = [
     "get_logger",
-    "Sweeper",
+    "SweeperCore",
 ]

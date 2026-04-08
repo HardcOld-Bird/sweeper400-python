@@ -10,6 +10,7 @@
 from typing import Annotated, Any, NamedTuple, TypedDict, TypeGuard
 
 import numpy as np
+import pandas as pd
 from pydantic import AfterValidator
 
 from ..logger import get_logger
@@ -543,69 +544,31 @@ class SweepData(TypedDict):
 
 
 # 数据后处理相关数据类型
-# 定义**通道对**的传递函数结果数据格式
-class ChannelTFData(TypedDict):
-    """
-    通道间传递函数计算结果格式（描述复数传递函数）。
-
-    该类型描述**某一对 AO 通道与 AI 通道之间**的传递函数
-    H(ω) = A·e^(jφ)，用于分析通道间的频率响应特性。
-
-    ## 内部组成:
-        **ai_channel**: AI 通道完整名称（如 "PXI1Slot2/ai0"）
-        **ao_channel**: AO 通道完整名称（如 "PXI1Slot3/ao1"）
-        **amp_ratio**: 绝对幅值比（AI 幅值 / AO 幅值）
-        **phase_shift**: 绝对相位差（AI 相位 - AO 相位，弧度制）
-    """
-
-    ai_channel: str
-    ao_channel: str
-    amp_ratio: float
-    phase_shift: float
-
-
-# 定义**通道对**的补偿数据格式
-class ChannelCompData(TypedDict):
-    """
-    单通道对补偿数据格式。
-
-    该类型描述某一对 AO/AI 通道相对于所有通道平均值的补偿参数，
-    用于多通道系统的校准，使所有通道响应尽可能一致。
-
-    ## 内部组成:
-        **ai_channel**: AI 通道完整名称（如 "PXI1Slot2/ai0"）
-        **ao_channel**: AO 通道完整名称（如 "PXI1Slot3/ao1"）
-        **amp_ratio**: 幅值补偿倍率（补偿到平均值需要乘以的倍率）
-        **time_delay**: 时间延迟补偿值（相对于平均值的时间差，单位：秒）
-    """
-
-    ai_channel: str
-    ao_channel: str
-    amp_ratio: float
-    time_delay: float
-
-
 # 定义传递函数计算结果容器格式
 class TFData(TypedDict):
     """
     传递函数计算结果容器格式。
 
-    该类型包含传递函数计算的完整结果，包括所有通道对的传递函数数据
+    该类型包含传递函数计算的完整结果，使用DataFrame存储所有通道对的传递函数数据，
     以及计算过程中的关键参数（采样信息、正弦波参数、平均幅值比、平均相位差）。
 
     ## 内部组成:
-        **tf_list**: 传递函数数据列表，每个元素为 ChannelTFData
+        **tf_dataframe**: 传递函数数据DataFrame，
+            - index: AO通道名称（行索引）
+            - columns: AI通道名称（列索引）
+            - 内容: 复数形式的传递函数值（幅值比 * e^(j*相位差)）
         **sampling_info**: 采样信息（必选）
         **sine_args**: 正弦波参数（包含频率、幅值和相位信息）
         **mean_amp_ratio**: 所有通道对的平均幅值比
         **mean_phase_shift**: 所有通道对的平均相位差（弧度制）
 
     说明：
-        - TFData 专注于描述「通道对」的频率响应本身，不再显式携带
-          AO/AI 通道列表等冗余信息，这些通常由更高层对象（如 Caliber 系列类）管理。
+        - TFData专注于描述「通道对」的频率响应本身
+        - TFData通常应为"方形"矩阵（行数、列数>1）
+        - 使用复数形式同时存储幅值比和相位差信息
     """
 
-    tf_list: list[ChannelTFData]
+    tf_dataframe: pd.DataFrame  # 复数类型DataFrame
     sampling_info: SamplingInfo
     sine_args: SineArgs
     mean_amp_ratio: float
@@ -617,22 +580,30 @@ class CompData(TypedDict):
     """
     补偿参数计算结果容器格式（也用作校准数据格式）。
 
-    该类型包含补偿参数计算的完整结果，包括所有通道对的补偿数据
+    该类型包含补偿参数计算的完整结果，使用DataFrame存储所有通道的补偿数据，
     以及计算过程中的关键参数（采样信息、正弦波参数、平均幅值比、平均相位差）。
 
     ## 内部组成:
-        **comp_list**: 补偿参数数据列表，每个元素为 ChannelCompData
+        **comp_dataframe**: 补偿参数DataFrame，
+            - index: 通道名称（行索引）
+                - 对于CaliberOctopus（AO通道校准）: 记录AO通道名称
+                - 对于CaliberSardine（AI通道校准）: 记录AI通道名称
+            - columns: ['amp_multiplier', 'time_increment']（列索引）
+                - amp_multiplier: 幅值补偿倍率（补偿到平均值需要乘以的倍率）
+                - time_increment: 时间延迟补偿值（补偿到平均值需要加上的时间差，单位：秒）
+            - 内容: 浮点数
         **sampling_info**: 采样信息（必选）
         **sine_args**: 正弦波参数（包含频率、幅值和相位信息）
         **mean_amp_ratio**: 所有通道对的平均幅值比
         **mean_phase_shift**: 所有通道对的平均相位差（弧度制）
 
     说明：
-        - CompData 同样只关注「通道对」本身的补偿信息，
-          AO/AI 通道列表等全局信息由上层组件维护。
+        - CompData专注于「通道」本身的补偿信息
+        - CompData的DataFrame总是"长/宽为1的方形"，即行矩阵（1行多列）或列矩阵（多行1列）
+        - 要么ao_channel恒定（AI通道校准），要么ai_channel恒定（AO通道校准）
     """
 
-    comp_list: list["ChannelCompData"]
+    comp_dataframe: pd.DataFrame  # 浮点数类型DataFrame
     sampling_info: SamplingInfo
     sine_args: SineArgs
     mean_amp_ratio: float

@@ -64,7 +64,7 @@ def calib_multi_ch_wf(
         >>> # 应用校准补偿
         >>> calibrated_waveform = calib_multi_ch_wf(
         ...     noise_waveform,
-        ...     "comp_data.pkl"
+        ...     "ao_comp_data.pkl"
         ... )
         >>> print(calibrated_waveform.shape)  # (8, 10000)
         ```
@@ -133,7 +133,7 @@ def calib_multi_ch_wf(
         time_delay = point_comp_data["time_delay"]
 
         logger.debug(
-            f"通道 {ch_idx}: 幅值比={amp_ratio:.6f}, 时间延迟={time_delay*1e6:.3f}μs"
+            f"通道 {ch_idx}: 幅值比={amp_ratio:.6f}, 时间延迟={time_delay * 1e6:.3f}μs"
         )
 
         # 5.1 幅值补偿
@@ -154,7 +154,7 @@ def calib_multi_ch_wf(
         sample_delay = int(np.round(time_delay * sampling_rate))
 
         logger.debug(
-            f"通道 {ch_idx}: 时间延迟={time_delay*1e6:.3f}μs, "
+            f"通道 {ch_idx}: 时间延迟={time_delay * 1e6:.3f}μs, "
             f"采样点延迟={sample_delay}"
         )
 

@@ -37,7 +37,7 @@ sweeper400 是一个用于声学扫场测量的 Python 包，能够协同控制 
 ## 快速开始
 
 ```python
-from sweeper400 import Sweeper
+from sweeper400 import SweeperCore
 from sweeper400.analyze import init_sampling_info, init_sine_args, get_sine_cycles
 
 # 创建输出波形
@@ -46,7 +46,7 @@ sine_args = init_sine_args(1000.0, 1.0, 0.0)
 output_waveform = get_sine_cycles(sampling_info, sine_args, cycles=100)
 
 # 创建扫场测量器
-sweeper = Sweeper(
+sweeper = SweeperCore(
     ai_channel="400Slot2/ai0",
     ao_channel="400Slot2/ao0",
     output_waveform=output_waveform,

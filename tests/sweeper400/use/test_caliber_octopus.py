@@ -113,7 +113,7 @@ class TestCaliberOctopus:
         print(f"校准完成，生成了 {len(caliber.result_final_comp_data['comp_list'])} 个通道的补偿数据")
 
         # 验证结果文件已保存
-        assert (temp_result_folder / "comp_data.pkl").exists()
+        assert (temp_result_folder / "ao_comp_data.pkl").exists()
         assert (temp_result_folder / "raw_sweep_data_1.pkl").exists()
         assert (temp_result_folder / "transfer_function_polar.png").exists()
         assert (temp_result_folder / "transfer_function_cartesian.png").exists()
@@ -348,7 +348,7 @@ class TestCaliberOctopus:
         default_path = Path(__file__).resolve().parents[3] / "storage" / "calib" / "calib_result_octopus"
 
         assert default_path.exists(), f"默认路径不存在: {default_path}"
-        assert (default_path / "comp_data.pkl").exists(), "comp_data.pkl未保存"
+        assert (default_path / "ao_comp_data.pkl").exists(), "ao_comp_data.pkl未保存"
         assert (default_path / "raw_sweep_data_1.pkl").exists(), "raw_sweep_data_1.pkl未保存"
         assert (default_path / "transfer_function_polar.png").exists(), "polar图未保存"
         assert (default_path / "transfer_function_cartesian.png").exists(), "cartesian图未保存"
@@ -401,7 +401,7 @@ class TestCaliberOctopus:
         # 验证初始校准结果
         assert caliber_before.result_final_comp_data is not None
         assert len(caliber_before.result_final_comp_data["comp_list"]) == len(ao_channels)
-        assert (before_calib_folder / "comp_data.pkl").exists()
+        assert (before_calib_folder / "ao_comp_data.pkl").exists()
 
         # 获取初始校准的传递函数数据（用于后续对比）
         tf_data_before = caliber_before.result_averaged_tf_data
@@ -429,7 +429,7 @@ class TestCaliberOctopus:
         after_calib_folder = temp_result_folder / "after_calib"
         after_calib_folder.mkdir(parents=True, exist_ok=True)
 
-        comp_data_path = before_calib_folder / "comp_data.pkl"
+        comp_data_path = before_calib_folder / "ao_comp_data.pkl"
 
         caliber_after = CaliberOctopus(
             ai_channel=ai_channels[0],
@@ -496,9 +496,9 @@ class TestCaliberOctopus:
         print("  通道一致性显著改善")
 
         # 验证所有结果文件都已保存
-        assert (before_calib_folder / "comp_data.pkl").exists()
+        assert (before_calib_folder / "ao_comp_data.pkl").exists()
         assert (before_calib_folder / "transfer_function_polar.png").exists()
-        assert (after_calib_folder / "comp_data.pkl").exists()
+        assert (after_calib_folder / "ao_comp_data.pkl").exists()
         assert (after_calib_folder / "transfer_function_polar.png").exists()
 
         print("\n所有结果文件已保存:")

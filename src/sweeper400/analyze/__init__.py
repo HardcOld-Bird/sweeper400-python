@@ -21,8 +21,6 @@ from .filter import (
 )
 from .general_signal import calib_multi_ch_wf
 from .my_dtypes import (
-    ChannelCompData,
-    ChannelTFData,
     CompData,
     Point2D,
     PointSweepData,
@@ -38,6 +36,7 @@ from .my_dtypes import (
 )
 from .plot import (
     plot_sweep_waveforms,
+    plot_sweepdata_as_single_waveform,
     plot_transfer_function_discrete_distribution,
     plot_transfer_function_instantaneous_field,
     plot_transfer_function_interpolated_distribution,
@@ -57,8 +56,6 @@ __all__ = [
     "average_sweep_data",
     "average_comp_data_list",
     "average_tf_data_list",
-    "ChannelCompData",
-    "ChannelTFData",
     "CompData",
     "PositiveInt",
     "PositiveFloat",
@@ -86,6 +83,7 @@ __all__ = [
     "plot_transfer_function_instantaneous_field",
     "plot_waveform",
     "plot_sweep_waveforms",
+    "plot_sweepdata_as_single_waveform",
     "filter_waveform",
     "detrend_waveform",
     "calib_multi_ch_wf",

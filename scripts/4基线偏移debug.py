@@ -8,7 +8,7 @@ from src.sweeper400.analyze import (
     plot_transfer_function_instantaneous_field,
     plot_transfer_function_interpolated_distribution,
 )
-from src.sweeper400.use.sweeper import (
+from src.sweeper400.use.sweeper_core import (
     load_sweep_data,
 )
 

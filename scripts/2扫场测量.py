@@ -5,7 +5,7 @@ from sweeper400.analyze import (
     init_sine_args,
 )
 from sweeper400.use import (
-    Sweeper,
+    SweeperCore,
     get_square_grid,
 )
 
@@ -17,7 +17,7 @@ sine_args = init_sine_args(
 output_waveform = get_sine_cycles(sampling_info, sine_args)
 
 # 创建Sweeper对象
-swp = Sweeper(
+swp = SweeperCore(
     ai_channel="400Slot2/ai0",  # 传声器
     ao_channel="400Slot2/ao0",  # 扬声器
     output_waveform=output_waveform,

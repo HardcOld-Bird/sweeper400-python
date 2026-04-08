@@ -210,7 +210,7 @@ def get_sine_cycles(
 def get_sine_multi_ch(
     sampling_info: SamplingInfo,
     sine_args: SineArgs,
-    comp_data: CompData,
+    ao_comp_data: CompData,
     timestamp: np.datetime64 | None = None,
     id: int | None = None,
 ) -> Waveform:
@@ -231,7 +231,7 @@ def get_sine_multi_ch(
     Args:
         sampling_info: 采样信息，包含采样率和采样点数
         sine_args: 期望的正弦波参数（目标输出的频率、幅值和相位）
-        comp_data: 补偿数据，包含每个通道的传递函数信息（相对幅值比和时间延迟）
+        ao_comp_data: 补偿数据，包含每个通道的传递函数信息（相对幅值比和时间延迟）
         timestamp: 采样开始时间戳，默认值为None
         id: 波形的唯一标识符，默认值为None
 
@@ -246,76 +246,75 @@ def get_sine_multi_ch(
         >>> # 假设已经有补偿数据
         >>> sampling_info = init_sampling_info(171500.0, 85750)
         >>> sine_args = init_sine_args(3430.0, 0.01, 0.0)
-        >>> # comp_data 从校准流程中获得
-        >>> multi_ch_waveform = get_sine_multi_ch(sampling_info, sine_args, comp_data)
+        >>> # ao_comp_data 从校准流程中获得
+        >>> multi_ch_waveform = get_sine_multi_ch(sampling_info, sine_args, ao_comp_data)
         >>> print(multi_ch_waveform.shape)  # (8, 85750) 假设有8个通道
         ```
     """
     # 获取函数日志器
     logger = get_logger(f"{__name__}.get_sine_multi_ch")
 
+    # 从DataFrame中获取补偿数据
+    comp_df = ao_comp_data["comp_dataframe"]
+    channels_num = len(comp_df)
+
     logger.debug(
         f"生成多通道补偿波形: frequency={sine_args['frequency']}Hz, "
         f"amplitude={sine_args['amplitude']}, phase={sine_args['phase']}rad, "
         f"sampling_rate={sampling_info['sampling_rate']}Hz, "
         f"samples_num={sampling_info['samples_num']}, "
-        f"channels_num={len(comp_data['comp_list'])}"
+        f"channels_num={channels_num}"
     )
-
-    # 验证补偿数据（通道数由 comp_list 长度决定，不再依赖旧的 ao_channels 字段）
-    channels_num = len(comp_data["comp_list"])
 
     # 验证采样信息与补偿数据的一致性
     if (
         abs(
             sampling_info["sampling_rate"]
-            - comp_data["sampling_info"]["sampling_rate"]
+            - ao_comp_data["sampling_info"]["sampling_rate"]
         )
         > 1e-6
     ):
         logger.warning(
             f"当前采样率({sampling_info['sampling_rate']}Hz) "
-            f"与校准时采样率({comp_data['sampling_info']['sampling_rate']}Hz)不一致"
+            f"与校准时采样率({ao_comp_data['sampling_info']['sampling_rate']}Hz)不一致"
         )
 
     # 验证频率与补偿数据的一致性
-    if abs(sine_args["frequency"] - comp_data["sine_args"]["frequency"]) > 1e-6:
+    if abs(sine_args["frequency"] - ao_comp_data["sine_args"]["frequency"]) > 1e-6:
         logger.warning(
             f"当前频率({sine_args['frequency']}Hz) "
-            f"与校准时频率({comp_data['sine_args']['frequency']}Hz)不一致，"
+            f"与校准时频率({ao_comp_data['sine_args']['frequency']}Hz)不一致，"
             f"补偿效果可能不理想"
         )
 
     # 创建多通道波形数组
     multi_ch_data = np.zeros((channels_num, sampling_info["samples_num"]))
 
-    # 为每个通道生成补偿波形
-    for ch_idx, point_comp_data in enumerate(comp_data["comp_list"]):
-        # 提取补偿参数（相对幅值比和时间延迟）
-        amp_ratio_relative = point_comp_data["amp_ratio"]
-        time_delay = point_comp_data["time_delay"]
+    # 为每个通道生成补偿波形（遍历DataFrame的index）
+    for ch_idx, ao_ch_name in enumerate(comp_df.index):
+        # 提取补偿参数（幅值补偿倍率和时间延迟补偿）
+        amp_multiplier = comp_df.loc[ao_ch_name, "amp_multiplier"]
+        time_increment = comp_df.loc[ao_ch_name, "time_increment"]
 
         # 计算补偿后的幅值和相位
-        # 幅值补偿：输出幅值 = 期望幅值 * 相对幅值比
-        # 相对幅值比 = 平均幅值比 / 该通道绝对幅值比，表示补偿到平均值需要乘以的倍率
-        compensated_amplitude = sine_args["amplitude"] * amp_ratio_relative
+        # 幅值补偿：输出幅值 = 期望幅值 * 幅值补偿倍率
+        # 幅值补偿倍率 = 平均幅值比 / 该通道绝对幅值比，表示补偿到平均值需要乘以的倍率
+        compensated_amplitude = sine_args["amplitude"] * amp_multiplier
 
         # 时间补偿：将时间延迟转换为相位差
-        # phase_shift = 2π * frequency * time_delay
+        # phase_shift = 2π * frequency * time_increment
         frequency = sine_args["frequency"]
-        phase_shift = 2.0 * np.pi * frequency * time_delay
+        phase_shift = 2.0 * np.pi * frequency * time_increment
 
         # 相位补偿：输出相位 = 期望相位 + 相位差
-        # time_delay的定义：mean_phase_shift - channel_phase_shift
-        # 如果该通道相位滞后（phase_shift小），time_delay为正，需要让发送相位超前（加上phase_shift）
-        # 如果该通道相位超前（phase_shift大），time_delay为负，需要让发送相位滞后（加上负的phase_shift）
+        # time_increment的定义：mean_phase_shift - channel_phase_shift
+        # 如果该通道相位滞后（phase_shift小），time_increment为正，需要让发送相位超前（加上phase_shift）
+        # 如果该通道相位超前（phase_shift大），time_increment为负，需要让发送相位滞后（加上负的phase_shift）
         compensated_phase = sine_args["phase"] + phase_shift
 
-        # 从 ChannelCompData 中获取通道名（用于日志）
-        ao_ch_name = point_comp_data.get("ao_channel", f"ch{ch_idx}")
         logger.debug(
             f"通道 {ch_idx} ({ao_ch_name}): "
-            f"相对幅值比={amp_ratio_relative:.6f}, 时间延迟={time_delay * 1e6:.3f}μs, "
+            f"幅值补偿倍率={amp_multiplier:.6f}, 时间延迟补偿={time_increment * 1e6:.3f}μs, "
             f"补偿后幅值={compensated_amplitude:.6f}, 补偿后相位={compensated_phase:.6f}rad"
         )
 

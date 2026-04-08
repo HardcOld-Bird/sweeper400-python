@@ -7,22 +7,24 @@
 """
 
 # 将模块功能提升至包级别，可缩短外部import语句
-from .caliber import CaliberFishNet, CaliberOctopus
-from .sweeper import (
+from .caliber import CaliberFishNet, CaliberOctopus, CaliberSardine, PowerTester
+from .sweeper_core import (
     Point2D,
     SweepData,
-    Sweeper,
+    SweeperCore,
     get_square_grid,
     load_sweep_data,
 )
 
 # 控制 import * 的行为
 __all__ = [
+    "CaliberSardine",
     "CaliberOctopus",
     "CaliberFishNet",
+    "PowerTester",
     "Point2D",
     "SweepData",
     "load_sweep_data",
     "get_square_grid",
-    "Sweeper",
+    "SweeperCore",
 ]

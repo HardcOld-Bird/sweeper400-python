@@ -106,7 +106,7 @@ class SingleChasCSIO:
     )
 
     # 启动任务
-    sync_io.start()
+    sync_io.test()
     sync_io.enable_export = True
 
     # 动态更换静态输出波形
@@ -519,6 +519,10 @@ class SingleChasCSIO:
         这是在 ALLOW_REGENERATION 模式运行中更新波形的正确方法。
         若使用默认的 CURRENT_WRITE_POSITION，在缓冲区首次写满后，
         后续写入将因无可用空间而超时失败（错误码 -200292）。
+
+        注意：nidaqmx对单通道和多通道任务的数据格式要求不同：
+        - 单通道任务：需要1D数组，shape=(samples,)
+        - 多通道任务：需要2D数组，shape=(channels, samples)
         """
         if self._ao_task_static is None:
             return
@@ -526,6 +530,14 @@ class SingleChasCSIO:
         try:
             # 提取波形数据
             waveform_data = np.asarray(self._static_output_waveform)
+
+            # 根据通道数处理数据格式
+            # nidaqmx要求：单通道任务使用1D数组，多通道任务使用2D数组
+            channels_num = len(self._ao_channels_static)
+            if channels_num == 1 and waveform_data.ndim == 2:
+                # 单通道任务：将2D数组squeeze成1D数组
+                waveform_data = waveform_data.squeeze(axis=0)
+                logger.debug(f"单通道任务，将波形数据从2D squeeze为1D: {waveform_data.shape}")
 
             # 从缓冲区起始位置（position 0）覆盖写入新波形。
             # 这是在 ALLOW_REGENERATION 模式下更新波形的标准做法：
