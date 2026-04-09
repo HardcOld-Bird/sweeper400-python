@@ -210,128 +210,109 @@ def get_sine_cycles(
 def get_sine_multi_ch(
     sampling_info: SamplingInfo,
     sine_args: SineArgs,
-    ao_comp_data: CompData,
+    channel_names: tuple[str, ...],
+    complex_amps: tuple[complex, ...] = (),
     timestamp: np.datetime64 | None = None,
     id: int | None = None,
 ) -> Waveform:
     """
-    生成多通道补偿波形，根据校准数据对每个通道进行幅值和时间补偿
+    生成多通道正弦波形，支持为每个通道应用不同的复振幅调整
 
-    该函数根据校准得到的传递函数，为每个通道生成补偿后的正弦波形。
-    补偿原理：
-    - 幅值补偿：输出幅值 = 期望幅值 × 相对幅值比
-      （相对幅值比 = 平均幅值比 / 该通道绝对幅值比，表示补偿到平均值需要乘以的倍率）
-    - 时间补偿：输出相位 = 期望相位 + 时间延迟对应的相位差
-      （时间延迟 = (平均相位差 - 该通道绝对相位差) / (2πf)）
-      （如果该通道相位滞后，time_delay为正，需要让发送相位超前）
+    该函数生成一个多通道波形。默认情况下，所有通道的数据相同（同步）。
+    当提供 complex_amps 参数时，每个通道的波形将根据对应的复数进行调整：
+    - 复数的模长作为幅值乘子
+    - 复数的相位作为相位加子
 
-    当把该多通道波形发送到相应的多通道系统时，系统的每个通道应当具有相同的响应，
-    即每个通道传回信号的初相位和幅值都与输入sine_args保持一致。
+    这是波形生成的第一步，生成的波形可以通过 comp_ao_multi_ch_wf 函数进行补偿。
 
     Args:
         sampling_info: 采样信息，包含采样率和采样点数
-        sine_args: 期望的正弦波参数（目标输出的频率、幅值和相位）
-        ao_comp_data: 补偿数据，包含每个通道的传递函数信息（相对幅值比和时间延迟）
+        sine_args: 正弦波参数（频率、幅值和相位）
+        channel_names: 通道名称元组，决定输出波形的通道数和channel_names属性
+        complex_amps: 复振幅元组，每个复数对应一个通道的幅值乘子和相位加子。
+                      如果为空元组或未提供，所有通道使用相同的原始波形。
+                      如果元素数少于通道数，多出的通道使用原始波形。
+                      如果元素数多于通道数，多出的复数被忽略。
         timestamp: 采样开始时间戳，默认值为None
         id: 波形的唯一标识符，默认值为None
 
     Returns:
-        output_waveform: 多通道补偿波形（二维数组，每行对应一个通道）
-
-    Raises:
-        ValueError: 当校准数据与通道数不匹配时
+        output_waveform: 多通道正弦波形（二维数组，每行对应一个通道）
 
     Examples:
         ```python
-        >>> # 假设已经有补偿数据
+        >>> # 生成8通道同步正弦波形（所有通道相同）
         >>> sampling_info = init_sampling_info(171500.0, 85750)
         >>> sine_args = init_sine_args(3430.0, 0.01, 0.0)
-        >>> # ao_comp_data 从校准流程中获得
-        >>> multi_ch_waveform = get_sine_multi_ch(sampling_info, sine_args, ao_comp_data)
-        >>> print(multi_ch_waveform.shape)  # (8, 85750) 假设有8个通道
+        >>> ao_channels = ("PXI1Slot2/ao0", "PXI1Slot2/ao1", ...)
+        >>> multi_ch_waveform = get_sine_multi_ch(sampling_info, sine_args, ao_channels)
+        >>> print(multi_ch_waveform.shape)  # (8, 85750)
+
+        >>> # 生成带复振幅调整的波形
+        >>> import cmath
+        >>> # 第一个通道幅值×1.5，相位+0.1rad；第二个通道幅值×0.8，相位-0.2rad
+        >>> amps = (1.5 * cmath.exp(0.1j), 0.8 * cmath.exp(-0.2j))
+        >>> multi_ch_waveform = get_sine_multi_ch(sampling_info, sine_args, ao_channels[:2], amps)
         ```
     """
     # 获取函数日志器
     logger = get_logger(f"{__name__}.get_sine_multi_ch")
 
-    # 从DataFrame中获取补偿数据
-    comp_df = ao_comp_data["comp_dataframe"]
-    channels_num = len(comp_df)
+    channels_num = len(channel_names)
+    has_complex_amps = len(complex_amps) > 0
 
     logger.debug(
-        f"生成多通道补偿波形: frequency={sine_args['frequency']}Hz, "
+        f"生成多通道正弦波形: frequency={sine_args['frequency']}Hz, "
         f"amplitude={sine_args['amplitude']}, phase={sine_args['phase']}rad, "
         f"sampling_rate={sampling_info['sampling_rate']}Hz, "
         f"samples_num={sampling_info['samples_num']}, "
-        f"channels_num={channels_num}"
+        f"channels_num={channels_num}, "
+        f"complex_amps={'provided' if has_complex_amps else 'none'}"
     )
-
-    # 验证采样信息与补偿数据的一致性
-    if (
-        abs(
-            sampling_info["sampling_rate"]
-            - ao_comp_data["sampling_info"]["sampling_rate"]
-        )
-        > 1e-6
-    ):
-        logger.warning(
-            f"当前采样率({sampling_info['sampling_rate']}Hz) "
-            f"与校准时采样率({ao_comp_data['sampling_info']['sampling_rate']}Hz)不一致"
-        )
-
-    # 验证频率与补偿数据的一致性
-    if abs(sine_args["frequency"] - ao_comp_data["sine_args"]["frequency"]) > 1e-6:
-        logger.warning(
-            f"当前频率({sine_args['frequency']}Hz) "
-            f"与校准时频率({ao_comp_data['sine_args']['frequency']}Hz)不一致，"
-            f"补偿效果可能不理想"
-        )
 
     # 创建多通道波形数组
     multi_ch_data = np.zeros((channels_num, sampling_info["samples_num"]))
 
-    # 为每个通道生成补偿波形（遍历DataFrame的index）
-    for ch_idx, ao_ch_name in enumerate(comp_df.index):
-        # 提取补偿参数（幅值补偿倍率和时间延迟补偿）
-        amp_multiplier = comp_df.loc[ao_ch_name, "amp_multiplier"]
-        time_increment = comp_df.loc[ao_ch_name, "time_increment"]
+    # 为每个通道生成波形
+    for ch_idx in range(channels_num):
+        # 检查是否有对应的复振幅调整
+        if ch_idx < len(complex_amps):
+            # 提取复振幅的模长和相位
+            amp_multiplier = abs(complex_amps[ch_idx])
+            phase_addition = np.angle(complex_amps[ch_idx])
 
-        # 计算补偿后的幅值和相位
-        # 幅值补偿：输出幅值 = 期望幅值 * 幅值补偿倍率
-        # 幅值补偿倍率 = 平均幅值比 / 该通道绝对幅值比，表示补偿到平均值需要乘以的倍率
-        compensated_amplitude = sine_args["amplitude"] * amp_multiplier
+            # 计算调整后的幅值和相位
+            adjusted_amplitude = sine_args["amplitude"] * amp_multiplier
+            adjusted_phase = sine_args["phase"] + phase_addition
 
-        # 时间补偿：将时间延迟转换为相位差
-        # phase_shift = 2π * frequency * time_increment
-        frequency = sine_args["frequency"]
-        phase_shift = 2.0 * np.pi * frequency * time_increment
+            logger.debug(
+                f"通道 {ch_idx} ({channel_names[ch_idx]}): "
+                f"幅值乘子={amp_multiplier:.6f}, 相位加子={phase_addition:.6f}rad, "
+                f"调整后幅值={adjusted_amplitude:.6f}, 调整后相位={adjusted_phase:.6f}rad"
+            )
 
-        # 相位补偿：输出相位 = 期望相位 + 相位差
-        # time_increment的定义：mean_phase_shift - channel_phase_shift
-        # 如果该通道相位滞后（phase_shift小），time_increment为正，需要让发送相位超前（加上phase_shift）
-        # 如果该通道相位超前（phase_shift大），time_increment为负，需要让发送相位滞后（加上负的phase_shift）
-        compensated_phase = sine_args["phase"] + phase_shift
+            # 创建调整后的正弦波参数
+            adjusted_sine_args = init_sine_args(
+                frequency=sine_args["frequency"],
+                amplitude=adjusted_amplitude,
+                phase=adjusted_phase,
+            )
 
-        logger.debug(
-            f"通道 {ch_idx} ({ao_ch_name}): "
-            f"幅值补偿倍率={amp_multiplier:.6f}, 时间延迟补偿={time_increment * 1e6:.3f}μs, "
-            f"补偿后幅值={compensated_amplitude:.6f}, 补偿后相位={compensated_phase:.6f}rad"
-        )
-
-        # 创建该通道的正弦波参数
-        channel_sine_args = init_sine_args(
-            frequency=sine_args["frequency"],
-            amplitude=compensated_amplitude,
-            phase=compensated_phase,
-        )
-
-        # 生成该通道的波形（使用get_sine函数）
-        channel_waveform = get_sine(
-            sampling_info=sampling_info,
-            sine_args=channel_sine_args,
-            timestamp=timestamp,
-            id=id,
-        )
+            # 生成该通道的波形
+            channel_waveform = get_sine(
+                sampling_info=sampling_info,
+                sine_args=adjusted_sine_args,
+                timestamp=timestamp,
+                id=id,
+            )
+        else:
+            # 没有复振幅调整，使用原始参数
+            channel_waveform = get_sine(
+                sampling_info=sampling_info,
+                sine_args=sine_args,
+                timestamp=timestamp,
+                id=id,
+            )
 
         # 将波形数据存入多通道数组
         multi_ch_data[ch_idx, :] = channel_waveform
@@ -340,13 +321,14 @@ def get_sine_multi_ch(
     output_waveform = Waveform(
         input_array=multi_ch_data,
         sampling_rate=sampling_info["sampling_rate"],
+        channel_names=channel_names,
         timestamp=timestamp,
         id=id,
-        sine_args=sine_args,  # 使用期望的sine_args（而非补偿后的）
+        sine_args=sine_args,
     )
 
     logger.debug(
-        f"成功生成多通道补偿波形: shape={output_waveform.shape}, "
+        f"成功生成多通道正弦波形: shape={output_waveform.shape}, "
         f"channels_num={output_waveform.channels_num}"
     )
 

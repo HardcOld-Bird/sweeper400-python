@@ -17,13 +17,13 @@ from matplotlib.patches import Rectangle
 from scipy.interpolate import griddata
 
 from ..logger import get_logger
-from .my_dtypes import Point2D, SweepData, Waveform
+from .basic_sine import extract_single_tone_information_vvi
+from .filter import filter_sweep_data
+from .my_dtypes import Point2D, SineArgs, SweepData, Waveform
 from .post_process import average_sweep_data
 
 
 # 本地定义的空间点传递函数数据类型，专用于空间扫场绘图函数。
-# 注意：此类型与 ChannelTFData 不同，它包含空间坐标 position，
-# 用于描述空间中某一测量点的传递函数结果。
 class PointTFData(TypedDict):
     """
     空间点传递函数数据格式（仅供 plot.py 内部绘图函数使用）。
@@ -37,6 +37,122 @@ class PointTFData(TypedDict):
     position: Point2D
     amp_ratio: float
     phase_shift: float
+
+
+def sweep_data_to_point_tf_data(
+    sweep_data: SweepData,
+    ref_sine_args: SineArgs | None = None,
+    lowcut: float = 100.0,
+    highcut: float = 20000.0,
+    filter_order: int = 4,
+    trim_samples: int = 0,
+) -> list[PointTFData]:
+    """
+    将SweepData转换为PointTFData列表
+
+    该函数对SweepData进行后处理，提取每个测量点的单频信息，
+    转换为用于绘图的PointTFData格式。
+    处理流程：
+    1. 使用average_sweep_data对每个点的多个波形进行平均
+    2. 使用filter_sweep_data对平均后的数据进行滤波
+    3. 对每个点的平均波形使用extract_single_tone_information_vvi提取单频信息
+    4. 计算相对于参考信号的幅值比和相位差
+
+    Args:
+        sweep_data: 扫场测量数据，包含单通道AI波形
+        ref_sine_args: 参考正弦波参数（即输出信号的参数），用于计算传递函数。
+            如果为None，则尝试从sweep_data["ao_data"]中获取sine_args。
+        lowcut: 带通滤波器低截止频率（Hz），默认100.0
+        highcut: 带通滤波器高截止频率（Hz），默认20000.0
+        filter_order: 滤波器阶数，默认4
+        trim_samples: 滤波后切除波形开头的采样点数量，默认0
+
+    Returns:
+        list[PointTFData]: 每个测量点的传递函数数据列表
+
+    Raises:
+        ValueError: 当输入数据为空或无法获取参考正弦波参数时
+
+    Examples:
+        ```python
+        >>> # 假设已有SweepData
+        >>> sweep_data = load_sweep_data("measurement.pkl")
+        >>> plot_tf_results = sweep_data_to_point_tf_data(sweep_data)
+        >>> # 现在可以使用绘图函数
+        >>> fig, axes = plot_transfer_function_discrete_distribution(plot_tf_results)
+        ```
+    """
+    logger.info("开始将SweepData转换为PointTFData列表")
+
+    # 验证输入数据
+    if not sweep_data["ai_data_list"]:
+        raise ValueError("SweepData的ai_data_list为空")
+
+    # 获取参考正弦波参数
+    if ref_sine_args is None:
+        ao_waveform = sweep_data["ao_data"]
+        if hasattr(ao_waveform, "sine_args") and ao_waveform.sine_args is not None:
+            ref_sine_args = ao_waveform.sine_args
+        else:
+            raise ValueError("无法从ao_data获取sine_args，请手动提供ref_sine_args")
+
+    ref_frequency = ref_sine_args["frequency"]
+    ref_amplitude = ref_sine_args["amplitude"]
+    ref_phase = ref_sine_args["phase"]
+
+    logger.info(f"参考信号参数: 频率={ref_frequency}Hz, 幅值={ref_amplitude}, 相位={ref_phase}rad")
+
+    # 1. 对SweepData进行平均
+    logger.debug("步骤1: 对SweepData进行平均")
+    averaged_sweep_data = average_sweep_data(sweep_data)
+
+    # 2. 对平均后的数据进行滤波
+    logger.debug("步骤2: 对平均后的数据进行滤波")
+    filtered_sweep_data = filter_sweep_data(
+        averaged_sweep_data,
+        lowcut=lowcut,
+        highcut=highcut,
+        filter_order=filter_order,
+        trim_samples=trim_samples,
+    )
+
+    # 3. 对每个点的波形提取单频信息并计算传递函数
+    logger.debug("步骤3: 提取单频信息并计算传递函数")
+    tf_results: list[PointTFData] = []
+
+    for point_data in filtered_sweep_data["ai_data_list"]:
+        position = point_data["position"]
+        # 每个点只有一个波形（已经平均过了）
+        waveform = point_data["ai_data"][0]
+
+        # 提取单频信息
+        detected_sine_args = extract_single_tone_information_vvi(
+            waveform,
+            approx_freq=ref_frequency,
+            error_percentage=5.0,
+        )
+
+        detected_amplitude = detected_sine_args["amplitude"]
+        detected_phase = detected_sine_args["phase"]
+
+        # 计算幅值比和相位差（相对于参考信号）
+        amp_ratio = detected_amplitude / ref_amplitude if ref_amplitude > 0 else 0.0
+        phase_shift = detected_phase - ref_phase
+
+        # 归一化相位差到 [-π, π] 区间
+        phase_shift = (phase_shift + np.pi) % (2 * np.pi) - np.pi
+
+        # 创建PointTFData
+        point_tf_data: PointTFData = {
+            "position": position,
+            "amp_ratio": amp_ratio,
+            "phase_shift": phase_shift,
+        }
+        tf_results.append(point_tf_data)
+
+    logger.info(f"SweepData转换完成，共 {len(tf_results)} 个点的传递函数数据")
+
+    return tf_results
 
 
 # 获取模块日志器
@@ -54,7 +170,7 @@ plt.rcParams["axes.unicode_minus"] = False
 
 
 def plot_transfer_function_discrete_distribution(
-    tf_results: list[PointTFData],
+    plot_tf_results: list[PointTFData],
     figsize: tuple[float, float] = (14, 6),
     amp_cmap: str = "viridis",
     phase_cmap: str = "twilight",
@@ -68,7 +184,7 @@ def plot_transfer_function_discrete_distribution(
     适用于等距网格数据的可视化。
 
     Args:
-        tf_results: 传递函数计算结果列表
+        plot_tf_results: 传递函数计算结果列表
         figsize: 图形尺寸 (宽, 高)，单位为英寸，默认为 (14, 6)
         amp_cmap: 幅值比图的colormap名称，默认为 "viridis"
         phase_cmap: 相位差图的colormap名称，默认为 "twilight"
@@ -84,28 +200,28 @@ def plot_transfer_function_discrete_distribution(
     Examples:
         ```python
         >>> # 假设已有传递函数计算结果
-        >>> tf_results = calculate_transfer_function(raw_data)  # noqa
-        >>> fig, (ax1, ax2) = plot_transfer_function_discrete_distribution(tf_results)
+        >>> plot_tf_results = calculate_transfer_function(raw_data)  # noqa
+        >>> fig, (ax1, ax2) = plot_transfer_function_discrete_distribution(plot_tf_results)
         >>> plt.show()
         >>> # 或者保存图片
         >>> fig, axes = plot_transfer_function_discrete_distribution(  # noqa
-        ...     tf_results, save_path="transfer_function.png"
+        ...     plot_tf_results, save_path="transfer_function.png"
         ... )
         ```
     """
     logger.info("开始绘制传递函数空间分布图（方形色块版本）")
 
-    if not tf_results:
+    if not plot_tf_results:
         logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
 
-    logger.info(f"绘制 {len(tf_results)} 个点的传递函数分布")
+    logger.info(f"绘制 {len(plot_tf_results)} 个点的传递函数分布")
 
     # 2. 提取数据
-    x_coords = np.array([result["position"].x for result in tf_results])
-    y_coords = np.array([result["position"].y for result in tf_results])
-    amp_ratios = np.array([result["amp_ratio"] for result in tf_results])
-    phase_shifts = np.array([result["phase_shift"] for result in tf_results])
+    x_coords = np.array([result["position"].x for result in plot_tf_results])
+    y_coords = np.array([result["position"].y for result in plot_tf_results])
+    amp_ratios = np.array([result["amp_ratio"] for result in plot_tf_results])
+    phase_shifts = np.array([result["phase_shift"] for result in plot_tf_results])
 
     logger.debug(
         f"数据范围: X=[{x_coords.min():.2f}, {x_coords.max():.2f}], "
@@ -223,7 +339,7 @@ def plot_transfer_function_discrete_distribution(
 
 
 def plot_transfer_function_interpolated_distribution(
-    tf_results: list[PointTFData],
+    plot_tf_results: list[PointTFData],
     figsize: tuple[float, float] = (14, 6),
     amp_cmap: str = "viridis",
     phase_cmap: str = "twilight",
@@ -239,7 +355,7 @@ def plot_transfer_function_interpolated_distribution(
     更好地展现声场的空间分布特性。特别处理了相位的周期性问题，避免-π到π的跳跃影响插值效果。
 
     Args:
-        tf_results: 传递函数计算结果列表
+        plot_tf_results: 传递函数计算结果列表
         figsize: 图形尺寸 (宽, 高)，单位为英寸，默认为 (14, 6)
         amp_cmap: 幅值比图的colormap名称，默认为 "viridis"
         phase_cmap: 相位差图的colormap名称，默认为 "twilight"
@@ -259,14 +375,14 @@ def plot_transfer_function_interpolated_distribution(
     Examples:
         ```python
         >>> # 假设已有传递函数计算结果
-        >>> tf_results = calculate_transfer_function(raw_data)  # noqa
+        >>> plot_tf_results = calculate_transfer_function(raw_data)  # noqa
         >>> fig, (ax1, ax2) = plot_transfer_function_interpolated_distribution(
-        ...     tf_results
+        ...     plot_tf_results
         ... )
         >>> plt.show()
         >>> # 或者保存图片并使用线性插值
         >>> fig, axes = plot_transfer_function_interpolated_distribution(  # noqa
-        ...     tf_results,
+        ...     plot_tf_results,
         ...     interpolation_method="linear",
         ...     save_path="transfer_function_interpolated.png"
         ... )
@@ -274,17 +390,17 @@ def plot_transfer_function_interpolated_distribution(
     """
     logger.info("开始绘制传递函数插值空间分布图")
 
-    if not tf_results:
+    if not plot_tf_results:
         logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
 
-    logger.info(f"绘制 {len(tf_results)} 个点的传递函数插值分布")
+    logger.info(f"绘制 {len(plot_tf_results)} 个点的传递函数插值分布")
 
     # 2. 提取数据
-    x_coords = np.array([result["position"].x for result in tf_results])
-    y_coords = np.array([result["position"].y for result in tf_results])
-    amp_ratios = np.array([result["amp_ratio"] for result in tf_results])
-    phase_shifts = np.array([result["phase_shift"] for result in tf_results])
+    x_coords = np.array([result["position"].x for result in plot_tf_results])
+    y_coords = np.array([result["position"].y for result in plot_tf_results])
+    amp_ratios = np.array([result["amp_ratio"] for result in plot_tf_results])
+    phase_shifts = np.array([result["phase_shift"] for result in plot_tf_results])
 
     logger.debug(
         f"数据范围: X=[{x_coords.min():.2f}, {x_coords.max():.2f}], "
@@ -448,7 +564,7 @@ def plot_transfer_function_interpolated_distribution(
 
 
 def plot_transfer_function_instantaneous_field(
-    tf_results: list[PointTFData],
+    plot_tf_results: list[PointTFData],
     figsize: tuple[float, float] = (10, 8),
     field_cmap: str = "RdBu_r",
     interpolation_method: str = "cubic",
@@ -463,7 +579,7 @@ def plot_transfer_function_instantaneous_field(
     使用插值方法创建连续的彩色区域图像，展现瞬时声场的空间分布特性。
 
     Args:
-        tf_results: 传递函数计算结果列表
+        plot_tf_results: 传递函数计算结果列表
         figsize: 图形尺寸 (宽, 高)，单位为英寸，默认为 (10, 8)
         field_cmap: 声压场图的colormap名称，默认为 "RdBu_r"（红蓝色图，适合表示正负值）
         interpolation_method: 插值方法，可选 "linear", "nearest", "cubic"，
@@ -482,12 +598,12 @@ def plot_transfer_function_instantaneous_field(
     Examples:
         ```python
         >>> # 假设已有传递函数计算结果
-        >>> tf_results = calculate_transfer_function(raw_data)  # noqa
-        >>> fig, ax = plot_transfer_function_instantaneous_field(tf_results)
+        >>> plot_tf_results = calculate_transfer_function(raw_data)  # noqa
+        >>> fig, ax = plot_transfer_function_instantaneous_field(plot_tf_results)
         >>> plt.show()
         >>> # 或者保存图片并使用线性插值
         >>> fig, ax = plot_transfer_function_instantaneous_field(  # noqa
-        ...     tf_results,
+        ...     plot_tf_results,
         ...     interpolation_method="linear",
         ...     save_path="instantaneous_field.png"
         ... )
@@ -495,17 +611,17 @@ def plot_transfer_function_instantaneous_field(
     """
     logger.info("开始绘制瞬时声压场分布图")
 
-    if not tf_results:
+    if not plot_tf_results:
         logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
 
-    logger.info(f"绘制 {len(tf_results)} 个点的瞬时声压场分布")
+    logger.info(f"绘制 {len(plot_tf_results)} 个点的瞬时声压场分布")
 
     # 1. 提取数据
-    x_coords = np.array([result["position"].x for result in tf_results])
-    y_coords = np.array([result["position"].y for result in tf_results])
-    amp_ratios = np.array([result["amp_ratio"] for result in tf_results])
-    phase_shifts = np.array([result["phase_shift"] for result in tf_results])
+    x_coords = np.array([result["position"].x for result in plot_tf_results])
+    y_coords = np.array([result["position"].y for result in plot_tf_results])
+    amp_ratios = np.array([result["amp_ratio"] for result in plot_tf_results])
+    phase_shifts = np.array([result["phase_shift"] for result in plot_tf_results])
 
     # 2. 计算瞬时声压场值 A·sin(φ)
     instantaneous_field = amp_ratios * np.sin(phase_shifts)

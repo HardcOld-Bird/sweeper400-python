@@ -7,8 +7,10 @@
 主要包含按位平均、传递函数计算等数据分析功能。
 """
 
+import pickle
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
 from ..logger import get_logger
 from .my_dtypes import (
@@ -22,6 +24,66 @@ from .my_dtypes import (
 
 # 获取模块日志器
 logger = get_logger(__name__)
+
+
+# 加载测量数据的工具函数
+def load_sweep_data(file_path: str | Path) -> SweepData:
+    """
+    从文件加载测量数据
+
+    加载由Sweeper.save_data()保存的测量数据。
+
+    Args:
+        file_path: 数据文件的路径（.pkl文件）
+
+    Returns:
+        SweepData: 包含以下键的字典：
+            - "ai_data_list": List[PointSweepData]，每个PointRawData包含：
+                - "position": Point2D对象，表示该点的坐标
+                - "ai_data": List[Waveform]，该点采集的所有AI波形
+            - "ao_data": Waveform，扫场过程中使用的输出波形
+
+    Raises:
+        FileNotFoundError: 当文件不存在时
+        IOError: 当文件读取失败时
+        ValueError: 当数据格式不正确时
+
+    Examples:
+        >>> sweep_data = load_sweep_data("sweep_data.pkl")
+        >>> ai_data_list = sweep_data["ai_data_list"]
+        >>> ao_data = sweep_data["ao_data"]
+        >>> print(f"加载了 {len(ai_data_list)} 个点的数据")
+        >>> print(f"输出波形采样率: {ao_data.sampling_rate}Hz")
+    """
+    file_path = Path(file_path)
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"数据文件不存在: {file_path}")
+
+    logger.info(f"开始加载测量数据: {file_path}")
+
+    try:
+        with open(file_path, "rb") as f:
+            loaded_data = pickle.load(f)
+
+        # 检查数据格式
+        if (
+            isinstance(loaded_data, dict)
+            and "ai_data_list" in loaded_data
+            and "ao_data" in loaded_data
+        ):
+            logger.info("检测到SweepData格式数据")
+            ai_data_list = loaded_data["ai_data_list"]  # type: ignore
+            logger.info(f"数据加载成功，共 {len(ai_data_list)} 个点")  # type: ignore
+            return loaded_data  # type: ignore
+        else:
+            raise ValueError(
+                "数据格式不正确，期望包含'ai_data_list'和'ao_data'键的字典"
+            )
+
+    except Exception as e:
+        logger.error(f"数据加载失败: {e}", exc_info=True)
+        raise OSError(f"无法从 {file_path} 加载数据: {e}") from e
 
 
 def average_sweep_data(

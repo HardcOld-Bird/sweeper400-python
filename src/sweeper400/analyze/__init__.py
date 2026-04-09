@@ -19,7 +19,7 @@ from .filter import (
     filter_sweep_data,
     filter_waveform,
 )
-from .general_signal import calib_multi_ch_wf
+# from .general_signal import calib_multi_ch_wf  # 已弃用，使用 sweeper400.use.comp_ao_multi_ch_wf 替代
 from .my_dtypes import (
     CompData,
     Point2D,
@@ -41,12 +41,14 @@ from .plot import (
     plot_transfer_function_instantaneous_field,
     plot_transfer_function_interpolated_distribution,
     plot_waveform,
+    sweep_data_to_point_tf_data,
 )
 from .post_process import (
     average_comp_data_list,
     average_sweep_data,
     average_tf_data_list,
     comp_to_tf,
+    load_sweep_data,
     tf_to_comp,
 )
 from .waveform_generator import SineGenerator, WaveformGenerator
@@ -77,6 +79,7 @@ __all__ = [
     "SineGenerator",
     "tf_to_comp",
     "comp_to_tf",
+    "load_sweep_data",
     "filter_sweep_data",
     "plot_transfer_function_discrete_distribution",
     "plot_transfer_function_interpolated_distribution",
@@ -86,5 +89,6 @@ __all__ = [
     "plot_sweepdata_as_single_waveform",
     "filter_waveform",
     "detrend_waveform",
-    "calib_multi_ch_wf",
+    # "calib_multi_ch_wf",  # 已弃用，使用 comp_ao_multi_ch_wf 替代
+    "sweep_data_to_point_tf_data",
 ]

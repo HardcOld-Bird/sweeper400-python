@@ -319,6 +319,11 @@ class SingleChasCSIO:
         return len(self._ao_channels_feedback)
 
     @property
+    def static_output_waveform(self) -> Waveform:
+        """静态输出波形"""
+        return self._static_output_waveform.copy()
+
+    @property
     def enable_export(self) -> bool:
         """数据导出启用状态"""
         return self._enable_export
@@ -751,7 +756,7 @@ class SingleChasCSIO:
                         self._export_function(
                             ai_waveform,
                             self._static_output_waveform,
-                            feedback_waveform,
+                            feedback_waveform,  # noqa
                             self._chunks_num,
                         )
                     else:
@@ -799,7 +804,7 @@ class SingleChasCSIO:
             # 与 DSA 内部分配冲突的安全裕量。
             # 技术细节详见：参考资料/多板卡同步时序引擎冲突问题分析.md
             ai_start_trigger_terminal = self._get_terminal_name_with_dev_prefix(
-                self._ai_task,
+                self._ai_task,  # noqa
                 "PXI_Trig7",
             )
             self._ai_task.export_signals.start_trig_output_term = (

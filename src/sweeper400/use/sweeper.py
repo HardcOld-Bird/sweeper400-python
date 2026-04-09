@@ -3,7 +3,7 @@
 
 模块路径：`sweeper400.use.sweeper`
 
-该模块主要包括Sweeper类，提供声学扫场测量的核心功能，协同控制步进电机和数据采集系统，
+该模块主要包括SweeperCore类，提供声学扫场测量的核心功能，协同控制步进电机和数据采集系统，
 实现空间中多点位的自动化声场信号采集。
 """
 
@@ -11,6 +11,7 @@ import copy
 import pickle
 import threading
 import time
+from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
 from typing import TypedDict
@@ -21,6 +22,7 @@ from ..analyze import (
     Point2D,
     PositiveFloat,
     PositiveInt,
+    SineArgs,
     SweepData,
     Waveform,
     get_sine_cycles,
@@ -170,7 +172,7 @@ def get_line_grid(  # 暂停维护
 
     Examples:
         >>> # 生成从(0,0)到(100,0)的5个点
-        >>> line = generate_line_pattern(0, 0, 100, 0, 5)
+        >>> line = get_line_grid(0, 0, 100, 0, 5)
         >>> len(line)
         5
     """
@@ -191,66 +193,6 @@ def get_line_grid(  # 暂停维护
     logger.info(f"直线点阵生成完成，共 {len(line)} 个点")
 
     return line
-
-
-# 加载测量数据的工具函数
-def load_sweep_data(file_path: str | Path) -> SweepData:
-    """
-    从文件加载测量数据
-
-    加载由Sweeper.save_data()保存的测量数据。
-
-    Args:
-        file_path: 数据文件的路径（.pkl文件）
-
-    Returns:
-        SweepData: 包含以下键的字典：
-            - "ai_data_list": List[PointSweepData]，每个PointRawData包含：
-                - "position": Point2D对象，表示该点的坐标
-                - "ai_data": List[Waveform]，该点采集的所有AI波形
-            - "ao_data": Waveform，扫场过程中使用的输出波形
-
-    Raises:
-        FileNotFoundError: 当文件不存在时
-        IOError: 当文件读取失败时
-        ValueError: 当数据格式不正确时
-
-    Examples:
-        >>> sweep_data = load_sweep_data("sweep_data.pkl")
-        >>> ai_data_list = sweep_data["ai_data_list"]
-        >>> ao_data = sweep_data["ao_data"]
-        >>> print(f"加载了 {len(ai_data_list)} 个点的数据")
-        >>> print(f"输出波形采样率: {ao_data.sampling_rate}Hz")
-    """
-    file_path = Path(file_path)
-
-    if not file_path.exists():
-        raise FileNotFoundError(f"数据文件不存在: {file_path}")
-
-    logger.info(f"开始加载测量数据: {file_path}")
-
-    try:
-        with open(file_path, "rb") as f:
-            loaded_data = pickle.load(f)
-
-        # 检查数据格式
-        if (
-            isinstance(loaded_data, dict)
-            and "ai_data_list" in loaded_data
-            and "ao_data" in loaded_data
-        ):
-            logger.info("检测到SweepData格式数据")
-            ai_data_list = loaded_data["ai_data_list"]  # type: ignore
-            logger.info(f"数据加载成功，共 {len(ai_data_list)} 个点")  # type: ignore
-            return loaded_data  # type: ignore
-        else:
-            raise ValueError(
-                "数据格式不正确，期望包含'ai_data_list'和'ao_data'键的字典"
-            )
-
-    except Exception as e:
-        logger.error(f"数据加载失败: {e}", exc_info=True)
-        raise OSError(f"无法从 {file_path} 加载数据: {e}") from e
 
 
 # 定义扫场状态枚举
@@ -295,10 +237,12 @@ class SweepProgress(TypedDict):
 
 class SweeperCore:
     """
-    # 声学扫场测量控制器
+    # 声学扫场测量核心控制器
 
     该类协同控制步进电机和数据采集系统，实现自动化的声学扫场测量。
     在预定义的点阵中，依次移动到每个点位，采集指定数量的声场信号chunk。
+
+    作为"核心"类，SweeperCore提供复杂、通用、严谨的功能实现，支持多通道AI/AO配置。
 
     ## 线程化设计：
         - 扫场操作在后台线程中执行，主线程不被阻塞
@@ -308,7 +252,7 @@ class SweeperCore:
     ## 主要功能：
         1. 点阵管理：存储和验证测量点阵
         2. 运动控制：自动控制机械臂移动到各个点位
-        3. 数据采集：在每个点位采集指定数量的chunk
+        3. 数据采集：在每个点位采集指定数量的chunk（支持多通道）
         4. 数据存储：规范化存储所有点位的测量数据
         5. 状态监控：实时监控测量进度和状态
         6. 线程管理：后台执行扫场，支持中断和异常处理
@@ -323,20 +267,18 @@ class SweeperCore:
 
     # 创建扫场测量器（自动管理硬件控制器）
     sweeper = SweeperCore(
-        ai_channel="400Slot2/ai0",
-        ao_channels="400Slot2/ao0",
-        output_waveform=output_waveform,
+        ai_channels=("PXI1Slot2/ai0", "PXI1Slot3/ai0"),
+        ao_channels_static=("PXI1Slot2/ao0",),
+        static_output_waveform=output_waveform,
         point_list=grid
     )
 
     # 非阻塞扫场
     sweeper.sweep()  # 立即返回
-    while sweeper._is_running():
+    while sweeper.is_running():
         progress = sweeper.get_progress()
-        print(f"进度: {progress['completed_points']}/{sweeper._TOTAL_POINTS_NUM}")
+        print(f"进度: {progress['completed_points']}/{sweeper.total_points_num}")
         time.sleep(1)
-
-
 
     # 中止扫场
     sweeper.stop()
@@ -346,9 +288,9 @@ class SweeperCore:
     ```
 
     Attributes:
-        ai_channel: AI通道名称
-        ao_channels: AO通道名称
-        output_waveform: 输出波形对象
+        ai_channels: AI通道名称元组
+        ao_channels_static: 静态AO通道名称元组
+        static_output_waveform: 静态输出波形对象
         point_list: 测量点阵列表
         chunks_per_point: 每个点采集的chunk数量，默认3
         settle_time: 电机停止后的稳定等待时间（秒），默认0.5秒
@@ -359,20 +301,28 @@ class SweeperCore:
 
     def __init__(
         self,
-        ai_channel: str,
-        ao_channel: str,
-        output_waveform: Waveform | None = None,
+        ai_channels: tuple[str, ...],
+        sweep_ai_channel: str | None = None,
+        ao_channels_static: tuple[str, ...] = (),
+        ao_channels_feedback: tuple[str, ...] = (),
+        static_output_waveform: Waveform | None = None,
+        feedback_function: Callable[[Waveform], Waveform] | None = None,
+        buffer_size_multiplier: PositiveInt = 5,
         point_list: list[Point2D] | None = None,
         chunks_per_point: PositiveInt = 3,
         settle_time: PositiveFloat = 0.5,
     ) -> None:
         """
-        初始化声学扫场测量控制器
+        初始化声学扫场测量核心控制器
 
         Args:
-            ai_channel: AI通道名称，例如 "400Slot2/ai0"
-            ao_channel: AO通道名称，例如 "400Slot2/ao0"
-            output_waveform: 输出波形对象，如果未提供则创建默认波形
+            ai_channels: AI通道名称元组，例如 ("PXI1Slot2/ai0", "PXI1Slot3/ai0")
+            sweep_ai_channel: 用于扫场的传声器AI通道名称，如果为None则默认使用ai_channels的第一个元素
+            ao_channels_static: 静态AO通道名称元组，例如 ("PXI1Slot2/ao0",)，可选，默认为空
+            ao_channels_feedback: 反馈AO通道名称元组，可选，默认为空
+            static_output_waveform: 静态输出波形对象，如果未提供则创建默认波形
+            feedback_function: 反馈函数，接收AI波形，返回反馈AO波形，可选
+            buffer_size_multiplier: AI和Feedback AO缓冲区大小倍数，默认5
             point_list: 测量点阵，Point2D对象的列表，如果未提供则为空列表
             chunks_per_point: 每个点采集的chunk数量，默认3
             settle_time: 电机停止后的稳定等待时间（秒），默认0.5秒
@@ -381,17 +331,59 @@ class SweeperCore:
             ValueError: 当参数无效时
             RuntimeError: 当硬件初始化失败时
         """
-        # 处理可选参数
-        if output_waveform is None:
+        # 验证并设置sweep_ai_channel
+        if sweep_ai_channel is None:
+            if not ai_channels:
+                raise ValueError(
+                    "ai_channels不能为空，必须至少包含一个元素"
+                )
+            sweep_ai_channel = ai_channels[0]
+        elif sweep_ai_channel not in ai_channels:
+            raise ValueError(f"sweep_ai_channel '{sweep_ai_channel}' 必须在ai_channels中")
+        self._sweep_ai_channel = sweep_ai_channel
+
+        # 处理输出波形为None的情况
+        if static_output_waveform is None:
             # 创建默认波形
             sampling_info = init_sampling_info(10000.0, 5000)
             sine_args = init_sine_args(frequency=1000.0, amplitude=0.01, phase=0.0)
-            output_waveform = get_sine_cycles(sampling_info, sine_args)
+            static_output_waveform = get_sine_cycles(sampling_info, sine_args)
             logger.debug(
                 "未提供输出波形，创建默认波形：1000Hz正弦波，幅值0.01，采样率10kHz"
             )
+        # 类型断言，静态输出波形不可能为None
+        assert static_output_waveform is not None
+
+        # 存储配置参数
+        self._ai_channels = ai_channels
+        self._ao_channels_static = ao_channels_static
+        self._ao_channels_feedback = ao_channels_feedback
+        self._feedback_function = feedback_function
+        self._buffer_size_multiplier = buffer_size_multiplier
 
         # 创建核心组件
+        try:
+            logger.debug("正在初始化数据采集控制器...")
+            feedback_func = (
+                feedback_function
+                if feedback_function
+                else self._default_feedback_function
+            )
+            self._measure_controller = SingleChasCSIO(
+                ai_channels=ai_channels,
+                ao_channels_static=ao_channels_static,
+                ao_channels_feedback=ao_channels_feedback,
+                static_output_waveform=static_output_waveform,
+                feedback_function=feedback_func,
+                export_function=self._data_export_callback,
+                buffer_size_multiplier=buffer_size_multiplier,
+            )
+            logger.debug("数据采集控制器初始化成功")
+        except Exception as e:
+            error_msg = f"数据采集控制器初始化失败: {e}"
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
+
         try:
             logger.debug("正在初始化步进电机控制器...")
             self._move_controller = MotorController()
@@ -399,25 +391,6 @@ class SweeperCore:
         except Exception as e:
             error_msg = f"步进电机控制器初始化失败: {e}"
             logger.error(error_msg, exc_info=True)
-            raise RuntimeError(error_msg) from e
-
-        try:
-            logger.debug("正在初始化数据采集控制器...")
-            self._measure_controller = SingleChasCSIO(
-                ai_channel=ai_channel,
-                ao_channels=(ao_channel,),  # 转换为tuple
-                output_waveform=output_waveform,
-                export_function=self._data_export_callback,
-            )
-            logger.debug("数据采集控制器初始化成功")
-        except Exception as e:
-            error_msg = f"数据采集控制器初始化失败: {e}"
-            logger.error(error_msg, exc_info=True)
-            # 清理已创建的电机控制器
-            try:
-                self._move_controller.cleanup()
-            except Exception:
-                pass
             raise RuntimeError(error_msg) from e
 
         # 存储测量参数
@@ -429,7 +402,7 @@ class SweeperCore:
         # 数据存储
         self._sweep_data: SweepData = {
             "ai_data_list": [],
-            "ao_data": output_waveform,
+            "ao_data": static_output_waveform,
         }
         # 数据结构:
         # {
@@ -442,6 +415,9 @@ class SweeperCore:
         #     ],
         #     "ao_data": Waveform,
         # }
+
+        # 绘图数据缓存（用于plot_data方法避免重复计算）
+        self._plot_tf_results: list | None = None
 
         # 状态标志和线程管理
         self._state = SweepState.IDLE  # 扫场状态
@@ -460,21 +436,55 @@ class SweeperCore:
 
         logger.info(
             f"SweeperCore 初始化完成 - "
+            f"AI通道: {ai_channels}, "
+            f"扫场AI通道: {self._sweep_ai_channel}, "
+            f"Static AO通道: {ao_channels_static if ao_channels_static else '无'}, "
+            f"Feedback AO通道: {ao_channels_feedback if ao_channels_feedback else '无'}, "
             f"测量点数: {len(self._point_list)}, "
             f"每点chunk数: {self._CHUNKS_PER_POINT}, "
             f"稳定时间: {self._SETTLE_TIME}s"
         )
         logger.debug(f"测量点阵: {self._point_list}")
 
-    def _data_export_callback(self, ai_waveform: Waveform, chunks_num: int) -> None:
+    @staticmethod
+    def _default_feedback_function(ai_waveform: Waveform) -> Waveform:
+        """
+        默认反馈函数
+
+        当用户未提供feedback_function时使用。返回与输入相同shape的全零波形。
+
+        Args:
+            ai_waveform: AI波形数据
+
+        Returns:
+            全零反馈波形
+        """
+        from ..analyze import Waveform
+        feedback_data = np.zeros_like(ai_waveform)
+        return Waveform(
+            feedback_data,
+            sampling_rate=ai_waveform.sampling_rate,
+            channel_names=ai_waveform.channel_names,
+        )
+
+    def _data_export_callback(
+        self,
+        ai_waveform: Waveform,
+        ao_static_waveform: Waveform,
+        ao_feedback_waveform: Waveform | None,
+        chunks_num: int,
+    ) -> None:
         """
         数据导出回调函数
 
-        该函数会被HiPerfCSSIO在（后台工作线程中）每次数据导出时调用，用于收集测量数据。
+        该函数会被SingleChasCSIO在（后台工作线程中）每次数据导出时调用，用于收集测量数据。
         使用线程锁保证线程安全。
+        只保存sweep_ai_channel指定的单通道数据。
 
         Args:
-            ai_waveform: 采集到的AI波形
+            ai_waveform: 采集到的AI波形（多通道）
+            ao_static_waveform: 当前的静态AO输出波形
+            ao_feedback_waveform: 当前的反馈AO输出波形（如果没有反馈通道则为None）
             chunks_num: 当前chunk编号（从1开始）
         """
         # 检查是否提前中止
@@ -498,15 +508,40 @@ class SweeperCore:
             )
             logger.debug(f"初始化点 {point_idx} 的数据存储，位置: {current_position}")
 
-        # 存储数据
-        self._sweep_data["ai_data_list"][point_idx]["ai_data"].append(ai_waveform)
+        # 提取sweep_ai_channel对应的单通道数据
+        # 获取sweep_ai_channel在ai_channels中的索引
+        try:
+            channel_idx = self._ai_channels.index(self._sweep_ai_channel)
+        except ValueError:
+            logger.error(f"sweep_ai_channel '{self._sweep_ai_channel}' 不在ai_channels中")
+            return
+
+        # 从多通道波形中提取单通道数据
+        if ai_waveform.ndim == 1:
+            # 如果已经是单通道，直接使用
+            single_channel_waveform = ai_waveform
+        else:
+            # 多通道情况，提取指定通道
+            channel_data = ai_waveform[channel_idx, :]
+            # 创建新的单通道Waveform
+            single_channel_waveform = Waveform(
+                input_array=channel_data,
+                sampling_rate=ai_waveform.sampling_rate,
+                timestamp=ai_waveform.timestamp,
+                id=ai_waveform.id,
+                sine_args=ai_waveform.sine_args,
+            )
+
+        # 存储单通道AI数据
+        self._sweep_data["ai_data_list"][point_idx]["ai_data"].append(single_channel_waveform)
 
         # 检查是否已采集足够chunk
         if chunks_num >= self._CHUNKS_PER_POINT:
             self._enough_chunks_event.set()
 
         logger.debug(
-            f"点 {point_idx} 采集第 {chunks_num}/{self._CHUNKS_PER_POINT} 个chunk"
+            f"点 {point_idx} 采集第 {chunks_num}/{self._CHUNKS_PER_POINT} 个chunk, "
+            f"扫场AI通道: {self._sweep_ai_channel} (索引: {channel_idx})"
         )
 
     def where(self) -> tuple[float, float]:
@@ -523,7 +558,7 @@ class SweeperCore:
             RuntimeError: 当步进电机控制器未初始化时
 
         Examples:
-            >>> sweeper = SweeperCore("ai0", "ao0")
+            >>> sweeper = SweeperCore(...)
             >>> x_pos, y_pos = sweeper.where()
             >>> print(f"当前位置: ({x_pos:.3f}, {y_pos:.3f}) mm")
         """
@@ -553,7 +588,7 @@ class SweeperCore:
             RuntimeError: 当步进电机控制器未初始化时
 
         Examples:
-            >>> sweeper = SweeperCore("ai0", "ao0")
+            >>> sweeper = SweeperCore(...)
             >>> success = sweeper.move_to(100.0, 50.0)
             >>> if success:
             ...     print("移动成功")
@@ -578,7 +613,7 @@ class SweeperCore:
             RuntimeError: 当步进电机控制器未初始化时
 
         Examples:
-            >>> sweeper = SweeperCore("ai0", "ao0")
+            >>> sweeper = SweeperCore(...)
             >>> success = sweeper.calib()
             >>> if success:
             ...     print("校准成功")
@@ -599,41 +634,55 @@ class SweeperCore:
             point_list: 新的测量点阵，Point2D对象的列表
 
         Examples:
-            >>> sweeper = SweeperCore("ai0", "ao0")
+            >>> sweeper = SweeperCore(...)
             >>> new_point_list = [Point2D(100.0, 50.0), Point2D(200.0, 100.0)]
             >>> sweeper.new_point_list(new_point_list)
         """
         self._point_list = point_list
-        self._TOTAL_POINTS_NUM = len(self._point_list)  # type: ignore
+        self._TOTAL_POINTS_NUM = len(self._point_list)
 
-    def new_cssio(
-        self, ai_channel: str, ao_channel: str, output_waveform: Waveform
+    def new_csio(
+        self,
+        ai_channels: tuple[str, ...],
+        ao_channels_static: tuple[str, ...] = (),
+        ao_channels_feedback: tuple[str, ...] = (),
+        static_output_waveform: Waveform | None = None,
+        feedback_function: Callable[[Waveform], Waveform] | None = None,
+        buffer_size_multiplier: PositiveInt = 5,
     ) -> None:
         """
-        创建新的HiPerfCSSIO实例，替换当前的数据采集控制器
+        创建新的SingleChasCSIO实例，替换当前的数据采集控制器
 
         该方法允许用户在创建sweeper后修改AI/AO通道配置和输出波形。
         如果当前有正在运行的扫场任务，会先停止该任务。
 
         Args:
-            ai_channel: 新的AI通道名称，例如 "400Slot2/ai0"
-            ao_channel: 新的AO通道名称，例如 "400Slot2/ao0"
-            output_waveform: 新的输出波形对象
+            ai_channels: 新的AI通道名称元组，例如 ("PXI1Slot2/ai0", "PXI1Slot3/ai0")
+            ao_channels_static: 新的静态AO通道名称元组，例如 ("PXI1Slot2/ao0",)
+            static_output_waveform: 新的静态输出波形对象
+            ao_channels_feedback: 反馈AO通道名称元组，可选，默认为空
+            feedback_function: 反馈函数，接收AI波形，返回反馈AO波形，可选
+            buffer_size_multiplier: AI和Feedback AO缓冲区大小倍数，默认5
 
         Raises:
-            RuntimeError: 当创建新的HiPerfCSSIO失败时
+            RuntimeError: 当创建新的SingleChasCSIO失败时
 
         Examples:
-            >>> sweeper = SweeperCore("ai0", "ao0")
+            >>> sweeper = SweeperCore(...)
             >>> # 创建新的输出波形
             >>> sampling_info = init_sampling_info(48000.0, 4800)
             >>> sine_args = init_sine_args(2000.0, 0.02, 0.0)
             >>> new_waveform = get_sine_cycles(sampling_info, sine_args)
             >>> # 更新配置
-            >>> sweeper.new_cssio("400Slot2/ai1", "400Slot2/ao1", new_waveform)
+            >>> sweeper.new_csio(
+            ...     ("PXI1Slot2/ai1", "PXI1Slot3/ai1"),
+            ...     ("PXI1Slot2/ao1",),
+            ...     ("PXI1Slot3/ao1",),
+            ...     new_waveform
+            ... )
         """
         # 如果正在运行扫场，先停止
-        if self._is_running():
+        if self._is_running:
             logger.warning("检测到扫场正在运行，先停止扫场...")
             self.stop(timeout=15.0)
 
@@ -645,20 +694,50 @@ class SweeperCore:
             except Exception as e:
                 logger.warning(f"清理旧的数据采集控制器时出错: {e}")
 
+        # 处理输出波形为None的情况
+        if static_output_waveform is None:
+            # 创建默认波形
+            sampling_info = init_sampling_info(10000.0, 5000)
+            sine_args = init_sine_args(frequency=1000.0, amplitude=0.01, phase=0.0)
+            static_output_waveform = get_sine_cycles(sampling_info, sine_args)
+            logger.debug(
+                "未提供输出波形，创建默认波形：1000Hz正弦波，幅值0.01，采样率10kHz"
+            )
+        # 类型断言，静态输出波形不可能为None
+        assert static_output_waveform is not None
+
+        # 更新配置参数
+        self._ai_channels = ai_channels
+        self._ao_channels_static = ao_channels_static
+        self._ao_channels_feedback = ao_channels_feedback
+        self._feedback_function = feedback_function
+        self._buffer_size_multiplier = buffer_size_multiplier
+
         # 创建新的数据采集控制器
         try:
             logger.info("正在创建新的数据采集控制器...")
+            feedback_func = (
+                feedback_function
+                if feedback_function
+                else self._default_feedback_function
+            )
             self._measure_controller = SingleChasCSIO(
-                ai_channel=ai_channel,
-                ao_channels=(ao_channel,),  # 转换为tuple
-                output_waveform=output_waveform,
+                ai_channels=ai_channels,
+                ao_channels_static=ao_channels_static,
+                ao_channels_feedback=ao_channels_feedback,
+                static_output_waveform=static_output_waveform,
+                feedback_function=feedback_func,
                 export_function=self._data_export_callback,
+                buffer_size_multiplier=buffer_size_multiplier,
             )
             # 存储新的输出波形
-            self._sweep_data["ao_data"] = output_waveform
+            self._sweep_data["ao_data"] = static_output_waveform
 
             logger.info(
-                f"新的数据采集控制器创建成功 - AI: {ai_channel}, AO: {ao_channel}"
+                f"新的数据采集控制器创建成功 - "
+                f"AI: {ai_channels}, "
+                f"Static AO: {ao_channels_static}, "
+                f"Feedback AO: {ao_channels_feedback if ao_channels_feedback else '无'}"
             )
         except Exception as e:
             error_msg = f"创建新的数据采集控制器失败: {e}"
@@ -673,12 +752,15 @@ class SweeperCore:
         如果扫场正在运行，会先停止扫场。
         """
         # 如果正在运行，先停止
-        if self._is_running():
+        if self._is_running:
             logger.warning("检测到扫场正在运行，先停止扫场...")
             self.stop(timeout=15.0)
 
         # 初始化数据存储
         self._sweep_data["ai_data_list"].clear()
+
+        # 清除绘图数据缓存
+        self._plot_tf_results = None
 
         # 重置状态标志（使用线程锁保护）
         with self._point_index_lock:
@@ -693,11 +775,19 @@ class SweeperCore:
 
         logger.info("SweeperCore 状态已重置")
 
-    def sweep(self) -> bool:
+    def sweep(self, result_folder: str | Path | None = None) -> bool:
         """
         启动扫场测量（非阻塞）
 
         在后台线程中执行扫场测量，立即返回。使用_get_state()和get_progress()监控进度。
+        如果提供了result_folder，扫场完成后会自动保存数据和绘图。
+
+        Args:
+            result_folder: 结果保存文件夹路径，如果提供则自动保存数据和绘图。
+                数据将保存为"sweep_data.pkl"，三种模式的图像分别保存为：
+                - "discrete_distribution.png"
+                - "interpolated_distribution.png"
+                - "instantaneous_field.png"
 
         Returns:
             bool: 是否成功启动扫场测量（不代表测量完成）
@@ -706,8 +796,7 @@ class SweeperCore:
             RuntimeError: 当扫场已在运行或系统状态异常时
         """
         # 检查当前状态
-        is_running = self._is_running()
-        if is_running:
+        if self._is_running:
             logger.warning("扫场测量已在运行中，无法重复启动")
             return False
 
@@ -723,12 +812,16 @@ class SweeperCore:
             # 重置状态
             self.reset()
 
+            # 存储结果文件夹路径
+            self._result_folder = Path(result_folder) if result_folder is not None else None
+
             # 创建并启动扫场工作线程
             self._sweep_thread = threading.Thread(
                 target=self._worker_thread_function,
                 name="SweeperWorker",
                 daemon=False,  # 不设为守护线程，确保能正常完成
             )
+            assert self._sweep_thread is not None  # 消除类型警告
             self._sweep_thread.start()
 
             logger.info("后台线程已启动")
@@ -814,6 +907,37 @@ class SweeperCore:
             logger.info(f"平均每点耗时: {total_time / len(self._point_list):.2f}s")
             logger.info("=" * 50)
 
+            # 如果指定了结果文件夹，自动保存数据和绘图
+            if hasattr(self, "_result_folder") and self._result_folder is not None:
+                try:
+                    logger.info(f"开始自动保存结果到: {self._result_folder}")
+
+                    # 确保目录存在
+                    self._result_folder.mkdir(parents=True, exist_ok=True)
+
+                    # 保存数据
+                    data_save_path = self._result_folder / "sweep_data.pkl"
+                    self.save_data(data_save_path)
+
+                    # 绘制三种模式的图像
+                    plot_modes = [
+                        ("discrete", "discrete_distribution.png"),
+                        ("interpolated", "interpolated_distribution.png"),
+                        ("instantaneous", "instantaneous_field.png"),
+                    ]
+
+                    for mode, filename in plot_modes:
+                        try:
+                            plot_save_path = self._result_folder / filename
+                            self.plot_data(mode, plot_save_path)
+                        except Exception as plot_e:
+                            logger.error(f"绘制 {mode} 模式图像失败: {plot_e}")
+
+                    logger.info(f"结果自动保存完成: {self._result_folder}")
+
+                except Exception as save_e:
+                    logger.error(f"自动保存结果失败: {save_e}", exc_info=True)
+
             # 设置完成状态
             self._set_state(SweepState.COMPLETED)
 
@@ -873,7 +997,7 @@ class SweeperCore:
         logger.debug(f"开始在点 {point_index} 采集数据...")
 
         # 预估持续时间并设置超时
-        chunk_duration = self._measure_controller.output_waveform.duration
+        chunk_duration = self._measure_controller.static_output_waveform.duration
         expected_duration = chunk_duration * self._CHUNKS_PER_POINT
         timeout = expected_duration + 5.0  # 设置超时为预期时间+5秒
 
@@ -883,6 +1007,7 @@ class SweeperCore:
 
         try:
             # 等待数据就绪事件或超时
+            # 该事件在CSIO的_export_function中被设置
             chunks_ready = self._enough_chunks_event.wait(timeout=timeout)
 
             # 事件成功到达
@@ -985,9 +1110,10 @@ class SweeperCore:
         with self._state_lock:
             return self._state
 
+    @property
     def _is_running(self) -> bool:
         """
-        检查扫场是否正在运行
+        检查扫场是否正在运行（内部方法）
 
         Returns:
             bool: 是否正在运行
@@ -1007,9 +1133,7 @@ class SweeperCore:
         Returns:
             bool: 是否成功停止
         """
-        is_running = self._is_running()
-
-        if not is_running:
+        if not self._is_running:
             logger.warning("扫场测量未在运行，无需中止")
             return True
 
@@ -1041,11 +1165,11 @@ class SweeperCore:
             SweepData: 测量数据副本
         """
         data_copy = copy.deepcopy(self._sweep_data)
-        return data_copy
+        return data_copy  # noqa
 
     def save_data(
         self,
-        file_path: str | Path,
+        save_path: str | Path,
     ) -> None:
         """
         保存测量数据到文件
@@ -1061,7 +1185,7 @@ class SweeperCore:
         }
 
         Args:
-            file_path: 保存文件的路径（建议使用.pkl扩展名）
+            save_path: 保存文件的路径（建议使用.pkl扩展名）
 
         Raises:
             ValueError: 当没有数据可保存时
@@ -1073,22 +1197,148 @@ class SweeperCore:
             raise ValueError("没有可保存的数据，请先执行扫场测量")
 
         # 转换为Path对象
-        file_path = Path(file_path)
+        save_path = Path(save_path)
 
         # 确保目录存在
-        file_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 使用pickle保存数据包
         try:
-            with open(file_path, "wb") as f:
+            with open(save_path, "wb") as f:
                 pickle.dump(self._sweep_data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-            logger.info(f"数据保存成功: {file_path}")
-            logger.info(f"文件大小: {file_path.stat().st_size / 1024 / 1024:.2f} MB")
+            logger.info(f"数据保存成功: {save_path}")
+            logger.info(f"文件大小: {save_path.stat().st_size / 1024 / 1024:.2f} MB")
             logger.info(f"包含 {len(self._sweep_data['ai_data_list'])} 个点的数据")
         except Exception as e:
             logger.error(f"数据保存失败: {e}", exc_info=True)
-            raise OSError(f"无法保存数据到 {file_path}: {e}") from e
+            raise OSError(f"无法保存数据到 {save_path}: {e}") from e
+
+    def plot_data(
+        self,
+        mode: str,
+        save_path: str | Path,
+        ref_sine_args: SineArgs | None = None,
+        lowcut: float = 100.0,
+        highcut: float = 20000.0,
+        filter_order: int = 4,
+        trim_samples: int = 0,
+        use_cache: bool = True,
+    ) -> None:
+        """
+        绘制扫场数据的空间分布图
+
+        将self._sweep_data转换为PointTFData列表，然后根据指定的模式
+        使用相应的绘图函数生成图像并保存。
+        支持缓存机制，避免重复计算相同的plot_tf_results。
+
+        Args:
+            mode: 绘图模式，可选值：
+                - "discrete": 使用plot_transfer_function_discrete_distribution绘制方形色块分布图
+                - "interpolated": 使用plot_transfer_function_interpolated_distribution绘制插值分布图
+                - "instantaneous": 使用plot_transfer_function_instantaneous_field绘制瞬时声压场图
+            save_path: 保存图片的路径
+            ref_sine_args: 参考正弦波参数，如果为None则尝试从ao_data获取
+            lowcut: 带通滤波器低截止频率（Hz），默认100.0
+            highcut: 带通滤波器高截止频率（Hz），默认20000.0
+            filter_order: 滤波器阶数，默认4
+            trim_samples: 滤波后切除波形开头的采样点数量，默认0
+            use_cache: 是否使用缓存的plot_tf_results，默认为True。
+                当需要改变滤波器参数时，设置为False以强制重新计算。
+
+        Raises:
+            ValueError: 当mode参数无效或没有数据可绘制时
+            OSError: 当图片保存失败时
+
+        Examples:
+            ```python
+            >>> # 绘制离散分布图（使用缓存）
+            >>> sweeper.plot_data("discrete", "discrete_plot.png")  # noqa
+            >>> # 绘制插值分布图（使用缓存）
+            >>> sweeper.plot_data("interpolated", "interpolated_plot.png")  # noqa
+            >>> # 使用不同的滤波器参数重新计算并绘制
+            >>> sweeper.plot_data("discrete", "discrete_plot_2.png",
+            ...                   lowcut=200.0, use_cache=False)  # noqa
+            ```
+        """
+        from ..analyze import (
+            plot_transfer_function_discrete_distribution,
+            plot_transfer_function_instantaneous_field,
+            plot_transfer_function_interpolated_distribution,
+            sweep_data_to_point_tf_data,
+        )
+
+        # 验证mode参数
+        valid_modes = ["discrete", "interpolated", "instantaneous"]
+        if mode not in valid_modes:
+            raise ValueError(f"无效的mode参数: {mode}，必须是 {valid_modes} 之一")
+
+        # 验证数据存在
+        if not self._sweep_data or not self._sweep_data["ai_data_list"]:
+            raise ValueError("没有可绘制的数据，请先执行扫场测量")
+
+        # 转换为Path对象
+        save_path = Path(save_path)
+
+        # 确保目录存在
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"开始绘制扫场数据分布图，模式: {mode}")
+
+        # 检查缓存的plot_tf_results是否可用
+        if use_cache and self._plot_tf_results is not None:
+            logger.debug("使用缓存的plot_tf_results")
+            plot_tf_results = self._plot_tf_results
+        else:
+            if not use_cache:
+                logger.debug("用户要求不使用缓存，重新计算plot_tf_results")
+            else:
+                logger.debug("缓存不存在，计算plot_tf_results")
+            # 将SweepData转换为PointTFData列表
+            try:
+                plot_tf_results = sweep_data_to_point_tf_data(
+                    self._sweep_data,
+                    ref_sine_args=ref_sine_args,
+                    lowcut=lowcut,
+                    highcut=highcut,
+                    filter_order=filter_order,
+                    trim_samples=trim_samples,
+                )
+                # 缓存结果
+                self._plot_tf_results = plot_tf_results
+                logger.debug("plot_tf_results已缓存")
+            except Exception as e:
+                logger.error(f"转换SweepData到PointTFData失败: {e}", exc_info=True)
+                raise ValueError(f"数据转换失败: {e}") from e
+
+        # 根据模式选择绘图函数
+        try:
+            if mode == "discrete":
+                fig, _ = plot_transfer_function_discrete_distribution(
+                    plot_tf_results,
+                    save_path=str(save_path),
+                )
+            elif mode == "interpolated":
+                fig, _ = plot_transfer_function_interpolated_distribution(
+                    plot_tf_results,
+                    save_path=str(save_path),
+                )
+            elif mode == "instantaneous":
+                fig, _ = plot_transfer_function_instantaneous_field(
+                    plot_tf_results,
+                    save_path=str(save_path),
+                )
+
+            # 关闭图形以释放内存
+            import matplotlib.pyplot as plt
+
+            plt.close(fig)
+
+            logger.info(f"绘图完成并保存至: {save_path}")
+
+        except Exception as e:
+            logger.error(f"绘图失败: {e}", exc_info=True)
+            raise OSError(f"无法保存图片到 {save_path}: {e}") from e
 
     def cleanup(self) -> None:
         """
@@ -1097,7 +1347,7 @@ class SweeperCore:
         清理状态，停止所有线程，销毁内部创建的控制器对象。
         """
         # 如果正在运行，先停止
-        if self._is_running():
+        if self._is_running:
             logger.warning("检测到扫场正在运行，强制停止...")
             self.stop(timeout=15.0)
 
@@ -1106,7 +1356,7 @@ class SweeperCore:
             try:
                 logger.debug("正在清理数据采集控制器...")
                 self._measure_controller.stop()  # 确保停止任务
-                # HiPerfCSSIO没有专门的cleanup方法，stop()已经处理了资源清理
+                # SingleChasCSIO没有专门的cleanup方法，stop()已经处理了资源清理
                 logger.debug("数据采集控制器清理完成")
             except Exception as e:
                 logger.error(f"清理数据采集控制器时出错: {e}")

@@ -233,7 +233,7 @@ def filter_sweep_data(
         ...     trim_samples=500
         ... )
         >>> # 滤波后的数据可用于后续处理
-        >>> tf_results = calculate_transfer_function(filtered_data)  # noqa
+        >>> plot_tf_results = calculate_transfer_function(filtered_data)  # noqa
         ```
 
     Notes:

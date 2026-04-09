@@ -652,16 +652,17 @@ class MotorController:
 
         try:
             # 快速移动到负限位附近
-            move_success = self.move_absolute_2D(x_mm=10.0, y_mm=10.0)
-
-            if not move_success:
-                logger.error("自动校准前快速移动到负限位附近失败", exc_info=True)
-                self._is_calibrated = False
-                return self._is_calibrated
+            # 以下流程有危险性，建议在确保安全的情况下启用，以免损坏电机
+            # move_success = self.move_absolute_2D(x_mm=10.0, y_mm=10.0)
+            #
+            # if not move_success:
+            #     logger.error("自动校准前快速移动到负限位附近失败", exc_info=True)
+            #     self._is_calibrated = False
+            #     return self._is_calibrated
 
             # 校准X轴（轴序号0）
             logger.info("开始校准X轴...")
-            x_success = self._calibrate_one_axis(axis=0, timeout_seconds=20.0)
+            x_success = self._calibrate_one_axis(axis=0, timeout_seconds=300.0)
 
             if not x_success:
                 logger.error("X轴校准失败", exc_info=True)
@@ -670,7 +671,7 @@ class MotorController:
 
             # 校准Y轴（轴序号1）
             logger.info("开始校准Y轴...")
-            y_success = self._calibrate_one_axis(axis=1, timeout_seconds=20.0)
+            y_success = self._calibrate_one_axis(axis=1, timeout_seconds=300.0)
 
             if not y_success:
                 logger.error("Y轴校准失败", exc_info=True)
@@ -687,8 +688,9 @@ class MotorController:
             self._is_calibrated = False
             return self._is_calibrated
 
+    @staticmethod
     def _calculate_smart_motion_parameters(
-        self, distance_abs: float
+        distance_abs: float
     ) -> tuple[int, int, int, float]:
         """根据运动距离智能计算运动参数（简化版）
 
@@ -732,8 +734,9 @@ class MotorController:
 
         return max_speed, acceleration, deceleration, timeout_seconds
 
+    @staticmethod
     def _calculate_smart_motion_parameters_backup(  # 暂停维护
-        self, distance_abs: float
+        distance_abs: float
     ) -> tuple[int, int, int, float]:
         """根据运动距离智能计算运动参数
 

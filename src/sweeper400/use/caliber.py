@@ -43,7 +43,7 @@ from ..measure import SingleChasCSIO
 logger = get_logger(__name__)
 
 
-def _load_comp_data_with_fallback(
+def load_comp_data_with_fallback(
     explicit_path: str | Path | None,
     default_path: str | Path,
     comp_type: Literal["AO", "AI"],
@@ -79,7 +79,7 @@ def _load_comp_data_with_fallback(
         try:
             with open(explicit_path_obj, "rb") as f:
                 comp_data: CompData = pickle.load(f)
-            logger.info(
+            logger.debug(
                 f"成功加载{comp_type}补偿数据（用户显式路径）: {explicit_path_obj}"
             )
             return comp_data
@@ -94,7 +94,7 @@ def _load_comp_data_with_fallback(
         try:
             with open(default_path_obj, "rb") as f:
                 comp_data: CompData = pickle.load(f)
-            logger.info(
+            logger.debug(
                 f"成功加载{comp_type}补偿数据（默认全局路径）: {default_path_obj}"
             )
             return comp_data
@@ -107,7 +107,7 @@ def _load_comp_data_with_fallback(
             # 继续回退到优先级3
 
     # 优先级3：不使用CompData
-    logger.info(f"未找到{comp_type}补偿数据，将使用无补偿模式")
+    logger.debug(f"未找到{comp_type}补偿数据，将使用无补偿模式")
     return None
 
 
@@ -661,14 +661,14 @@ class CaliberSardine:
         logger.info(f"校准流程完成，所有结果已保存到: {result_path}")
         logger.info("=" * 60)
 
-    def save_comp_data(self, file_path: str | Path) -> None:
+    def save_comp_data(self, save_path: str | Path) -> None:
         """
         保存校准结果到本地文件
 
         使用pickle序列化将最终补偿数据保存到磁盘。
 
         Args:
-            file_path: 保存文件的路径（支持字符串或Path对象）
+            save_path: 保存文件的路径（支持字符串或Path对象）
 
         Raises:
             RuntimeError: 当尚未执行校准时
@@ -678,7 +678,7 @@ class CaliberSardine:
             raise RuntimeError("尚未执行校准，无法保存结果")
 
         # 转换为Path对象
-        save_path = Path(file_path)
+        save_path = Path(save_path)
 
         # 确保父目录存在
         save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1066,6 +1066,191 @@ def comp_ai_sine_args(
     )
 
 
+def comp_ao_multi_ch_wf(
+    input_waveform: Waveform,
+    ao_comp_data: CompData | None,
+) -> Waveform:
+    """
+    基于AO补偿数据对多通道波形进行幅值和时间补偿（支持部分补偿）
+
+    该函数接收一个多通道Waveform和AO补偿数据（CompData），
+    根据补偿数据对每个AO通道进行幅值和时间补偿。
+
+    **重要特性**：
+    - 支持部分补偿：输入波形的通道数可以多于CompData中的通道
+    - 对于CompData中存在的通道，应用补偿
+    - 对于CompData中不存在的通道，保持原样（不补偿）
+
+    **重要假设**：
+    - 输入波形的每个通道内容在时间上是首尾相接的（循环信号）
+    - 输入波形的channel_names属性必须已设置，用于匹配补偿数据
+    - 时间补偿通过循环移位实现，遵循"只切割开头，不切割末尾"的原则
+
+    **补偿原理**：
+    - 幅值补偿：输出幅值 = 输入幅值 × 幅值补偿倍率
+    - 时间补偿：根据时间延迟计算采样点延迟，对信号进行循环移位
+      - 采样点延迟 = 时间延迟 × 采样率
+      - 通过np.roll进行循环移位（正延迟向右移，负延迟向左移）
+      - 为确保信号开头不受影响，统一将信号开头部分移到末尾
+
+    Args:
+        input_waveform: 输入的多通道波形（二维数组，每行对应一个通道），
+                       必须设置channel_names属性
+        ao_comp_data: AO补偿数据（CompData格式），如果为None则不进行补偿
+
+    Returns:
+        output_waveform: 补偿后的多通道波形
+
+    Raises:
+        ValueError: 当输入波形不是多通道时
+        ValueError: 当输入波形的channel_names为None时
+        ValueError: 当通道数与channel_names长度不匹配时
+
+    Examples:
+        ```python
+        >>> # 假设有一个多通道白噪声信号
+        >>> noise_data = np.random.randn(8, 10000)  # 8通道，10000采样点
+        >>> ao_channels = ("PXI1Slot2/ao0", "PXI1Slot2/ao1", ...)
+        >>> noise_waveform = Waveform(
+        ...     noise_data,
+        ...     sampling_rate=171500.0,
+        ...     channel_names=ao_channels
+        ... )
+        >>> # 加载补偿数据（假设只包含部分通道）
+        >>> ao_comp_data = load_comp_data_with_fallback(...)
+        >>> # 应用补偿（支持部分补偿）
+        >>> calibrated_waveform = comp_ao_multi_ch_wf(
+        ...     noise_waveform,
+        ...     ao_comp_data,
+        ... )
+        >>> print(calibrated_waveform.shape)  # (8, 10000)
+        ```
+    """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.comp_ao_multi_ch_wf")
+
+    # 1. 验证输入波形是多通道
+    if input_waveform.ndim != 2:
+        logger.error(
+            f"输入波形必须是多通道（二维数组），当前维度: {input_waveform.ndim}",
+            exc_info=True,
+        )
+        raise ValueError(
+            f"输入波形必须是多通道（二维数组），当前维度: {input_waveform.ndim}"
+        )
+
+    channels_num = input_waveform.channels_num
+    samples_num = input_waveform.samples_num
+    sampling_rate = input_waveform.sampling_rate
+
+    # 2. 验证channel_names已设置
+    ao_channel_names = input_waveform.channel_names
+    if ao_channel_names is None:
+        logger.error(
+            "输入波形的channel_names属性为None，必须设置通道名称以匹配补偿数据",
+            exc_info=True,
+        )
+        raise ValueError(
+            "输入波形的channel_names属性为None，必须设置通道名称以匹配补偿数据"
+        )
+
+    logger.debug(
+        f"开始多通道波形AO补偿: "
+        f"waveform_shape={input_waveform.shape}, "
+        f"sampling_rate={input_waveform.sampling_rate}Hz, "
+        f"ao_channels={ao_channel_names}"
+    )
+
+    logger.debug(f"输入波形: {channels_num}通道, {samples_num}采样点")
+
+    # 3. 验证通道数一致性
+    if channels_num != len(ao_channel_names):
+        logger.error(
+            f"输入波形通道数({channels_num})与channel_names长度({len(ao_channel_names)})不匹配",
+            exc_info=True,
+        )
+        raise ValueError(
+            f"输入波形通道数({channels_num})与channel_names长度({len(ao_channel_names)})不匹配"
+        )
+
+    # 4. 如果未提供补偿数据，直接返回原始波形的副本
+    if ao_comp_data is None:
+        logger.debug("未提供AO补偿数据，返回原始波形")
+        output_waveform = Waveform(
+            input_array=np.array(input_waveform),
+            sampling_rate=sampling_rate,
+            timestamp=input_waveform.timestamp,
+            id=input_waveform.id,
+            sine_args=input_waveform.sine_args,
+        )
+        return output_waveform
+
+    # 5. 获取补偿数据DataFrame
+    comp_df = ao_comp_data["comp_dataframe"]
+    comp_ao_channels = set(comp_df.index.tolist())
+
+    # 6. 创建输出数组（初始复制输入数据）
+    output_data = np.array(input_waveform)
+
+    # 7. 对每个通道进行补偿（仅对CompData中存在的通道）
+    compensated_count = 0
+    for ch_idx, channel_name in enumerate(ao_channel_names):
+        # 检查该通道是否在补偿数据中
+        if channel_name not in comp_ao_channels:
+            logger.warning(f"通道 {channel_name}: 不在补偿数据中，保持原样")
+            continue
+
+        # 提取补偿参数
+        amp_multiplier = comp_df.loc[channel_name, "amp_multiplier"]
+        time_increment = comp_df.loc[channel_name, "time_increment"]
+
+        logger.debug(
+            f"通道 {channel_name}: 幅值倍率={amp_multiplier:.6f}, "
+            f"时间增量={time_increment * 1e6:.3f}μs"
+        )
+
+        # 7.1 幅值补偿
+        # 输出幅值 = 输入幅值 × 幅值补偿倍率
+        compensated_amplitude = input_waveform[ch_idx, :] * amp_multiplier
+
+        # 7.2 时间补偿（通过循环移位）
+        # 计算采样点延迟（四舍五入以获得整数采样点）
+        # time_increment是时间延迟补偿值（秒）
+        # np.roll的shift参数：正值向右移（延迟），负值向左移（提前）
+        sample_delay = int(np.round(time_increment * sampling_rate))
+
+        logger.debug(
+            f"通道 {channel_name}: 时间增量={time_increment * 1e6:.3f}μs, "
+            f"采样点延迟={sample_delay}"
+        )
+
+        # 使用np.roll进行循环移位
+        # np.roll(array, shift): shift>0向右移，shift<0向左移
+        compensated_signal = np.roll(compensated_amplitude, sample_delay)
+
+        # 存储到输出数组
+        output_data[ch_idx, :] = compensated_signal
+        compensated_count += 1
+
+    logger.debug(f"AO补偿完成: {compensated_count}/{channels_num} 个通道已补偿")
+
+    # 8. 创建输出Waveform对象
+    output_waveform = Waveform(
+        input_array=output_data,
+        sampling_rate=sampling_rate,
+        timestamp=input_waveform.timestamp,
+        id=input_waveform.id,
+        sine_args=input_waveform.sine_args,
+    )
+
+    logger.debug(
+        f"多通道波形AO补偿完成: shape={output_waveform.shape}, "
+        f"channels_num={output_waveform.channels_num}"
+    )
+
+    return output_waveform
+
+
 class CaliberOctopus:
     """
     # 多通道校准类（章鱼模式）
@@ -1207,86 +1392,25 @@ class CaliberOctopus:
 
         # 智能加载AO补偿数据（支持显式路径、默认路径和无补偿三级优先级）
         default_ao_comp_path = Path("storage/calib/calib_result_octopus/ao_comp_data.pkl")
-        loaded_ao_comp_data = _load_comp_data_with_fallback(
+        loaded_ao_comp_data = load_comp_data_with_fallback(
             explicit_path=ao_comp_data,
             default_path=default_ao_comp_path,
             comp_type="AO",
         )
 
         # 生成输出波形
-        if loaded_ao_comp_data is not None:
+        # 步骤1：生成同步多通道波形（所有通道相同）
+        sync_waveform = get_sine_multi_ch(
+            sampling_info=sampling_info,
+            sine_args=sine_args,
+            channel_names=ao_channels,
+        )
 
-            # 从 comp_dataframe 中提取已有补偿数据的 AO 通道名称集合
-            comp_df = loaded_ao_comp_data["comp_dataframe"]
-            comp_ao_channels = set(comp_df.index.tolist())
-
-            # 生成多通道波形（支持部分补偿）
-            # 首先生成未补偿的单通道波形
-            single_channel_waveform = get_sine_cycles(sampling_info, sine_args)
-
-            # 创建多通道数组
-            num_channels = len(ao_channels)
-            multi_channel_data = np.zeros(
-                (num_channels, single_channel_waveform.samples_num), dtype=np.float64
-            )
-
-            # 对每个通道，检查是否在ao_comp_data中
-            compensated_count = 0
-            for idx, channel_name in enumerate(ao_channels):
-                if channel_name in comp_ao_channels:
-                    # 该通道在ao_comp_data中，使用补偿波形
-                    # 为该单个通道创建临时CompData
-                    temp_comp_df = comp_df.loc[[channel_name]]  # 保持DataFrame格式
-                    temp_comp_data: CompData = {
-                        "comp_dataframe": temp_comp_df,
-                        "sampling_info": loaded_ao_comp_data["sampling_info"],
-                        "sine_args": loaded_ao_comp_data["sine_args"],
-                        "mean_amp_ratio": loaded_ao_comp_data["mean_amp_ratio"],
-                        "mean_phase_shift": loaded_ao_comp_data["mean_phase_shift"],
-                    }
-                    compensated_waveform = get_sine_multi_ch(
-                        sampling_info=sampling_info,
-                        sine_args=sine_args,
-                        ao_comp_data=temp_comp_data,
-                    )
-                    multi_channel_data[idx, :] = compensated_waveform[0, :]
-                    compensated_count += 1
-                    logger.debug(f"通道 {channel_name} 使用补偿波形")
-                else:
-                    # 该通道不在ao_comp_data中，使用未补偿波形
-                    multi_channel_data[idx, :] = single_channel_waveform
-                    logger.debug(f"通道 {channel_name} 使用未补偿波形")
-
-            # 创建多通道Waveform对象
-            self._output_waveform = Waveform(
-                input_array=multi_channel_data,
-                sampling_rate=sampling_info["sampling_rate"],
-                timestamp=single_channel_waveform.timestamp,
-                id=single_channel_waveform.id,
-                sine_args=sine_args,
-            )
-            logger.info(
-                f"使用部分补偿数据生成多通道波形，shape={self._output_waveform.shape}，"
-                f"补偿通道数={compensated_count}/{len(ao_channels)}"
-            )
-        else:
-            # 生成多通道未补偿波形（每个通道都是相同的正弦波）
-            # 首先生成单通道波形
-            single_channel_waveform = get_sine_cycles(sampling_info, sine_args)
-
-            # 创建多通道数组，每个通道都是相同的信号
-            num_channels = len(ao_channels)
-            multi_channel_data = np.tile(single_channel_waveform, (num_channels, 1))
-
-            # 创建多通道Waveform对象
-            self._output_waveform = Waveform(
-                input_array=multi_channel_data,
-                sampling_rate=sampling_info["sampling_rate"],
-                timestamp=single_channel_waveform.timestamp,
-                id=single_channel_waveform.id,
-                sine_args=sine_args,
-            )
-            logger.info(f"生成多通道未补偿波形，shape={self._output_waveform.shape}")
+        # 步骤2：应用补偿（支持部分补偿）
+        self._output_waveform = comp_ao_multi_ch_wf(
+            sync_waveform,
+            loaded_ao_comp_data,
+        )
 
         # 计算默认的稳定等待时间（chunk时长 + 0.1秒）
         chunk_duration = self._output_waveform.duration
@@ -1979,14 +2103,14 @@ class CaliberOctopus:
         logger.info(f"校准流程完成，所有结果已保存到: {result_path}")
         logger.info("=" * 60)
 
-    def save_comp_data(self, file_path: str | Path) -> None:
+    def save_comp_data(self, save_path: str | Path) -> None:
         """
         保存校准结果到本地文件
 
         使用pickle序列化将最终补偿数据保存到磁盘。
 
         Args:
-            file_path: 保存文件的路径（支持字符串或Path对象）
+            save_path: 保存文件的路径（支持字符串或Path对象）
 
         Raises:
             RuntimeError: 当尚未执行校准时
@@ -1996,7 +2120,7 @@ class CaliberOctopus:
             raise RuntimeError("尚未执行校准，无法保存结果")
 
         # 转换为Path对象
-        save_path = Path(file_path)
+        save_path = Path(save_path)
 
         # 确保父目录存在
         save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2494,7 +2618,7 @@ class CaliberFishNet(CaliberOctopus):
 
         # 智能加载AI补偿数据（优先级：显式路径 > 默认路径 > 无补偿）
         default_ai_comp_path = Path("storage/calib/calib_result_sardine/ai_comp_data.pkl")
-        self._ai_comp_data = _load_comp_data_with_fallback(
+        self._ai_comp_data = load_comp_data_with_fallback(
             explicit_path=ai_comp_data,
             default_path=default_ai_comp_path,
             comp_type="AI",
@@ -3151,7 +3275,7 @@ class PowerTester:
 
         # 尝试使用_load_comp_data_with_fallback加载ao_comp_data（必须成功）
         default_ao_comp_path = Path("storage/calib/calib_result_octopus/ao_comp_data.pkl")
-        loaded_ao_comp_data = _load_comp_data_with_fallback(
+        loaded_ao_comp_data = load_comp_data_with_fallback(
             explicit_path=ao_comp_data,
             default_path=default_ao_comp_path,
             comp_type="AO",
@@ -3413,7 +3537,7 @@ class PowerTester:
     def _plot_power_test_overview(
         self,
         test_results: list[tuple[float, complex]],
-        result_path: Path,
+        save_path: Path,
     ) -> None:
         """
         绘制PowerTest概览图
@@ -3423,7 +3547,7 @@ class PowerTester:
 
         Args:
             test_results: 测试结果列表，格式为[(power, tf_complex), ...]
-            result_path: 结果保存路径
+            save_path: 结果保存路径
         """
         # 过滤掉无效数据点（NaN）
         valid_results = [
@@ -3531,7 +3655,7 @@ class PowerTester:
         ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.0), fontsize=10)
 
         # 保存图像
-        plot_path = result_path / "power_test_overview.png"
+        plot_path = save_path / "power_test_overview.png"
         plt.tight_layout()
         plt.savefig(plot_path, dpi=300, bbox_inches="tight")
         self.logger.info(f"PowerTest概览图已保存到: {plot_path}")
@@ -3540,12 +3664,12 @@ class PowerTester:
         self.logger.info("PowerTest概览图绘制完成")
 
         # 额外绘制一幅直角坐标图，展示幅值比和相位差随功率的变化
-        self._plot_power_test_cartesian(valid_results, result_path)
+        self._plot_power_test_cartesian(valid_results, save_path)
 
     def _plot_power_test_cartesian(
         self,
         valid_results: list[tuple[float, complex]],
-        result_path: Path,
+        save_path: Path,
     ) -> None:
         """
         绘制PowerTest直角坐标图
@@ -3554,7 +3678,7 @@ class PowerTester:
 
         Args:
             valid_results: 有效测试结果列表，格式为[(power, tf_complex), ...]
-            result_path: 结果保存路径
+            save_path: 结果保存路径
         """
         # 提取数据
         powers = [r[0] for r in valid_results]
@@ -3630,7 +3754,7 @@ class PowerTester:
         plt.tight_layout()
 
         # 保存图像
-        plot_path = result_path / "power_test_cartesian.png"
+        plot_path = save_path / "power_test_cartesian.png"
         plt.savefig(plot_path, dpi=300, bbox_inches="tight")
         self.logger.info(f"PowerTest直角坐标图已保存到: {plot_path}")
 
