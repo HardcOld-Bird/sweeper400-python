@@ -39,9 +39,13 @@ ao_channels_feedback = (
 )
 
 # 创建输出波形
-sampling_info = init_sampling_info(171500.0, 85750)  # 采样率171.5kHz, 0.5秒
+# 采样率建议为目标频率倍数，且尽可能接近又不大于200kHz
+# 单段采样数≥8575（0.05s）以上时可正常运行
+# 然而，总停顿时间过短时，步进电机将无法稳定工作
+# 因此，建议至少停顿0.5s（0.2s×3）
+sampling_info = init_sampling_info(171500.0, 34300)  # 采样率171.5kHz, 0.2秒
 sine_args = init_sine_args(
-    frequency=3430.0, amplitude=0.000001, phase=0.0
+    frequency=3430.0, amplitude=0.03, phase=0.0
 )  # 3430Hz正弦波，波长10cm
 static_output_waveform = get_sine_cycles(sampling_info, sine_args)
 
@@ -55,7 +59,7 @@ swp = SweeperCore(
     ao_channels_static=ao_channels_static,
     ao_channels_feedback=ao_channels_feedback,
     static_output_waveform=static_output_waveform,
-    feedback_function=static_diff_feedback,
+    feedback_function=silent_feedback,
     point_list=grid,
 )
 
@@ -72,12 +76,14 @@ swp.move_to(1.0, 1.0)
 swp.move_to(310.0, 310.0)
 
 # %% 创建点阵
-grid = get_square_grid(10.0, 310.0, 270.0, 310.0)
+grid = get_square_grid(10.0, 310.0, 10.0, 310.0)
 swp.new_point_list(grid)
 
 # %% 开始扫场测量
 swp.sweep(
-    result_folder="D:\\EveryoneDownloaded\\sweep_data"
+    result_folder="D:\\EveryoneDownloaded\\sweep_data",
+    lowcut=1715.0,
+    highcut=6860.0,
 )
 
 # %% 查看进度

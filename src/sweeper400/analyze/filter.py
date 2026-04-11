@@ -119,7 +119,7 @@ def filter_waveform(
     sos: FilterSOS,
 ) -> Waveform:
     """
-    对波形应用已设计好的滤波器
+    对波形应用已设计好的滤波器（单向滤波）
 
     该函数可以重复使用同一个滤波器处理多个波形，提高效率。
 
@@ -202,7 +202,7 @@ def filter_sweep_data(
     """
     对SweepData中的所有波形进行滤波
 
-    该函数对SweepData中的所有AI波形进行去趋势、应用带通滤波、并按需裁剪信号头。
+    该函数对SweepData中的所有AI波形进行去趋势、应用带通（单向）滤波、并按需裁剪信号头。
     滤波器只设计一次，然后复用到所有波形上，提高处理效率。
 
     Args:
@@ -211,6 +211,7 @@ def filter_sweep_data(
         highcut: 高通截止频率（Hz），必须为正实数，默认为20000.0Hz
         filter_order: 高通滤波器阶数，默认为4
         trim_samples: 滤波后切除波形开头的采样点数量，用于消除边缘效应，默认为0
+            （一般来说，去趋势+单向滤波方案的边缘效应并不显著，无需切除）
 
     Returns:
         滤波后的SweepData，结构与输入完全相同，但所有波形已被滤波
@@ -221,7 +222,7 @@ def filter_sweep_data(
     Examples:
         ```python
         >>> # 假设已有原始采集数据
-        >>> raw_data = sweeper.get_data()  # noqa
+        >>> raw_data = sweeper.export_data()  # noqa
         >>> # 应用高通滤波器（默认10Hz截止频率）
         >>> filtered_data = filter_sweep_data(raw_data)
         >>> # 或自定义滤波器参数并切除开头100个采样点

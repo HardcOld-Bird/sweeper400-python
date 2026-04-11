@@ -28,6 +28,7 @@ from ..analyze import (
     get_sine_cycles,
     init_sampling_info,
     init_sine_args,
+    load_sweep_data,
 )
 from ..logger import get_logger
 from ..measure import SingleChasCSIO
@@ -416,9 +417,6 @@ class SweeperCore:
         #     "ao_data": Waveform,
         # }
 
-        # 绘图数据缓存（用于plot_data方法避免重复计算）
-        self._plot_tf_results: list | None = None
-
         # 状态标志和线程管理
         self._state = SweepState.IDLE  # 扫场状态
         self._state_lock = threading.Lock()  # 保护状态的线程锁
@@ -759,9 +757,6 @@ class SweeperCore:
         # 初始化数据存储
         self._sweep_data["ai_data_list"].clear()
 
-        # 清除绘图数据缓存
-        self._plot_tf_results = None
-
         # 重置状态标志（使用线程锁保护）
         with self._point_index_lock:
             self._current_point_index = 0
@@ -775,7 +770,12 @@ class SweeperCore:
 
         logger.info("SweeperCore 状态已重置")
 
-    def sweep(self, result_folder: str | Path | None = None) -> bool:
+    def sweep(
+        self,
+        result_folder: str | Path | None = None,
+        lowcut: float = 100.0,
+        highcut: float = 20000.0,
+    ) -> bool:
         """
         启动扫场测量（非阻塞）
 
@@ -788,6 +788,8 @@ class SweeperCore:
                 - "discrete_distribution.png"
                 - "interpolated_distribution.png"
                 - "instantaneous_field.png"
+            lowcut: 带通滤波器低截止频率（Hz），用于最终绘图，默认100.0
+            highcut: 带通滤波器高截止频率（Hz），用于最终绘图，默认20000.0
 
         Returns:
             bool: 是否成功启动扫场测量（不代表测量完成）
@@ -814,6 +816,10 @@ class SweeperCore:
 
             # 存储结果文件夹路径
             self._result_folder = Path(result_folder) if result_folder is not None else None
+
+            # 存储绘图参数
+            self._plot_lowcut = lowcut
+            self._plot_highcut = highcut
 
             # 创建并启动扫场工作线程
             self._sweep_thread = threading.Thread(
@@ -920,18 +926,11 @@ class SweeperCore:
                     self.save_data(data_save_path)
 
                     # 绘制三种模式的图像
-                    plot_modes = [
-                        ("discrete", "discrete_distribution.png"),
-                        ("interpolated", "interpolated_distribution.png"),
-                        ("instantaneous", "instantaneous_field.png"),
-                    ]
-
-                    for mode, filename in plot_modes:
-                        try:
-                            plot_save_path = self._result_folder / filename
-                            self.plot_data(mode, plot_save_path)
-                        except Exception as plot_e:
-                            logger.error(f"绘制 {mode} 模式图像失败: {plot_e}")
+                    self.plot_data(
+                        self._result_folder,
+                        lowcut=self._plot_lowcut,
+                        highcut=self._plot_highcut,
+                    )
 
                     logger.info(f"结果自动保存完成: {self._result_folder}")
 
@@ -1157,9 +1156,56 @@ class SweeperCore:
         self._set_state(SweepState.IDLE)
         return True
 
-    def get_data(self) -> SweepData:
+    def import_data(self, file_path: str | Path) -> None:
         """
-        获取测量数据（深拷贝）
+        从文件导入已有的SweepData
+
+        从磁盘加载之前保存的测量数据，方便进行二次绘图或分析。
+        导入的数据将替换当前实例中的_sweep_data。
+
+        Args:
+            file_path: 数据文件的路径（.pkl文件）
+
+        Raises:
+            FileNotFoundError: 当文件不存在时
+            IOError: 当文件读取失败时
+            ValueError: 当数据格式不正确时
+
+        Examples:
+            >>> sweeper = SweeperCore(...)
+            >>> sweeper.import_data("path/to/sweep_data.pkl")
+            >>> # 现在可以使用plot_data方法进行绘图
+            >>> sweeper.plot_data("output.png")
+        """
+        file_path = Path(file_path)
+
+        if not file_path.exists():
+            raise FileNotFoundError(f"数据文件不存在: {file_path}")
+
+        logger.info(f"开始导入测量数据: {file_path}")
+
+        try:
+            # 使用load_sweep_data函数加载数据
+            loaded_data = load_sweep_data(file_path)
+
+            # 替换当前数据
+            self._sweep_data = loaded_data
+
+            # 更新点列表（从导入的数据中提取）
+            ai_data_list = loaded_data["ai_data_list"]
+            if ai_data_list:
+                self._point_list = [point_data["position"] for point_data in ai_data_list]
+                self._TOTAL_POINTS_NUM = len(self._point_list)
+
+            logger.info(f"数据导入成功，共 {len(ai_data_list)} 个点")
+
+        except Exception as e:
+            logger.error(f"数据导入失败: {e}", exc_info=True)
+            raise
+
+    def export_data(self) -> SweepData:
+        """
+        导出测量数据（深拷贝）
 
         Returns:
             SweepData: 测量数据副本
@@ -1216,49 +1262,41 @@ class SweeperCore:
 
     def plot_data(
         self,
-        mode: str,
         save_path: str | Path,
         ref_sine_args: SineArgs | None = None,
         lowcut: float = 100.0,
         highcut: float = 20000.0,
         filter_order: int = 4,
         trim_samples: int = 0,
-        use_cache: bool = True,
     ) -> None:
         """
-        绘制扫场数据的空间分布图
+        绘制扫场数据的空间分布图（三种模式）
 
-        将self._sweep_data转换为PointTFData列表，然后根据指定的模式
-        使用相应的绘图函数生成图像并保存。
-        支持缓存机制，避免重复计算相同的plot_tf_results。
+        将self._sweep_data转换为PointTFData列表，然后一次性绘制三种模式的图像：
+        - 离散分布图（方形色块）
+        - 插值分布图
+        - 瞬时声压场图
 
         Args:
-            mode: 绘图模式，可选值：
-                - "discrete": 使用plot_transfer_function_discrete_distribution绘制方形色块分布图
-                - "interpolated": 使用plot_transfer_function_interpolated_distribution绘制插值分布图
-                - "instantaneous": 使用plot_transfer_function_instantaneous_field绘制瞬时声压场图
-            save_path: 保存图片的路径
+            save_path: 保存图片的基础路径（不含扩展名），三张图将分别保存为：
+                - {save_path}_discrete.png
+                - {save_path}_interpolated.png
+                - {save_path}_instantaneous.png
             ref_sine_args: 参考正弦波参数，如果为None则尝试从ao_data获取
             lowcut: 带通滤波器低截止频率（Hz），默认100.0
             highcut: 带通滤波器高截止频率（Hz），默认20000.0
             filter_order: 滤波器阶数，默认4
             trim_samples: 滤波后切除波形开头的采样点数量，默认0
-            use_cache: 是否使用缓存的plot_tf_results，默认为True。
-                当需要改变滤波器参数时，设置为False以强制重新计算。
 
         Raises:
-            ValueError: 当mode参数无效或没有数据可绘制时
+            ValueError: 当没有数据可绘制时
             OSError: 当图片保存失败时
 
         Examples:
             ```python
-            >>> # 绘制离散分布图（使用缓存）
-            >>> sweeper.plot_data("discrete", "discrete_plot.png")  # noqa
-            >>> # 绘制插值分布图（使用缓存）
-            >>> sweeper.plot_data("interpolated", "interpolated_plot.png")  # noqa
-            >>> # 使用不同的滤波器参数重新计算并绘制
-            >>> sweeper.plot_data("discrete", "discrete_plot_2.png",
-            ...                   lowcut=200.0, use_cache=False)  # noqa
+            >>> # 绘制三种模式的图像
+            >>> sweeper.plot_data("output/plot")  # noqa
+            >>> # 生成：output/plot_discrete.png, output/plot_interpolated.png, output/plot_instantaneous.png
             ```
         """
         from ..analyze import (
@@ -1268,77 +1306,57 @@ class SweeperCore:
             sweep_data_to_point_tf_data,
         )
 
-        # 验证mode参数
-        valid_modes = ["discrete", "interpolated", "instantaneous"]
-        if mode not in valid_modes:
-            raise ValueError(f"无效的mode参数: {mode}，必须是 {valid_modes} 之一")
-
         # 验证数据存在
         if not self._sweep_data or not self._sweep_data["ai_data_list"]:
             raise ValueError("没有可绘制的数据，请先执行扫场测量")
 
         # 转换为Path对象
-        save_path = Path(save_path)
+        save_path_base = Path(save_path)
 
         # 确保目录存在
-        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path_base.parent.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"开始绘制扫场数据分布图，模式: {mode}")
+        logger.info("开始绘制扫场数据分布图（三种模式）")
 
-        # 检查缓存的plot_tf_results是否可用
-        if use_cache and self._plot_tf_results is not None:
-            logger.debug("使用缓存的plot_tf_results")
-            plot_tf_results = self._plot_tf_results
-        else:
-            if not use_cache:
-                logger.debug("用户要求不使用缓存，重新计算plot_tf_results")
-            else:
-                logger.debug("缓存不存在，计算plot_tf_results")
-            # 将SweepData转换为PointTFData列表
-            try:
-                plot_tf_results = sweep_data_to_point_tf_data(
-                    self._sweep_data,
-                    ref_sine_args=ref_sine_args,
-                    lowcut=lowcut,
-                    highcut=highcut,
-                    filter_order=filter_order,
-                    trim_samples=trim_samples,
-                )
-                # 缓存结果
-                self._plot_tf_results = plot_tf_results
-                logger.debug("plot_tf_results已缓存")
-            except Exception as e:
-                logger.error(f"转换SweepData到PointTFData失败: {e}", exc_info=True)
-                raise ValueError(f"数据转换失败: {e}") from e
-
-        # 根据模式选择绘图函数
+        # 将SweepData转换为PointTFData列表
         try:
-            if mode == "discrete":
-                fig, _ = plot_transfer_function_discrete_distribution(
-                    plot_tf_results,
-                    save_path=str(save_path),
-                )
-            elif mode == "interpolated":
-                fig, _ = plot_transfer_function_interpolated_distribution(
-                    plot_tf_results,
-                    save_path=str(save_path),
-                )
-            elif mode == "instantaneous":
-                fig, _ = plot_transfer_function_instantaneous_field(
-                    plot_tf_results,
-                    save_path=str(save_path),
-                )
-
-            # 关闭图形以释放内存
-            import matplotlib.pyplot as plt
-
-            plt.close(fig)
-
-            logger.info(f"绘图完成并保存至: {save_path}")
-
+            plot_tf_results = sweep_data_to_point_tf_data(
+                self._sweep_data,
+                ref_sine_args=ref_sine_args,
+                lowcut=lowcut,
+                highcut=highcut,
+                filter_order=filter_order,
+                trim_samples=trim_samples,
+            )
+            logger.debug("plot_tf_results计算完成")
         except Exception as e:
-            logger.error(f"绘图失败: {e}", exc_info=True)
-            raise OSError(f"无法保存图片到 {save_path}: {e}") from e
+            logger.error(f"转换SweepData到PointTFData失败: {e}", exc_info=True)
+            raise ValueError(f"数据转换失败: {e}") from e
+
+        # 定义三种模式的绘图配置
+        plot_configs = [
+            ("discrete", plot_transfer_function_discrete_distribution),
+            ("interpolated", plot_transfer_function_interpolated_distribution),
+            ("instantaneous", plot_transfer_function_instantaneous_field),
+        ]
+
+        # 依次绘制三种模式的图像
+        import matplotlib.pyplot as plt
+
+        for mode_name, plot_func in plot_configs:
+            try:
+                save_path_with_mode = save_path_base.parent / f"{save_path_base.name}_{mode_name}.png"
+                fig, _ = plot_func(
+                    plot_tf_results,
+                    save_path=str(save_path_with_mode),
+                )
+                plt.close(fig)
+                logger.debug(f"{mode_name} 模式图像绘制完成")
+            except Exception as e:
+                logger.error(f"绘制 {mode_name} 模式图像失败: {e}", exc_info=True)
+                raise OSError(f"无法保存 {mode_name} 模式图片: {e}") from e
+
+        logger.info("三种模式的扫场数据分布图绘制完成")
 
     def cleanup(self) -> None:
         """

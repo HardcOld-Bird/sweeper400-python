@@ -95,7 +95,7 @@ class MotorController:
         self._transmission_ratio: float = transmission_ratio
 
         logger.info(
-            f"电机控制器实例已创建 - 参数: 步进角度={step_angle}°, "
+            f"MotorController 实例已创建 - 参数: 步进角度={step_angle}°, "
             f"细分数={subdivision}, 螺距={pitch}mm, 传动比={transmission_ratio}"
         )
         # 定义类常量
@@ -695,8 +695,10 @@ class MotorController:
         """根据运动距离智能计算运动参数（简化版）
 
         该方法根据运动距离的绝对值自动计算最优的运动参数（简化版）：
-        - 加速度/减速度：固定5000
-        - 最大速度：固定20000
+        - 加速度/减速度：固定50000
+            （经测试，100000在中等杆长（75cm）时有较明显抖动）
+        - 最大速度：固定50000
+            （经测试，100000会导致运行不稳定）
         - 超时时间：30mm以下=10s，30-120mm线性插值到15s，120mm以上按比例延长到25s
 
         Args:
@@ -709,10 +711,10 @@ class MotorController:
         distance_abs = abs(distance_abs)
 
         # 设置加速度/减速度
-        acceleration = deceleration = 5000
+        acceleration = deceleration = 50000
 
         # 设置最大速度
-        max_speed = 20000
+        max_speed = 50000
 
         # 智能设置超时时间
         if distance_abs <= 30.0:

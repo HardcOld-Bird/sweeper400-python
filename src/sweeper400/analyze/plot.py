@@ -209,13 +209,11 @@ def plot_transfer_function_discrete_distribution(
         ... )
         ```
     """
-    logger.info("开始绘制传递函数空间分布图（方形色块版本）")
-
     if not plot_tf_results:
         logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
 
-    logger.info(f"绘制 {len(plot_tf_results)} 个点的传递函数分布")
+    logger.info(f"绘制 {len(plot_tf_results)} 个点的传递函数分布（方形色块版本）")
 
     # 2. 提取数据
     x_coords = np.array([result["position"].x for result in plot_tf_results])
@@ -388,8 +386,6 @@ def plot_transfer_function_interpolated_distribution(
         ... )
         ```
     """
-    logger.info("开始绘制传递函数插值空间分布图")
-
     if not plot_tf_results:
         logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
@@ -609,8 +605,6 @@ def plot_transfer_function_instantaneous_field(
         ... )
         ```
     """
-    logger.info("开始绘制瞬时声压场分布图")
-
     if not plot_tf_results:
         logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
