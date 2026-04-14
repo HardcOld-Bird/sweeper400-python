@@ -25,15 +25,11 @@ from nidaqmx.constants import (
 )
 
 from ..analyze import (
-    CompData,
     PositiveInt,
-    SineArgs,
     TFData,
     Waveform,
-    extract_single_tone_information_vvi,
     get_sine_multi_ch,
     load_data_with_fallback,
-    comp_ai_sine_args,
     comp_multi_ch_wf,
 )
 from ..logger import get_logger
@@ -154,7 +150,7 @@ class SingleChasCSIO:
         ao_channels_static: tuple[str, ...],
         ao_channels_feedback: tuple[str, ...],
         static_output_waveform: Waveform,
-        export_function: Callable[[Waveform, Waveform, Waveform, PositiveInt], Any],
+        export_function: Callable[[Waveform, Waveform, Waveform | None, PositiveInt], Any],
         feedback_function: Callable[[Waveform, Waveform, Waveform, TFData], Waveform] | None = None,
         buffer_size_multiplier: PositiveInt = 5,
         ao_comp_data: str | Path | None = None,
@@ -178,8 +174,8 @@ class SingleChasCSIO:
                 ao_feedback_waveform是当前的反馈输出波形（如果没有反馈通道则为None）
             feedback_function: 反馈函数，接收三个参数：
                 1. ai_waveform: 刚刚采集到的AI数据
-                2. currently_playing_feedback_waveform: 当前正在播放的feedback波形（最旧的队列项）
-                3. static_output_waveform: 静态输出波形对象
+                2. static_output_waveform: 静态输出波形对象
+                3. currently_playing_feedback_waveform: 当前正在播放的feedback波形（最旧的队列项）
                 4. fishnet_tf_data: TFData对象，包含传递函数数据
                 返回feedback AO数据（多通道Waveform）。如果为None，使用默认静音函数。
             buffer_size_multiplier: AI和Feedback AO缓冲区大小倍数
@@ -240,34 +236,23 @@ class SingleChasCSIO:
         self._enable_export = False
 
         # 加载AO补偿数据
-        self._ao_comp_data: CompData | None = None
-        if ao_comp_data is not None:
-            self._ao_comp_data = load_data_with_fallback(
-                explicit_path=ao_comp_data,
-                default_path=Path("storage/calib/calib_result_octopus/ao_comp_data.pkl"),
-                data_type="AO补偿数据",
-            )
-            logger.info(f"已加载AO补偿数据: {ao_comp_data}")
-
+        self._ao_comp_data = load_data_with_fallback(
+            explicit_path=ao_comp_data,
+            default_path=Path("storage/calib/calib_result_octopus/ao_comp_data.pkl"),
+            data_type="AO补偿数据",
+        )
         # 加载AI补偿数据
-        self._ai_comp_data: CompData | None = None
-        if ai_comp_data is not None:
-            self._ai_comp_data = load_data_with_fallback(
-                explicit_path=ai_comp_data,
-                default_path=Path("storage/calib/calib_result_sardine/ai_comp_data.pkl"),
-                data_type="AI补偿数据",
-            )
-            logger.info(f"已加载AI补偿数据: {ai_comp_data}")
-
+        self._ai_comp_data = load_data_with_fallback(
+            explicit_path=ai_comp_data,
+            default_path=Path("storage/calib/calib_result_sardine/ai_comp_data.pkl"),
+            data_type="AI补偿数据",
+        )
         # 加载Fishnet传递函数数据
-        self._fishnet_tf_data: TFData | None = None
-        if fishnet_tf_data is not None:
-            self._fishnet_tf_data = load_data_with_fallback(
-                explicit_path=fishnet_tf_data,
-                default_path=Path("storage/calib/calib_result_fishnet/fishnet_tf_data.pkl"),
-                data_type="Fishnet传递函数数据",
-            )
-            logger.info(f"已加载Fishnet传递函数数据: {fishnet_tf_data}")
+        self._fishnet_tf_data = load_data_with_fallback(
+            explicit_path=fishnet_tf_data,
+            default_path=Path("storage/calib/calib_result_fishnet/fishnet_tf_data.pkl"),
+            data_type="Fishnet传递函数数据",
+        )
 
         # 处理静态输出波形
         if ao_channels_static:
@@ -320,8 +305,8 @@ class SingleChasCSIO:
     @staticmethod
     def _default_feedback_function(
         ai_waveform: Waveform,
-        currently_playing_feedback_waveform: Waveform | None,
         static_output_waveform: Waveform | None,
+        currently_playing_feedback_waveform: Waveform | None,
         fishnet_tf_data: TFData | None,
     ) -> Waveform:
         """
@@ -332,7 +317,8 @@ class SingleChasCSIO:
 
         Args:
             ai_waveform: 刚刚采集到的AI数据
-            currently_playing_feedback_waveform: 当前正在播放的feedback波形（最旧的队列项）
+            static_output_waveform: Waveform | None,
+            currently_playing_feedback_waveform: Waveform | None,
             fishnet_tf_data: Fishnet传递函数数据
 
         Returns:
@@ -839,11 +825,7 @@ class SingleChasCSIO:
 
         while not self._stop_event.is_set():
             # 等待数据就绪事件
-            data_ready = self._data_ready_event.wait(timeout=timeout)
-
-            if not data_ready:
-                # 超时，尝试处理数据
-                continue
+            _ = self._data_ready_event.wait(timeout=timeout)
 
             # 清除事件标志
             self._data_ready_event.clear()
@@ -859,6 +841,7 @@ class SingleChasCSIO:
 
                 # 在锁外处理数据（避免长时间持有锁）
                 try:
+                    # 任务1：数据预处理
                     # 将原始数据转换为numpy数组并确保是2D格式
                     # 注意：nidaqmx的read()方法：
                     # - 单通道时返回1D列表 [sample1, sample2, ...]
@@ -875,11 +858,12 @@ class SingleChasCSIO:
                         channel_names=self._ai_channels,
                     )
 
-                    # 处理反馈
+                    # 任务2：处理反馈
                     feedback_waveform = None
                     if self._ao_channels_feedback:
                         try:
                             # ===== AI补偿阶段 =====
+                            # logger.warning("开始AI补偿阶段")
                             # 对AI波形应用AI补偿
                             if self._ai_comp_data is not None:
                                 logger.debug("对AI波形应用AI补偿")
@@ -889,6 +873,7 @@ class SingleChasCSIO:
                                 )
 
                             # ===== 获取当前播放的feedback波形 =====
+                            # logger.warning("开始获取当前播放的feedback波形")
                             # 从队列中取出最旧的波形（当前正在播放的）
                             currently_playing: Waveform | None = None
                             if self._feedback_ao_queue:
@@ -900,15 +885,17 @@ class SingleChasCSIO:
                                 )
 
                             # ===== 调用反馈函数 =====
+                            # logger.warning("开始调用反馈函数")
                             # 使用补偿后的AI波形、当前播放的波形和fishnet_tf_data调用feedback_function
                             feedback_waveform = self._feedback_function(
                                 ai_waveform,
-                                currently_playing,
                                 self._static_output_waveform,
+                                currently_playing,
                                 self._fishnet_tf_data,
                             )
 
                             # ===== AO补偿阶段 =====
+                            # logger.warning("开始AO补偿阶段")
                             # 对feedback波形应用AO补偿
                             if self._ao_comp_data is not None:
                                 logger.debug("对反馈波形应用AO补偿")
@@ -917,6 +904,8 @@ class SingleChasCSIO:
                                     self._ao_comp_data,
                                 )
 
+                            # ===== 波形写入阶段 =====
+                            # logger.warning("开始写入Feedback AO任务")
                             # 写入Feedback AO任务
                             self._write_ao_task_waveform_feedback(feedback_waveform)
 
@@ -924,7 +913,7 @@ class SingleChasCSIO:
                             logger.error(f"调用反馈函数失败: {e}", exc_info=True)
                             feedback_waveform = None  # 重置为None，表示反馈失败
 
-                    # 处理导出
+                    # 任务3：处理导出
                     if self._enable_export:
                         # 增加导出计数
                         self._chunks_num += 1
@@ -932,7 +921,7 @@ class SingleChasCSIO:
                         self._export_function(
                             ai_waveform,
                             self._static_output_waveform,
-                            feedback_waveform,  # noqa
+                            feedback_waveform,
                             self._chunks_num,
                         )
                     else:

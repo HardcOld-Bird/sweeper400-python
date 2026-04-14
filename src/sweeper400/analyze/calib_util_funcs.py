@@ -50,6 +50,9 @@ def load_data_with_fallback(
         FileNotFoundError: 当用户显式提供路径但文件不存在时
         RuntimeError: 当文件加载失败时
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.load_data_with_fallback")
+
     from ..analyze.post_process import load_compressed_data
 
     # 优先级1：用户显式提供的路径
@@ -132,6 +135,9 @@ def comp_ai_sine_args(
         >>> result = comp_ai_sine_args(original_args, None, "PXI1Slot2/ai0")
         >>> # result 等于 original_args
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.comp_ai_sine_args")
+
     # 如果未提供补偿数据，返回原始参数的副本
     if ai_comp_data is None:
         return SineArgs(

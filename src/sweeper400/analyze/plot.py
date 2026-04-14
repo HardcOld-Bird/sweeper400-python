@@ -19,7 +19,7 @@ from scipy.interpolate import griddata
 from ..logger import get_logger
 from .basic_sine import extract_single_tone_information_vvi
 from .filter import filter_sweep_data
-from .my_dtypes import Point2D, SineArgs, SweepData, Waveform
+from .my_dtypes import Point2D, SineArgs, init_sine_args, Waveform, SweepData
 from .post_process import average_sweep_data
 
 
@@ -76,12 +76,15 @@ def sweep_data_to_point_tf_data(
     Examples:
         ```python
         >>> # 假设已有SweepData
-        >>> sweep_data = load_sweep_data("measurement.pkl")
+        >>> sweep_data = load_sweep_data("measurement.pkl")  # noqa
         >>> plot_tf_results = sweep_data_to_point_tf_data(sweep_data)
         >>> # 现在可以使用绘图函数
         >>> fig, axes = plot_transfer_function_discrete_distribution(plot_tf_results)
         ```
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.sweep_data_to_point_tf_data")
+
     logger.info("开始将SweepData转换为PointTFData列表")
 
     # 验证输入数据
@@ -96,8 +99,14 @@ def sweep_data_to_point_tf_data(
         else:
             raise ValueError("无法从ao_data获取sine_args，请手动提供ref_sine_args")
 
+    # 避免幅值为0，影响传递函数计算
+    if ref_sine_args["amplitude"] == 0.0:
+        ref_amplitude = 1.0
+        logger.warning("ref_sine_args幅值为0，已替换为1")
+    else:
+        ref_amplitude = ref_sine_args["amplitude"]
+
     ref_frequency = ref_sine_args["frequency"]
-    ref_amplitude = ref_sine_args["amplitude"]
     ref_phase = ref_sine_args["phase"]
 
     logger.info(f"参考信号参数: 频率={ref_frequency}Hz, 幅值={ref_amplitude}, 相位={ref_phase}rad")
@@ -129,14 +138,13 @@ def sweep_data_to_point_tf_data(
         detected_sine_args = extract_single_tone_information_vvi(
             waveform,
             approx_freq=ref_frequency,
-            error_percentage=5.0,
         )
 
         detected_amplitude = detected_sine_args["amplitude"]
         detected_phase = detected_sine_args["phase"]
 
         # 计算幅值比和相位差（相对于参考信号）
-        amp_ratio = detected_amplitude / ref_amplitude if ref_amplitude > 0 else 0.0
+        amp_ratio = detected_amplitude / ref_amplitude
         phase_shift = detected_phase - ref_phase
 
         # 归一化相位差到 [-π, π] 区间
@@ -209,6 +217,9 @@ def plot_transfer_function_discrete_distribution(
         ... )
         ```
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.plot_transfer_function_discrete_distribution")
+
     if not plot_tf_results:
         logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
@@ -329,9 +340,7 @@ def plot_transfer_function_discrete_distribution(
     # 7. 保存图片（如果指定了路径）
     if save_path is not None:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
-        logger.info(f"图片已保存至: {save_path}")
-
-    logger.info("传递函数空间分布图绘制完成")
+        logger.info(f"离散分布图已保存至: {save_path}")
 
     return fig, (ax1, ax2)
 
@@ -386,6 +395,9 @@ def plot_transfer_function_interpolated_distribution(
         ... )
         ```
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.plot_transfer_function_interpolated_distribution")
+
     if not plot_tf_results:
         logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
@@ -554,8 +566,6 @@ def plot_transfer_function_interpolated_distribution(
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
         logger.info(f"插值分布图已保存至: {save_path}")
 
-    logger.info("传递函数插值空间分布图绘制完成")
-
     return fig, (ax1, ax2)
 
 
@@ -605,6 +615,9 @@ def plot_transfer_function_instantaneous_field(
         ... )
         ```
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.plot_transfer_function_instantaneous_field")
+
     if not plot_tf_results:
         logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
@@ -733,8 +746,6 @@ def plot_transfer_function_instantaneous_field(
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
         logger.info(f"瞬时声压场分布图已保存至: {save_path}")
 
-    logger.info("瞬时声压场分布图绘制完成")
-
     return fig, ax
 
 
@@ -790,6 +801,9 @@ def plot_waveform(
         >>> plt.show()
         ```
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.plot_waveform")
+
     logger.info("开始绘制Waveform时域波形图")
 
     # 验证输入
@@ -918,8 +932,6 @@ def plot_waveform(
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
         logger.info(f"波形图已保存至: {save_path}")
 
-    logger.info("Waveform时域波形图绘制完成")
-
     return fig, ax
 
 
@@ -963,6 +975,9 @@ def plot_sweep_waveforms(
         >>> print(f"所有波形图已保存至: {output_folder}")
         ```
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.plot_sweep_waveforms")
+
     from datetime import datetime
     from pathlib import Path
 
@@ -1100,6 +1115,9 @@ def plot_sweepdata_as_single_waveform(
         ... )
         ```
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.plot_sweepdata_as_single_waveform")
+
     logger.info("开始绘制SweepData的融合波形图")
 
     # 验证输入

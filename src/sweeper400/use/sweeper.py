@@ -340,8 +340,11 @@ class SweeperCore:
                     "ai_channels不能为空，必须至少包含一个元素"
                 )
             sweep_ai_channel = ai_channels[0]
+            logger.warning("sweep_ai_channel未提供，将使用ai_channels的第一个元素")
         elif sweep_ai_channel not in ai_channels:
             raise ValueError(f"sweep_ai_channel '{sweep_ai_channel}' 必须在ai_channels中")
+        # 存储sweep_ai_channel参数
+        assert sweep_ai_channel is not None
         self._sweep_ai_channel = sweep_ai_channel
 
         # 处理输出波形为None的情况
@@ -500,6 +503,7 @@ class SweeperCore:
             single_channel_waveform = Waveform(
                 input_array=channel_data,
                 sampling_rate=ai_waveform.sampling_rate,
+                channel_names=(self._sweep_ai_channel,),
                 timestamp=ai_waveform.timestamp,
                 id=ai_waveform.id,
                 sine_args=ai_waveform.sine_args,

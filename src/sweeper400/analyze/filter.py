@@ -23,6 +23,7 @@ type FilterSOS = NDArray[np.float64]  # shape: (n_sections, 6)
 def detrend_waveform(
     input_waveform: Waveform,
     detrend_type: str = "linear",
+    axis: int = -1,
 ) -> Waveform:
     """
     去除波形的基线偏移
@@ -34,6 +35,9 @@ def detrend_waveform(
         input_waveform: 输入的时域波形数据（Waveform对象）
         detrend_type: 去趋势类型，可选值为 "linear"（线性去趋势）
             或 "constant"（常数去趋势，即去除均值），默认为 "linear"
+        axis: 去趋势操作的轴，默认为-1（最后一个轴，即时间轴）
+            对于1D数据，此参数无效
+            对于2D数据，默认-1表示对每个通道独立去趋势（沿时间轴）
 
     Returns:
         detrended_waveform: 去除基线偏移后的波形数据（Waveform对象），保留原始元数据
@@ -55,7 +59,8 @@ def detrend_waveform(
     Notes:
         - "linear" 模式会拟合并去除线性趋势（斜率+偏移）
         - "constant" 模式仅去除信号的均值（直流偏移）
-        - 对于多通道数据，会对每个通道分别进行去趋势处理
+        - 对于多通道数据，默认对每个通道独立进行去趋势处理
+        - 使用scipy直接处理2D数据，性能优于手动循环
         - 保留输入波形的所有元数据（采样率、时间戳、ID等）
     """
     # 获取函数日志器
@@ -64,7 +69,7 @@ def detrend_waveform(
     func_logger.debug(
         f"去除波形基线偏移: waveform_shape={input_waveform.shape}, "
         f"sampling_rate={input_waveform.sampling_rate}Hz, "
-        f"detrend_type={detrend_type}"
+        f"detrend_type={detrend_type}, axis={axis}"
     )
 
     # 验证detrend_type参数
@@ -77,21 +82,10 @@ def detrend_waveform(
 
     # 应用去趋势处理
     try:
-        # 处理单通道和多通道数据
-        if input_waveform.ndim == 1:
-            # 单通道数据
-            detrended_data = detrend(input_waveform, type=detrend_type)
-            func_logger.debug("完成单通道数据去趋势处理")
-        elif input_waveform.ndim == 2:
-            # 多通道数据，对每个通道分别去趋势
-            detrended_data = np.zeros_like(input_waveform)
-            for i in range(input_waveform.shape[0]):
-                detrended_data[i, :] = detrend(input_waveform[i, :], type=detrend_type)
-            func_logger.debug(f"完成{input_waveform.shape[0]}通道数据去趋势处理")
-        else:
-            error_msg = f"不支持的数据维度: {input_waveform.ndim}（仅支持1D或2D）"
-            func_logger.error(error_msg)
-            raise ValueError(error_msg)
+        # 直接使用scipy处理1D和2D数据，自动沿指定轴操作
+        # 对于2D数据 (n_channels, n_samples)，axis=-1 表示对每个通道独立去趋势
+        detrended_data = detrend(input_waveform, axis=axis, type=detrend_type)
+        func_logger.debug(f"完成{input_waveform.ndim}维波形去趋势处理")
     except Exception as e:
         error_msg = f"去趋势处理失败: {e}"
         func_logger.error(error_msg, exc_info=True)
@@ -117,32 +111,49 @@ def detrend_waveform(
 def filter_waveform(
     input_waveform: Waveform,
     sos: FilterSOS,
-) -> Waveform:
+    zi: NDArray[np.float64] | None = None,
+    axis: int = -1,
+) -> Waveform | tuple[Waveform, NDArray[np.float64]]:
     """
     对波形应用已设计好的滤波器（单向滤波）
 
     该函数可以重复使用同一个滤波器处理多个波形，提高效率。
+    支持有状态滤波，通过zi参数传递滤波器状态，实现分段连续滤波。
 
     Args:
         input_waveform: 输入的时域波形数据（Waveform对象）
         sos: SOS格式的滤波器系数（由design_highpass_filter等函数生成）
+        zi: 滤波器初始状态，可选。如果提供，则返回最终状态zf
+            形状应为 (n_sections, ..., 2, ...)，其中n_sections是sos的行数
+            对于1D数据: (n_sections, 2)
+            对于2D数据 (n_channels, n_samples): (n_sections, n_channels, 2)
+        axis: 滤波操作的轴，默认为-1（最后一个轴，即时间轴）
+            对于1D数据，此参数无效
+            对于2D数据，默认-1表示对每个通道独立滤波（沿时间轴）
 
     Returns:
-        filtered_waveform: 滤波后的波形数据（Waveform对象），保留原始元数据
+        如果zi为None: 仅返回滤波后的Waveform对象
+        如果zi不为None: 返回元组 (filtered_waveform, zf)，其中zf是最终滤波器状态
 
     Raises:
         RuntimeError: 当滤波过程失败时抛出
+        ValueError: 当zi形状不匹配时抛出
 
     Examples:
         ```python
-        >>> # 对多个信号应用同一个滤波器
-        >>> filtered1 = filter_waveform(signal1, sos)  # noqa
-        >>> filtered2 = filter_waveform(signal2, sos)  # noqa
-        >>> filtered3 = filter_waveform(signal3, sos)  # noqa
+        >>> # 无状态滤波（默认）
+        >>> filtered = filter_waveform(signal, sos)  # noqa
+        >>> # 有状态滤波（传递初始状态）
+        >>> filtered, zf = filter_waveform(signal, sos, zi=zi_initial)  # noqa
+        >>> # 使用最终状态继续滤波下一段数据
+        >>> filtered_next, zf_next = filter_waveform(next_signal, sos, zi=zf)  # noqa
         ```
 
     Notes:
-        - 对于多通道数据，会对每个通道分别进行滤波
+        - 对于多通道数据，默认对每个通道独立进行滤波
+        - 使用scipy直接处理2D数据，性能优于手动循环
+        - 有状态滤波可用于分段处理长数据流，保持滤波连续性
+        - zi参数与scipy.signal.sosfilt的zi参数格式一致
         - 保留输入波形的所有元数据（采样率、时间戳、ID等）
     """
     # 获取函数日志器
@@ -150,26 +161,17 @@ def filter_waveform(
 
     func_logger.debug(
         f"应用滤波器: waveform_shape={input_waveform.shape}, "
-        f"sampling_rate={input_waveform.sampling_rate}Hz"
+        f"sampling_rate={input_waveform.sampling_rate}Hz, "
+        f"zi={'provided' if zi is not None else 'None'}, axis={axis}"
     )
 
     # 应用滤波
     try:
-        # 处理单通道和多通道数据
-        if input_waveform.ndim == 1:
-            # 单通道数据
-            filtered_data = sosfilt(sos, input_waveform)
-            func_logger.debug("完成单通道数据滤波")
-        elif input_waveform.ndim == 2:
-            # 多通道数据，对每个通道分别滤波
-            filtered_data = np.zeros_like(input_waveform)
-            for i in range(input_waveform.shape[0]):
-                filtered_data[i, :] = sosfilt(sos, input_waveform[i, :])
-            func_logger.debug(f"完成{input_waveform.shape[0]}通道数据滤波")
-        else:
-            error_msg = f"不支持的数据维度: {input_waveform.ndim}（仅支持1D或2D）"
-            func_logger.error(error_msg)
-            raise ValueError(error_msg)
+        # 直接使用scipy处理1D和2D数据，自动沿指定轴操作
+        # 对于2D数据 (n_channels, n_samples)，axis=-1 表示对每个通道独立滤波
+        filtered_data, zf = sosfilt(sos, input_waveform, axis=axis, zi=zi)
+        func_logger.debug(f"完成{input_waveform.ndim}维波形滤波")
+
     except Exception as e:
         error_msg = f"滤波过程失败: {e}"
         func_logger.error(error_msg, exc_info=True)
@@ -189,6 +191,8 @@ def filter_waveform(
         f"数据范围: [{np.min(filtered_data):.6f}, {np.max(filtered_data):.6f}]"
     )
 
+    if zi is not None:
+        return filtered_waveform, zf
     return filtered_waveform
 
 
@@ -198,12 +202,14 @@ def filter_sweep_data(
     highcut: PositiveFloat = 20000.0,
     filter_order: PositiveInt = 4,
     trim_samples: int = 0,
+    use_continuous_filtering: bool = True,
 ) -> SweepData:
     """
     对SweepData中的所有波形进行滤波
 
     该函数对SweepData中的所有AI波形进行去趋势、应用带通（单向）滤波、并按需裁剪信号头。
     滤波器只设计一次，然后复用到所有波形上，提高处理效率。
+    支持连续滤波模式，通过传递滤波器状态(zi)在不同波形间保持滤波连续性，减少边缘效应。
 
     Args:
         sweep_data: 原始的扫场测量数据
@@ -212,6 +218,9 @@ def filter_sweep_data(
         filter_order: 高通滤波器阶数，默认为4
         trim_samples: 滤波后切除波形开头的采样点数量，用于消除边缘效应，默认为0
             （一般来说，去趋势+单向滤波方案的边缘效应并不显著，无需切除）
+        use_continuous_filtering: 是否使用连续滤波模式，默认为True
+            - True: 在所有波形间传递滤波器状态(zi)，保持滤波连续性
+            - False: 每个波形独立滤波（传统模式）
 
     Returns:
         滤波后的SweepData，结构与输入完全相同，但所有波形已被滤波
@@ -239,6 +248,8 @@ def filter_sweep_data(
 
     Notes:
         - 滤波器在所有波形间复用，避免重复设计的计算开销
+        - 连续滤波模式通过传递zi状态，将多个波形视为一个连续信号进行滤波
+        - 这可以显著减少波形间的边缘效应，提高滤波稳定性
         - 滤波后的数据结构与原始数据完全相同，可直接用于后续处理
         - trim_samples参数用于消除滤波器的边缘效应，当为0时不进行切除
     """
@@ -253,6 +264,7 @@ def filter_sweep_data(
         f"通带下限={lowcut}Hz, 通带上限={highcut}Hz, "
         f"阶数={filter_order}, "
         f"切除采样点数={trim_samples}, "
+        f"连续滤波模式={use_continuous_filtering}"
     )
 
     # 获取采样率（使用第一个有效波形的采样率）
@@ -267,11 +279,25 @@ def filter_sweep_data(
         output="sos",
         fs=sampling_rate,
     )
-    func_logger.debug("高通滤波器设计完成，将在所有波形复用")
+    n_sections = sos.shape[0]
+    func_logger.debug(f"带通滤波器设计完成，共{n_sections}个二阶节，将在所有波形复用")
 
     # 处理AI数据
     filtered_ai_data_list: list[PointSweepData] = []
     processed_count = 0
+
+    # 初始化滤波器状态（用于连续滤波模式）
+    # 获取第一个波形的形状来确定zi的初始形状
+    first_waveform = ai_data_list[0]["ai_data"][0]
+    if first_waveform.ndim == 1:
+        # 单通道: (n_sections, 2)
+        zi: NDArray[np.float64] | None = np.zeros((n_sections, 2), dtype=np.float64)
+    else:
+        # 多通道: (n_sections, n_channels, 2)
+        n_channels = first_waveform.shape[0]
+        zi = np.zeros((n_sections, n_channels, 2), dtype=np.float64)
+
+    func_logger.debug(f"初始化滤波器状态zi，形状: {zi.shape if zi is not None else None}")
 
     for point_idx, point_data in enumerate(ai_data_list):
         position = point_data["position"]
@@ -284,21 +310,29 @@ def filter_sweep_data(
 
         # 对该点的所有AI波形应用滤波器
         filtered_ai_waveforms: list[Waveform] = []
-        for _, waveform in enumerate(ai_waveforms):
+        for waveform_idx, waveform in enumerate(ai_waveforms):
+            # 去趋势处理
             detrended_wf = detrend_waveform(waveform)
-            filtered_wf = filter_waveform(detrended_wf, sos)
+
+            # 滤波处理（使用连续滤波模式或传统模式）
+            if use_continuous_filtering and zi is not None:
+                # 连续滤波模式：传递zi并接收新的zf
+                filtered_wf, zf = filter_waveform(detrended_wf, sos, zi=zi)
+                zi = zf  # 更新状态供下一个波形使用
+                func_logger.debug(
+                    f"  波形 {waveform_idx}: 使用连续滤波，传递zi状态"
+                )
+            else:
+                # 传统模式：每个波形独立滤波
+                filtered_wf = filter_waveform(detrended_wf, sos)
+                func_logger.debug(f"  波形 {waveform_idx}: 独立滤波")
 
             # 如果需要切除开头的采样点
             if trim_samples > 0:
                 # 切除开头的采样点
-                trimmed_data = filtered_wf[..., trim_samples:]
-                filtered_wf = Waveform(
-                    input_array=trimmed_data,
-                    sampling_rate=filtered_wf.sampling_rate,
-                    timestamp=filtered_wf.timestamp,
-                )
+                filtered_wf = filtered_wf[..., trim_samples:]
 
-            filtered_ai_waveforms.append(filtered_wf)
+            filtered_ai_waveforms.append(filtered_wf)  # noqa
             processed_count += 1
 
         # 创建滤波后的点数据

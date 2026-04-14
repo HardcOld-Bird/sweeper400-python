@@ -49,12 +49,13 @@ def save_compressed_data(
     Raises:
         IOError: 当文件保存失败时
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.save_compressed_data")
+
     save_path = Path(save_path)
 
     # 确保父目录存在
     save_path.parent.mkdir(parents=True, exist_ok=True)
-
-    logger.info(f"开始保存{data_type_name}: {save_path} (压缩级别: {compress_level})")
 
     try:
         # 使用gzip压缩保存
@@ -65,7 +66,7 @@ def save_compressed_data(
         file_size = save_path.stat().st_size
         file_size_mb = file_size / 1024 / 1024
         logger.info(f"{data_type_name}保存成功: {save_path}")
-        logger.info(f"文件大小: {file_size_mb:.2f} MB")
+        logger.info(f"文件大小: {file_size_mb:.2f} MB (压缩级别: {compress_level})")
 
     except Exception as e:
         logger.error(f"{data_type_name}保存失败: {e}", exc_info=True)
@@ -89,12 +90,13 @@ def load_compressed_data(file_path: str | Path, data_type_name: str = "数据") 
         FileNotFoundError: 当文件不存在时
         IOError: 当文件读取失败时
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.load_compressed_data")
+
     file_path = Path(file_path)
 
     if not file_path.exists():
         raise FileNotFoundError(f"{data_type_name}文件不存在: {file_path}")
-
-    logger.info(f"开始加载{data_type_name}: {file_path}")
 
     try:
         # 尝试使用gzip打开（处理压缩文件）
@@ -106,7 +108,7 @@ def load_compressed_data(file_path: str | Path, data_type_name: str = "数据") 
                 with open(file_path, "rb") as f_plain:
                     loaded_data = pickle.load(f_plain)
 
-        logger.info(f"{data_type_name}加载成功")
+        logger.info(f"{data_type_name}加载成功: {file_path}")
         return loaded_data
 
     except Exception as e:
@@ -142,6 +144,9 @@ def save_sweep_data(
         >>> save_sweep_data(sweep_data, "sweep_data.pkl.gz")
         >>> save_sweep_data(sweep_data, "sweep_data.pkl", compress_level=9)
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.save_sweep_data")
+
     # 验证数据格式
     if (
         not isinstance(sweep_data, dict)
@@ -186,6 +191,9 @@ def load_sweep_data(file_path: str | Path) -> SweepData:
         >>> print(f"加载了 {len(ai_data_list)} 个点的数据")
         >>> print(f"输出波形采样率: {ao_data.sampling_rate}Hz")
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.load_sweep_data")
+
     loaded_data = load_compressed_data(file_path, "SweepData")
 
     # 检查数据格式
@@ -194,9 +202,8 @@ def load_sweep_data(file_path: str | Path) -> SweepData:
         and "ai_data_list" in loaded_data
         and "ao_data" in loaded_data
     ):
-        logger.info("检测到SweepData格式数据")
-        ai_data_list = loaded_data["ai_data_list"]  # type: ignore
-        logger.info(f"数据加载成功，共 {len(ai_data_list)} 个点")  # type: ignore
+        ai_data_list = loaded_data["ai_data_list"]
+        logger.info(f"SweepData加载成功，共 {len(ai_data_list)} 个点")
         return loaded_data  # type: ignore
     else:
         raise ValueError(
@@ -225,6 +232,8 @@ def average_sweep_data(
     Raises:
         ValueError: 当输入数据为空或波形维度不一致时
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.average_sweep_data")
 
     # 获取必要参数
     ai_data_list = sweep_data["ai_data_list"]
@@ -351,6 +360,9 @@ def tf_to_comp(
         ValueError: 当频率为 0 或负数，或TFData不是行矩阵/列矩阵时
         ZeroDivisionError: 当某通道对幅值比为 0 时
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.tf_to_comp")
+
     # 使用默认值
     if sine_args is None:
         sine_args = tf_data["sine_args"]
@@ -456,6 +468,9 @@ def comp_to_tf(
         ValueError: 当频率为 0 或负数，或CompData不是行矩阵/列矩阵时
         ZeroDivisionError: 当幅值补偿倍率为 0 时
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.comp_to_tf")
+
     # 使用默认值
     if sine_args is None:
         sine_args = comp_data["sine_args"]
@@ -596,6 +611,9 @@ def average_comp_data_list(comp_data_list: list[CompData]) -> CompData:
         >>> averaged = average_comp_data_list([comp_data_1, comp_data_2, comp_data_3])
         >>> # averaged包含8个通道的平均补偿参数
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.average_comp_data_list")
+
     logger.info(f"开始平均 {len(comp_data_list)} 个CompData")
 
     # 验证输入列表非空
@@ -712,6 +730,9 @@ def average_tf_data_list(tf_data_list: list[TFData]) -> TFData:
         >>> averaged = average_tf_data_list([tf_data_1, tf_data_2, tf_data_3])
         >>> # averaged包含8个通道的平均传递函数参数
     """
+    # 获取函数日志器
+    logger = get_logger(f"{__name__}.average_tf_data_list")
+
     logger.info(f"开始平均 {len(tf_data_list)} 个TFData")
 
     # 验证输入列表非空

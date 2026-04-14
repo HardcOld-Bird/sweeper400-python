@@ -1,5 +1,5 @@
 """
-# 波形生成器模块
+# 波形生成器模块（已弃用）
 
 模块路径：`sweeper400.analyze.waveform_generator`
 

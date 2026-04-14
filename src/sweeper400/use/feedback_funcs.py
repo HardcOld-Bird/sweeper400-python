@@ -25,8 +25,8 @@ _FEEDBACK_AO_CHANNELS = (
 
 def static_uniform_feedback(
         ai_waveform: Waveform | None,
-        currently_playing_feedback_waveform: Waveform | None,
         static_output_waveform: Waveform | None,
+        currently_playing_feedback_waveform: Waveform | None,
         fishnet_tf_data: TFData | None,
 ) -> Waveform:
     """
@@ -40,8 +40,8 @@ def static_uniform_feedback(
 
     Args:
         - ai_waveform: Waveform | None,  # AI 波形
-        - currently_playing_feedback_waveform: Waveform | None,  # 当前播放的反馈波形
         - static_output_waveform: Waveform | None,  # 静态输出波形
+        - currently_playing_feedback_waveform: Waveform | None,  # 当前播放的反馈波形
         - fishnet_tf_data: TFData | None,  # 渔网 TF 数据
 
     Returns:
@@ -71,8 +71,8 @@ def static_uniform_feedback(
 
 def static_diff_feedback(
         ai_waveform: Waveform | None,
-        currently_playing_feedback_waveform: Waveform | None,
         static_output_waveform: Waveform | None,
+        currently_playing_feedback_waveform: Waveform | None,
         fishnet_tf_data: TFData | None,
 ) -> Waveform:
     """
@@ -86,8 +86,8 @@ def static_diff_feedback(
 
     Args:
         - ai_waveform: Waveform | None,  # AI 波形
-        - currently_playing_feedback_waveform: Waveform | None,  # 当前播放的反馈波形
         - static_output_waveform: Waveform | None,  # 静态输出波形
+        - currently_playing_feedback_waveform: Waveform | None,  # 当前播放的反馈波形
         - fishnet_tf_data: TFData | None,  # 渔网 TF 数据
 
     Returns:
