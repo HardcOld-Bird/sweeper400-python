@@ -99,7 +99,7 @@ class MotorController:
             f"细分数={subdivision}, 螺距={pitch}mm, 传动比={transmission_ratio}"
         )
         # 定义类常量
-        self.MAX_POSITION = 313.0  # 最大行程（毫米）
+        self.MAX_POSITION = 313.0  # 最大行程（毫米）（真实极限值约312.7）
 
         # 初始化状态信息
         self._is_initialized = False

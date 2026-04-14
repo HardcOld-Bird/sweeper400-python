@@ -3,7 +3,7 @@
 
 子包路径：`sweeper400.analyze`
 
-包含**信号和数据处理**相关的模块和类。
+包含各种各样的底层工具模块和类，是本项目的底层子包，不应依赖任何其他子包。
 """
 
 # 将模块功能提升至包级别，可缩短外部import语句
@@ -14,12 +14,16 @@ from .basic_sine import (
     get_sine_cycles,
     get_sine_multi_ch,
 )
+from .calib_util_funcs import (
+    load_data_with_fallback,
+    comp_ai_sine_args,
+    comp_multi_ch_wf,
+)
 from .filter import (
     detrend_waveform,
     filter_sweep_data,
     filter_waveform,
 )
-# from .general_signal import calib_multi_ch_wf  # 已弃用，使用 sweeper400.use.comp_ao_multi_ch_wf 替代
 from .my_dtypes import (
     CompData,
     Point2D,
@@ -49,6 +53,9 @@ from .post_process import (
     average_tf_data_list,
     comp_to_tf,
     load_sweep_data,
+    load_compressed_data,
+    save_sweep_data,
+    save_compressed_data,
     tf_to_comp,
 )
 from .waveform_generator import SineGenerator, WaveformGenerator
@@ -80,6 +87,7 @@ __all__ = [
     "tf_to_comp",
     "comp_to_tf",
     "load_sweep_data",
+    "save_sweep_data",
     "filter_sweep_data",
     "plot_transfer_function_discrete_distribution",
     "plot_transfer_function_interpolated_distribution",
@@ -89,6 +97,10 @@ __all__ = [
     "plot_sweepdata_as_single_waveform",
     "filter_waveform",
     "detrend_waveform",
-    # "calib_multi_ch_wf",  # 已弃用，使用 comp_ao_multi_ch_wf 替代
     "sweep_data_to_point_tf_data",
+    "load_compressed_data",
+    "save_compressed_data",
+    "comp_ai_sine_args",
+    "comp_multi_ch_wf",
+    "load_data_with_fallback",
 ]

@@ -8,7 +8,6 @@
 """
 
 import copy
-import pickle
 import threading
 import time
 from collections.abc import Callable
@@ -25,10 +24,12 @@ from ..analyze import (
     SineArgs,
     SweepData,
     Waveform,
+    TFData,
     get_sine_cycles,
     init_sampling_info,
     init_sine_args,
     load_sweep_data,
+    save_sweep_data,
 )
 from ..logger import get_logger
 from ..measure import SingleChasCSIO
@@ -307,7 +308,7 @@ class SweeperCore:
         ao_channels_static: tuple[str, ...] = (),
         ao_channels_feedback: tuple[str, ...] = (),
         static_output_waveform: Waveform | None = None,
-        feedback_function: Callable[[Waveform], Waveform] | None = None,
+        feedback_function: Callable[[Waveform, Waveform, Waveform, TFData], Waveform] | None = None,
         buffer_size_multiplier: PositiveInt = 5,
         point_list: list[Point2D] | None = None,
         chunks_per_point: PositiveInt = 3,
@@ -365,18 +366,13 @@ class SweeperCore:
         # 创建核心组件
         try:
             logger.debug("正在初始化数据采集控制器...")
-            feedback_func = (
-                feedback_function
-                if feedback_function
-                else self._default_feedback_function
-            )
             self._measure_controller = SingleChasCSIO(
                 ai_channels=ai_channels,
                 ao_channels_static=ao_channels_static,
                 ao_channels_feedback=ao_channels_feedback,
                 static_output_waveform=static_output_waveform,
-                feedback_function=feedback_func,
                 export_function=self._data_export_callback,
+                feedback_function=feedback_function,  # 如果为None，SingleChasCSIO使用默认函数
                 buffer_size_multiplier=buffer_size_multiplier,
             )
             logger.debug("数据采集控制器初始化成功")
@@ -443,27 +439,6 @@ class SweeperCore:
             f"稳定时间: {self._SETTLE_TIME}s"
         )
         logger.debug(f"测量点阵: {self._point_list}")
-
-    @staticmethod
-    def _default_feedback_function(ai_waveform: Waveform) -> Waveform:
-        """
-        默认反馈函数
-
-        当用户未提供feedback_function时使用。返回与输入相同shape的全零波形。
-
-        Args:
-            ai_waveform: AI波形数据
-
-        Returns:
-            全零反馈波形
-        """
-        from ..analyze import Waveform
-        feedback_data = np.zeros_like(ai_waveform)
-        return Waveform(
-            feedback_data,
-            sampling_rate=ai_waveform.sampling_rate,
-            channel_names=ai_waveform.channel_names,
-        )
 
     def _data_export_callback(
         self,
@@ -645,7 +620,7 @@ class SweeperCore:
         ao_channels_static: tuple[str, ...] = (),
         ao_channels_feedback: tuple[str, ...] = (),
         static_output_waveform: Waveform | None = None,
-        feedback_function: Callable[[Waveform], Waveform] | None = None,
+        feedback_function: Callable[[Waveform, Waveform, Waveform, TFData], Waveform] | None = None,
         buffer_size_multiplier: PositiveInt = 5,
     ) -> None:
         """
@@ -714,18 +689,13 @@ class SweeperCore:
         # 创建新的数据采集控制器
         try:
             logger.info("正在创建新的数据采集控制器...")
-            feedback_func = (
-                feedback_function
-                if feedback_function
-                else self._default_feedback_function
-            )
             self._measure_controller = SingleChasCSIO(
                 ai_channels=ai_channels,
                 ao_channels_static=ao_channels_static,
                 ao_channels_feedback=ao_channels_feedback,
                 static_output_waveform=static_output_waveform,
-                feedback_function=feedback_func,
                 export_function=self._data_export_callback,
+                feedback_function=feedback_function,  # 如果为None，SingleChasCSIO使用默认函数
                 buffer_size_multiplier=buffer_size_multiplier,
             )
             # 存储新的输出波形
@@ -906,6 +876,9 @@ class SweeperCore:
             # 计算总耗时
             total_time = time.time() - sweep_start_time
 
+            # 停止数据采集任务
+            self._measure_controller.stop()
+
             logger.info("=" * 50)
             logger.info("扫场测量完成！")
             logger.info(f"总测量点数: {self._TOTAL_POINTS_NUM}")
@@ -926,8 +899,9 @@ class SweeperCore:
                     self.save_data(data_save_path)
 
                     # 绘制三种模式的图像
+                    plot_base_path = self._result_folder / "plot"
                     self.plot_data(
-                        self._result_folder,
+                        plot_base_path,
                         lowcut=self._plot_lowcut,
                         highcut=self._plot_highcut,
                     )
@@ -945,11 +919,13 @@ class SweeperCore:
             self._set_state(SweepState.ERROR)
 
         finally:
-            # 停止数据采集任务
-            try:
-                self._measure_controller.stop()
-            except Exception as e:
-                logger.error(f"停止数据采集任务时出错: {e}", exc_info=True)
+            # 只有在非正常完成时才执行清理
+            current_state = self._get_state()
+            if current_state not in (SweepState.COMPLETED,):
+                try:
+                    self._measure_controller.stop()
+                except Exception as e:
+                    logger.error(f"停止数据采集任务时出错: {e}", exc_info=True)
 
     def _wtf_move_to_point(self, point: Point2D) -> bool:
         """
@@ -1216,11 +1192,12 @@ class SweeperCore:
     def save_data(
         self,
         save_path: str | Path,
+        compress_level: int = 6,
     ) -> None:
         """
-        保存测量数据到文件
+        保存测量数据到文件（使用gzip压缩）
 
-        将测量数据和输出波形一起打包保存为字典格式，便于后续处理和分析。
+        将测量数据和输出波形一起打包保存为字典格式，使用gzip压缩以减小文件体积。
 
         数据结构：
         {
@@ -1231,7 +1208,10 @@ class SweeperCore:
         }
 
         Args:
-            save_path: 保存文件的路径（建议使用.pkl扩展名）
+            save_path: 保存文件的路径（建议使用.pkl或.pkl.gz扩展名）
+            compress_level: gzip压缩级别（0-9），默认6。
+                          0表示不压缩，9表示最大压缩。
+                          级别越高压缩率越高但速度越慢。
 
         Raises:
             ValueError: 当没有数据可保存时
@@ -1242,23 +1222,8 @@ class SweeperCore:
         if not self._sweep_data:
             raise ValueError("没有可保存的数据，请先执行扫场测量")
 
-        # 转换为Path对象
-        save_path = Path(save_path)
-
-        # 确保目录存在
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # 使用pickle保存数据包
-        try:
-            with open(save_path, "wb") as f:
-                pickle.dump(self._sweep_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-            logger.info(f"数据保存成功: {save_path}")
-            logger.info(f"文件大小: {save_path.stat().st_size / 1024 / 1024:.2f} MB")
-            logger.info(f"包含 {len(self._sweep_data['ai_data_list'])} 个点的数据")
-        except Exception as e:
-            logger.error(f"数据保存失败: {e}", exc_info=True)
-            raise OSError(f"无法保存数据到 {save_path}: {e}") from e
+        # 使用统一的save_sweep_data函数保存数据
+        save_sweep_data(self._sweep_data, save_path, compresslevel=compress_level)
 
     def plot_data(
         self,

@@ -1,15 +1,14 @@
 """
 # 多通道校准模块
 
-模块路径：`sweeper400.use.caliber`
+模块路径：`sweeper400.calib.caliber`
 
 包含用于多通道输出情形下各通道响应函数校准的类和函数。
 """
 
-import pickle
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -34,81 +33,17 @@ from ..analyze import (
     filter_sweep_data,
     get_sine_cycles,
     get_sine_multi_ch,
+    save_sweep_data,
     tf_to_comp,
+    load_data_with_fallback,
+    comp_ai_sine_args,
+    comp_multi_ch_wf,
 )
 from ..logger import get_logger
 from ..measure import SingleChasCSIO
 
 # 获取模块日志器
 logger = get_logger(__name__)
-
-
-def load_comp_data_with_fallback(
-    explicit_path: str | Path | None,
-    default_path: str | Path,
-    comp_type: Literal["AO", "AI"],
-) -> CompData | None:
-    """
-    智能加载补偿数据文件，支持显式路径、默认路径和回退到None的三级优先级。
-
-    优先级：
-    1. 用户提供的显式路径（如果提供）
-    2. 默认路径下的全局CompData（如果存在）
-    3. 不使用CompData（返回None）
-
-    Args:
-        explicit_path: 用户显式提供的补偿数据文件路径（可选）
-        default_path: 默认的全局补偿数据文件路径
-        comp_type: 补偿类型，"AO"或"AI"，用于日志输出
-
-    Returns:
-        CompData: 成功加载的补偿数据，如果都不存在则返回None
-
-    Raises:
-        FileNotFoundError: 当用户显式提供路径但文件不存在时
-        RuntimeError: 当文件加载失败时
-    """
-    # 优先级1：用户显式提供的路径
-    if explicit_path is not None:
-        explicit_path_obj = Path(explicit_path)
-        if not explicit_path_obj.exists():
-            error_msg = f"{comp_type}补偿数据文件不存在: {explicit_path_obj}"
-            logger.error(error_msg)
-            raise FileNotFoundError(error_msg)
-
-        try:
-            with open(explicit_path_obj, "rb") as f:
-                comp_data: CompData = pickle.load(f)
-            logger.debug(
-                f"成功加载{comp_type}补偿数据（用户显式路径）: {explicit_path_obj}"
-            )
-            return comp_data
-        except Exception as e:
-            error_msg = f"加载{comp_type}补偿数据文件失败: {e}"
-            logger.error(error_msg, exc_info=True)
-            raise RuntimeError(error_msg) from e
-
-    # 优先级2：默认路径下的全局CompData
-    default_path_obj = Path(default_path)
-    if default_path_obj.exists():
-        try:
-            with open(default_path_obj, "rb") as f:
-                comp_data: CompData = pickle.load(f)
-            logger.debug(
-                f"成功加载{comp_type}补偿数据（默认全局路径）: {default_path_obj}"
-            )
-            return comp_data
-        except Exception as e:
-            logger.warning(
-                f"默认{comp_type}补偿数据文件存在但加载失败: {default_path_obj}, "
-                f"错误: {e}，将回退到无补偿模式",
-                exc_info=True,
-            )
-            # 继续回退到优先级3
-
-    # 优先级3：不使用CompData
-    logger.debug(f"未找到{comp_type}补偿数据，将使用无补偿模式")
-    return None
 
 
 class CaliberSardine:
@@ -298,26 +233,6 @@ class CaliberSardine:
                 # 设置标志，通知主循环停止等待
                 self._chunk_collection_complete = True
 
-    @staticmethod
-    def _feedback_function(ai_waveform: Waveform) -> Waveform:
-        """
-        反馈函数（CaliberSardine不使用反馈功能）
-
-        返回全0静音波形，因为校准过程不需要反馈控制。
-
-        Args:
-            ai_waveform: AI波形数据
-
-        Returns:
-            全0静音波形
-        """
-        # 返回全0静音波形（与ai_waveform相同shape）
-        silence_data = np.zeros_like(ai_waveform)
-        return Waveform(
-            input_array=silence_data,
-            sampling_rate=ai_waveform.sampling_rate,
-        )
-
     def calibrate(
         self,
         chunks_per_channel: int = 3,
@@ -411,7 +326,6 @@ class CaliberSardine:
             ao_channels_static=(self._ao_channels[0],),  # 只使用第一个AO通道
             ao_channels_feedback=(),  # 校准不使用反馈通道
             static_output_waveform=self._output_waveform,
-            feedback_function=self._feedback_function,
             export_function=self._export_function,
         )
 
@@ -500,8 +414,7 @@ class CaliberSardine:
         # 保存原始SweepData（用于未来追溯）
         raw_sweep_data_path = result_path / "raw_sweep_data.pkl"
         try:
-            with open(raw_sweep_data_path, "wb") as f:
-                pickle.dump(sweep_data, f)
+            save_sweep_data(sweep_data, raw_sweep_data_path)
             logger.info(f"原始SweepData已保存到: {raw_sweep_data_path}")
         except Exception as e:
             logger.error(f"保存原始SweepData失败: {e}", exc_info=True)
@@ -650,8 +563,9 @@ class CaliberSardine:
         # 保存最终的CompData
         final_comp_data_path = result_path / "ai_comp_data.pkl"
         try:
-            with open(final_comp_data_path, "wb") as f:
-                pickle.dump(comp_data, f)
+            from ..analyze.post_process import save_compressed_data
+
+            save_compressed_data(comp_data, final_comp_data_path, 6, "CompData")
             logger.info(f"最终CompData已保存到: {final_comp_data_path}")
         except Exception as e:
             logger.error(f"保存最终CompData失败: {e}", exc_info=True)
@@ -661,14 +575,20 @@ class CaliberSardine:
         logger.info(f"校准流程完成，所有结果已保存到: {result_path}")
         logger.info("=" * 60)
 
-    def save_comp_data(self, save_path: str | Path) -> None:
+    def save_comp_data(
+        self,
+        save_path: str | Path,
+        compress_level: int = 6,
+    ) -> None:
         """
-        保存校准结果到本地文件
+        保存校准结果到本地文件（使用gzip压缩）
 
-        使用pickle序列化将最终补偿数据保存到磁盘。
+        将最终补偿数据序列化并使用gzip压缩保存到磁盘。
 
         Args:
-            save_path: 保存文件的路径（支持字符串或Path对象）
+            save_path: 保存文件的路径（支持字符串或Path对象，建议使用.pkl或.pkl.gz扩展名）
+            compress_level: gzip压缩级别（0-9），默认6。
+                          0表示不压缩，9表示最大压缩。
 
         Raises:
             RuntimeError: 当尚未执行校准时
@@ -677,19 +597,12 @@ class CaliberSardine:
         if self._result_comp_data is None:
             raise RuntimeError("尚未执行校准，无法保存结果")
 
-        # 转换为Path对象
-        save_path = Path(save_path)
+        # 使用post_process模块的通用压缩保存函数
+        from ..analyze.post_process import save_compressed_data
 
-        # 确保父目录存在
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            with open(save_path, "wb") as f:
-                pickle.dump(self._result_comp_data, f)
-            logger.info(f"校准结果已保存到: {save_path}")
-        except Exception as e:
-            logger.error(f"保存校准结果失败: {e}", exc_info=True)
-            raise OSError(f"保存校准结果失败: {e}") from e
+        save_compressed_data(
+            self._result_comp_data, save_path, compress_level, "CompData"
+        )
 
     def plot_comp_data(
         self,
@@ -980,277 +893,6 @@ class CaliberSardine:
         return self._ai_channels
 
 
-def comp_ai_sine_args(
-    sine_args: SineArgs,
-    ai_comp_data: CompData | None,
-    ai_channel_name: str,
-) -> SineArgs:
-    """
-    应用AI通道补偿到正弦波参数
-
-    该函数根据AI通道补偿数据（通常由CaliberSardine生成）对正弦波参数进行补偿，
-    校正传声器之间的差异。如果未提供补偿数据或未找到指定通道的补偿数据，
-    则返回原始的正弦波参数。
-
-    补偿逻辑：
-    - 幅值补偿：补偿后幅值 = 原始幅值 × AI幅值补偿倍率
-    - 相位补偿：补偿后相位 = 原始相位 + AI时间延迟补偿对应的相位
-
-    Args:
-        sine_args: 原始正弦波参数，包含频率、幅值和相位信息
-        ai_comp_data: AI通道补偿数据（CompData格式），如果为None则不进行补偿
-        ai_channel_name: AI通道名称，用于查找对应的补偿参数
-
-    Returns:
-        SineArgs: 补偿后的正弦波参数。如果未找到补偿数据，返回原始参数的副本
-
-    Examples:
-        >>> # 应用补偿
-        >>> original_args = {"frequency": 1000.0, "amplitude": 1.0, "phase": 0.0}
-        >>> ai_comp = load_comp_data("ai_comp_data.pkl")
-        >>> compensated_args = comp_ai_sine_args(original_args, ai_comp, "PXI1Slot2/ai0")
-        >>> # compensated_args 包含补偿后的幅值和相位
-
-        >>> # 未提供补偿数据
-        >>> result = comp_ai_sine_args(original_args, None, "PXI1Slot2/ai0")
-        >>> # result 等于 original_args
-    """
-    # 如果未提供补偿数据，返回原始参数的副本
-    if ai_comp_data is None:
-        return SineArgs(
-            frequency=sine_args["frequency"],
-            amplitude=sine_args["amplitude"],
-            phase=sine_args["phase"],
-        )
-
-    # 查找指定AI通道的补偿数据
-    comp_df = ai_comp_data["comp_dataframe"]
-
-    # 检查AI通道是否在补偿数据中
-    if ai_channel_name not in comp_df.index:
-        logger.debug(f"AI通道 {ai_channel_name} 未找到补偿数据，使用原始参数")
-        return SineArgs(
-            frequency=sine_args["frequency"],
-            amplitude=sine_args["amplitude"],
-            phase=sine_args["phase"],
-        )
-
-    # 获取该通道的补偿参数
-    amp_multiplier = comp_df.loc[ai_channel_name, "amp_multiplier"]
-    time_increment = comp_df.loc[ai_channel_name, "time_increment"]
-
-    # 应用AI通道补偿
-    # 幅值补偿：补偿后幅值 = 原始幅值 × AI幅值补偿倍率
-    compensated_amplitude = sine_args["amplitude"] * amp_multiplier
-
-    # 相位补偿：补偿后相位 = 原始相位 + AI时间延迟补偿对应的相位
-    time_delay_phase = time_increment * 2.0 * np.pi * sine_args["frequency"]
-    compensated_phase = sine_args["phase"] + time_delay_phase
-
-    # 归一化补偿后的相位到 [-π, π] 区间
-    compensated_phase = float(
-        np.arctan2(np.sin(compensated_phase), np.cos(compensated_phase))
-    )
-
-    logger.debug(
-        f"AI通道 {ai_channel_name} 应用补偿: "
-        f"amplitude {sine_args['amplitude']:.6f} -> {compensated_amplitude:.6f}, "
-        f"phase {sine_args['phase']:.6f}rad -> {compensated_phase:.6f}rad"
-    )
-
-    # 返回补偿后的正弦波参数
-    return SineArgs(
-        frequency=sine_args["frequency"],
-        amplitude=float(compensated_amplitude),
-        phase=compensated_phase,
-    )
-
-
-def comp_ao_multi_ch_wf(
-    input_waveform: Waveform,
-    ao_comp_data: CompData | None,
-) -> Waveform:
-    """
-    基于AO补偿数据对多通道波形进行幅值和时间补偿（支持部分补偿）
-
-    该函数接收一个多通道Waveform和AO补偿数据（CompData），
-    根据补偿数据对每个AO通道进行幅值和时间补偿。
-
-    **重要特性**：
-    - 支持部分补偿：输入波形的通道数可以多于CompData中的通道
-    - 对于CompData中存在的通道，应用补偿
-    - 对于CompData中不存在的通道，保持原样（不补偿）
-
-    **重要假设**：
-    - 输入波形的每个通道内容在时间上是首尾相接的（循环信号）
-    - 输入波形的channel_names属性必须已设置，用于匹配补偿数据
-    - 时间补偿通过循环移位实现，遵循"只切割开头，不切割末尾"的原则
-
-    **补偿原理**：
-    - 幅值补偿：输出幅值 = 输入幅值 × 幅值补偿倍率
-    - 时间补偿：根据时间延迟计算采样点延迟，对信号进行循环移位
-      - 采样点延迟 = 时间延迟 × 采样率
-      - 通过np.roll进行循环移位（正延迟向右移，负延迟向左移）
-      - 为确保信号开头不受影响，统一将信号开头部分移到末尾
-
-    Args:
-        input_waveform: 输入的多通道波形（二维数组，每行对应一个通道），
-                       必须设置channel_names属性
-        ao_comp_data: AO补偿数据（CompData格式），如果为None则不进行补偿
-
-    Returns:
-        output_waveform: 补偿后的多通道波形
-
-    Raises:
-        ValueError: 当输入波形不是多通道时
-        ValueError: 当输入波形的channel_names为None时
-        ValueError: 当通道数与channel_names长度不匹配时
-
-    Examples:
-        ```python
-        >>> # 假设有一个多通道白噪声信号
-        >>> noise_data = np.random.randn(8, 10000)  # 8通道，10000采样点
-        >>> ao_channels = ("PXI1Slot2/ao0", "PXI1Slot2/ao1", ...)
-        >>> noise_waveform = Waveform(
-        ...     noise_data,
-        ...     sampling_rate=171500.0,
-        ...     channel_names=ao_channels
-        ... )
-        >>> # 加载补偿数据（假设只包含部分通道）
-        >>> ao_comp_data = load_comp_data_with_fallback(...)
-        >>> # 应用补偿（支持部分补偿）
-        >>> calibrated_waveform = comp_ao_multi_ch_wf(
-        ...     noise_waveform,
-        ...     ao_comp_data,
-        ... )
-        >>> print(calibrated_waveform.shape)  # (8, 10000)
-        ```
-    """
-    # 获取函数日志器
-    logger = get_logger(f"{__name__}.comp_ao_multi_ch_wf")
-
-    # 1. 验证输入波形是多通道
-    if input_waveform.ndim != 2:
-        logger.error(
-            f"输入波形必须是多通道（二维数组），当前维度: {input_waveform.ndim}",
-            exc_info=True,
-        )
-        raise ValueError(
-            f"输入波形必须是多通道（二维数组），当前维度: {input_waveform.ndim}"
-        )
-
-    channels_num = input_waveform.channels_num
-    samples_num = input_waveform.samples_num
-    sampling_rate = input_waveform.sampling_rate
-
-    # 2. 验证channel_names已设置
-    ao_channel_names = input_waveform.channel_names
-    if ao_channel_names is None:
-        logger.error(
-            "输入波形的channel_names属性为None，必须设置通道名称以匹配补偿数据",
-            exc_info=True,
-        )
-        raise ValueError(
-            "输入波形的channel_names属性为None，必须设置通道名称以匹配补偿数据"
-        )
-
-    logger.debug(
-        f"开始多通道波形AO补偿: "
-        f"waveform_shape={input_waveform.shape}, "
-        f"sampling_rate={input_waveform.sampling_rate}Hz, "
-        f"ao_channels={ao_channel_names}"
-    )
-
-    logger.debug(f"输入波形: {channels_num}通道, {samples_num}采样点")
-
-    # 3. 验证通道数一致性
-    if channels_num != len(ao_channel_names):
-        logger.error(
-            f"输入波形通道数({channels_num})与channel_names长度({len(ao_channel_names)})不匹配",
-            exc_info=True,
-        )
-        raise ValueError(
-            f"输入波形通道数({channels_num})与channel_names长度({len(ao_channel_names)})不匹配"
-        )
-
-    # 4. 如果未提供补偿数据，直接返回原始波形的副本
-    if ao_comp_data is None:
-        logger.debug("未提供AO补偿数据，返回原始波形")
-        output_waveform = Waveform(
-            input_array=np.array(input_waveform),
-            sampling_rate=sampling_rate,
-            timestamp=input_waveform.timestamp,
-            id=input_waveform.id,
-            sine_args=input_waveform.sine_args,
-        )
-        return output_waveform
-
-    # 5. 获取补偿数据DataFrame
-    comp_df = ao_comp_data["comp_dataframe"]
-    comp_ao_channels = set(comp_df.index.tolist())
-
-    # 6. 创建输出数组（初始复制输入数据）
-    output_data = np.array(input_waveform)
-
-    # 7. 对每个通道进行补偿（仅对CompData中存在的通道）
-    compensated_count = 0
-    for ch_idx, channel_name in enumerate(ao_channel_names):
-        # 检查该通道是否在补偿数据中
-        if channel_name not in comp_ao_channels:
-            logger.warning(f"通道 {channel_name}: 不在补偿数据中，保持原样")
-            continue
-
-        # 提取补偿参数
-        amp_multiplier = comp_df.loc[channel_name, "amp_multiplier"]
-        time_increment = comp_df.loc[channel_name, "time_increment"]
-
-        logger.debug(
-            f"通道 {channel_name}: 幅值倍率={amp_multiplier:.6f}, "
-            f"时间增量={time_increment * 1e6:.3f}μs"
-        )
-
-        # 7.1 幅值补偿
-        # 输出幅值 = 输入幅值 × 幅值补偿倍率
-        compensated_amplitude = input_waveform[ch_idx, :] * amp_multiplier
-
-        # 7.2 时间补偿（通过循环移位）
-        # 计算采样点延迟（四舍五入以获得整数采样点）
-        # time_increment是时间延迟补偿值（秒）
-        # np.roll的shift参数：正值向右移（延迟），负值向左移（提前）
-        sample_delay = int(np.round(time_increment * sampling_rate))
-
-        logger.debug(
-            f"通道 {channel_name}: 时间增量={time_increment * 1e6:.3f}μs, "
-            f"采样点延迟={sample_delay}"
-        )
-
-        # 使用np.roll进行循环移位
-        # np.roll(array, shift): shift>0向右移，shift<0向左移
-        compensated_signal = np.roll(compensated_amplitude, sample_delay)
-
-        # 存储到输出数组
-        output_data[ch_idx, :] = compensated_signal
-        compensated_count += 1
-
-    logger.debug(f"AO补偿完成: {compensated_count}/{channels_num} 个通道已补偿")
-
-    # 8. 创建输出Waveform对象
-    output_waveform = Waveform(
-        input_array=output_data,
-        sampling_rate=sampling_rate,
-        timestamp=input_waveform.timestamp,
-        id=input_waveform.id,
-        sine_args=input_waveform.sine_args,
-    )
-
-    logger.debug(
-        f"多通道波形AO补偿完成: shape={output_waveform.shape}, "
-        f"channels_num={output_waveform.channels_num}"
-    )
-
-    return output_waveform
-
-
 class CaliberOctopus:
     """
     # 多通道校准类（章鱼模式）
@@ -1392,10 +1034,10 @@ class CaliberOctopus:
 
         # 智能加载AO补偿数据（支持显式路径、默认路径和无补偿三级优先级）
         default_ao_comp_path = Path("storage/calib/calib_result_octopus/ao_comp_data.pkl")
-        loaded_ao_comp_data = load_comp_data_with_fallback(
+        loaded_ao_comp_data = load_data_with_fallback(
             explicit_path=ao_comp_data,
             default_path=default_ao_comp_path,
-            comp_type="AO",
+            data_type="AO补偿数据",
         )
 
         # 生成输出波形
@@ -1407,7 +1049,7 @@ class CaliberOctopus:
         )
 
         # 步骤2：应用补偿（支持部分补偿）
-        self._output_waveform = comp_ao_multi_ch_wf(
+        self._output_waveform = comp_multi_ch_wf(
             sync_waveform,
             loaded_ao_comp_data,
         )
@@ -1530,28 +1172,6 @@ class CaliberOctopus:
             ):
                 # 设置标志，通知主循环停止等待
                 self._chunk_collection_complete = True
-
-    @staticmethod
-    def _feedback_function(ai_waveform: Waveform) -> Waveform:
-        """
-        反馈函数（CaliberOctopus不使用反馈功能）
-
-        返回全0静音波形，因为校准过程不需要反馈控制。
-
-        Args:
-            ai_waveform: AI波形数据
-
-        Returns:
-            全0静音波形
-        """
-        # 返回全0静音波形（与ai_waveform相同shape）
-        import numpy as np
-
-        silence_data = np.zeros_like(ai_waveform)
-        return Waveform(
-            input_array=silence_data,
-            sampling_rate=ai_waveform.sampling_rate,
-        )
 
     def _calculate_comp_data(
         self,
@@ -1740,7 +1360,6 @@ class CaliberOctopus:
             ao_channels_static=self._ao_channels,
             ao_channels_feedback=(),  # 校准不使用反馈通道
             static_output_waveform=self._output_waveform,
-            feedback_function=self._feedback_function,
             export_function=self._export_function,
         )
 
@@ -1921,8 +1540,7 @@ class CaliberOctopus:
             # 保存这次校准的原始SweepData
             sweep_data_path = result_path / f"raw_sweep_data_{calib_idx + 1}.pkl"
             try:
-                with open(sweep_data_path, "wb") as f:
-                    pickle.dump(sweep_data, f)
+                save_sweep_data(sweep_data, sweep_data_path)
                 logger.info(
                     f"第 {calib_idx + 1} 次SweepData已保存到: {sweep_data_path}"
                 )
@@ -2088,8 +1706,11 @@ class CaliberOctopus:
         # 保存最终的CompData
         final_comp_data_path = result_path / "ao_comp_data.pkl"
         try:
-            with open(final_comp_data_path, "wb") as f:
-                pickle.dump(final_comp_data, f)
+            from ..analyze.post_process import save_compressed_data
+
+            save_compressed_data(
+                final_comp_data, final_comp_data_path, 6, "CompData"
+            )
             logger.info(f"最终平均CompData已保存到: {final_comp_data_path}")
         except Exception as e:
             logger.error(f"保存最终CompData失败: {e}", exc_info=True)
@@ -2103,14 +1724,20 @@ class CaliberOctopus:
         logger.info(f"校准流程完成，所有结果已保存到: {result_path}")
         logger.info("=" * 60)
 
-    def save_comp_data(self, save_path: str | Path) -> None:
+    def save_comp_data(
+        self,
+        save_path: str | Path,
+        compresslevel: int = 6,
+    ) -> None:
         """
-        保存校准结果到本地文件
+        保存校准结果到本地文件（使用gzip压缩）
 
-        使用pickle序列化将最终补偿数据保存到磁盘。
+        将最终补偿数据序列化并使用gzip压缩保存到磁盘。
 
         Args:
-            save_path: 保存文件的路径（支持字符串或Path对象）
+            save_path: 保存文件的路径（支持字符串或Path对象，建议使用.pkl或.pkl.gz扩展名）
+            compresslevel: gzip压缩级别（0-9），默认6。
+                          0表示不压缩，9表示最大压缩。
 
         Raises:
             RuntimeError: 当尚未执行校准时
@@ -2118,12 +1745,6 @@ class CaliberOctopus:
         """
         if self._result_averaged_comp_data is None or self._amp_ratio_mean is None:
             raise RuntimeError("尚未执行校准，无法保存结果")
-
-        # 转换为Path对象
-        save_path = Path(save_path)
-
-        # 确保父目录存在
-        save_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 准备保存的数据（只保存最终平均后的补偿数据）
         comp_data: CompData = {
@@ -2134,13 +1755,10 @@ class CaliberOctopus:
             "mean_phase_shift": self._result_averaged_comp_data["mean_phase_shift"],
         }
 
-        try:
-            with open(save_path, "wb") as f:
-                pickle.dump(comp_data, f)
-            logger.info(f"校准结果已保存到: {save_path}")
-        except Exception as e:
-            logger.error(f"保存校准结果失败: {e}", exc_info=True)
-            raise OSError(f"保存校准结果失败: {e}") from e
+        # 使用post_process模块的通用压缩保存函数
+        from ..analyze.post_process import save_compressed_data
+
+        save_compressed_data(comp_data, save_path, compresslevel, "CompData")
 
     def plot_comp_data(
         self,
@@ -2618,10 +2236,10 @@ class CaliberFishNet(CaliberOctopus):
 
         # 智能加载AI补偿数据（优先级：显式路径 > 默认路径 > 无补偿）
         default_ai_comp_path = Path("storage/calib/calib_result_sardine/ai_comp_data.pkl")
-        self._ai_comp_data = load_comp_data_with_fallback(
+        self._ai_comp_data = load_data_with_fallback(
             explicit_path=ai_comp_data,
             default_path=default_ai_comp_path,
-            comp_type="AI",
+            data_type="AI补偿数据",
         )
 
         # 如果成功加载AI补偿数据，记录详细信息
@@ -2862,8 +2480,7 @@ class CaliberFishNet(CaliberOctopus):
             # 保存这次校准的原始SweepData
             sweep_data_path = result_path / f"raw_sweep_data_{calib_idx + 1}.pkl"
             try:
-                with open(sweep_data_path, "wb") as f:
-                    pickle.dump(sweep_data, f)
+                save_sweep_data(sweep_data, sweep_data_path)
                 logger.info(
                     f"第 {calib_idx + 1} 次SweepData已保存到: {sweep_data_path}"
                 )
@@ -2949,14 +2566,20 @@ class CaliberFishNet(CaliberOctopus):
         logger.info(f"校准流程完成，所有结果已保存到: {result_path}")
         logger.info("=" * 60)
 
-    def save_tf_data(self, save_path: str | Path) -> None:
+    def save_tf_data(
+        self,
+        save_path: str | Path,
+        compresslevel: int = 6,
+    ) -> None:
         """
-        保存校准结果到本地文件
+        保存校准结果到本地文件（使用gzip压缩）
 
-        使用pickle序列化将最终传递函数数据保存到磁盘。
+        将最终传递函数数据序列化并使用gzip压缩保存到磁盘。
 
         Args:
-            save_path: 保存文件的路径（支持字符串或Path对象）
+            save_path: 保存文件的路径（支持字符串或Path对象，建议使用.pkl或.pkl.gz扩展名）
+            compresslevel: gzip压缩级别（0-9），默认6。
+                          0表示不压缩，9表示最大压缩。
 
         Raises:
             RuntimeError: 当尚未执行校准时
@@ -2965,19 +2588,12 @@ class CaliberFishNet(CaliberOctopus):
         if self._result_averaged_tf_data is None:
             raise RuntimeError("尚未执行校准，无法保存结果")
 
-        # 转换为Path对象
-        save_path = Path(save_path)
+        # 使用post_process模块的通用压缩保存函数
+        from ..analyze.post_process import save_compressed_data
 
-        # 确保父目录存在
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            with open(save_path, "wb") as f:
-                pickle.dump(self._result_averaged_tf_data, f)
-            logger.info(f"最终平均TFData已保存到: {save_path}")
-        except Exception as e:
-            logger.error(f"保存最终平均TFData失败: {e}", exc_info=True)
-            raise OSError(f"保存最终平均TFData失败: {e}") from e
+        save_compressed_data(
+            self._result_averaged_tf_data, save_path, compresslevel, "TFData"
+        )
 
     @property
     def result_averaged_tf_data(self) -> TFData | None:
@@ -3273,12 +2889,12 @@ class PowerTester:
         self._ao_channel = ao_channel
         self._ao_comp_data_path = ao_comp_data
 
-        # 尝试使用_load_comp_data_with_fallback加载ao_comp_data（必须成功）
+        # 尝试使用load_data_with_fallback加载ao_comp_data（必须成功）
         default_ao_comp_path = Path("storage/calib/calib_result_octopus/ao_comp_data.pkl")
-        loaded_ao_comp_data = load_comp_data_with_fallback(
+        loaded_ao_comp_data = load_data_with_fallback(
             explicit_path=ao_comp_data,
             default_path=default_ao_comp_path,
-            comp_type="AO",
+            data_type="AO补偿数据",
         )
 
         if loaded_ao_comp_data is None:

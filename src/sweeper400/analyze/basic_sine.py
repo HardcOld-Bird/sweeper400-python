@@ -223,7 +223,7 @@ def get_sine_multi_ch(
     - 复数的模长作为幅值乘子
     - 复数的相位作为相位加子
 
-    这是波形生成的第一步，生成的波形可以通过 comp_ao_multi_ch_wf 函数进行补偿。
+    这是波形生成的第一步，生成的波形可以通过 comp_multi_ch_wf 函数进行补偿。
 
     Args:
         sampling_info: 采样信息，包含采样率和采样点数
@@ -242,7 +242,7 @@ def get_sine_multi_ch(
     Examples:
         ```python
         >>> # 生成8通道同步正弦波形（所有通道相同）
-        >>> sampling_info = init_sampling_info(171500.0, 85750)
+        >>> sampling_info = init_sampling_info(171500.0, 85750)  # noqa
         >>> sine_args = init_sine_args(3430.0, 0.01, 0.0)
         >>> ao_channels = ("PXI1Slot2/ao0", "PXI1Slot2/ao1", ...)
         >>> multi_ch_waveform = get_sine_multi_ch(sampling_info, sine_args, ao_channels)
@@ -295,7 +295,7 @@ def get_sine_multi_ch(
             adjusted_sine_args = init_sine_args(
                 frequency=sine_args["frequency"],
                 amplitude=adjusted_amplitude,
-                phase=adjusted_phase,
+                phase=adjusted_phase,  # noqa
             )
 
             # 生成该通道的波形

@@ -5,18 +5,11 @@
 反馈函数接收 AI 波形数据，返回 AO 反馈波形数据。
 
 反馈函数接口约定：
-- 输入：9 通道 Waveform（AI 数据）
+- 输入：补偿正弦参数字典、当前播放的反馈波形、静态输出波形、渔网 TF 数据
 - 输出：8 通道 Waveform（AO 反馈数据）
 """
 
-from pathlib import Path
-
-from ..analyze import Waveform, init_sampling_info, init_sine_args
-from ..analyze.basic_sine import get_sine_multi_ch
-from .caliber import comp_ao_multi_ch_wf, load_comp_data_with_fallback
-
-# 默认校准文件路径（全局默认 AO 补偿数据）
-_DEFAULT_AO_COMP_PATH = Path("storage/calib/calib_result_octopus/ao_comp_data.pkl")
+from ..analyze import Waveform, init_sine_args, get_sine_multi_ch, SineArgs, TFData
 
 # 8 个 AO 反馈通道名称
 _FEEDBACK_AO_CHANNELS = (
@@ -30,8 +23,12 @@ _FEEDBACK_AO_CHANNELS = (
     "PXI1Slot6/ao1",
 )
 
-
-def silent_feedback(ai_waveform: Waveform) -> Waveform:
+def static_uniform_feedback(
+        ai_waveform: Waveform | None,
+        currently_playing_feedback_waveform: Waveform | None,
+        static_output_waveform: Waveform | None,
+        fishnet_tf_data: TFData | None,
+) -> Waveform:
     """
     固定 8 通道反馈函数（原型版本）
 
@@ -42,61 +39,42 @@ def silent_feedback(ai_waveform: Waveform) -> Waveform:
     实际的反馈逻辑（基于 AI 数据生成 AO 输出）将在后续版本中实现。
 
     Args:
-        ai_waveform: 9 通道 AI 波形数据（当前被忽略）
+        - ai_waveform: Waveform | None,  # AI 波形
+        - currently_playing_feedback_waveform: Waveform | None,  # 当前播放的反馈波形
+        - static_output_waveform: Waveform | None,  # 静态输出波形
+        - fishnet_tf_data: TFData | None,  # 渔网 TF 数据
 
     Returns:
-        8 通道 AO 反馈波形（已应用补偿）
+        8 通道 AO 反馈波形
 
     Note:
         - 波形参数（频率、幅值、相位、采样率、采样点数）硬编码在函数体内
-        - 使用 storage/calib/calib_result_octopus/ao_comp_data.pkl 作为默认补偿数据
-        - 如果补偿文件不存在，将使用无补偿模式
     """
     # 从输入波形获取采样信息（保持与 AI 相同的采样率）
-    sampling_info = ai_waveform.sampling_info
+    sampling_info = currently_playing_feedback_waveform.sampling_info
 
     # 硬编码的正弦波参数（可根据需要手动修改）
     sine_args = init_sine_args(
         frequency=3430.0,  # 频率：3430 Hz
-        amplitude=0.0,  # 幅值：0.0 V
+        amplitude=0.02,  # 幅值：0.02 V
         phase=0.0,  # 初始相位：0 rad
     )
 
-    complex_amps = (
-        0.0 + 0.0j,  # AO1
-        0.0 + 0.0j,  # AO2
-        0.0 + 0.0j,  # AO3
-        0.0 + 0.0j,  # AO4
-        0.0 + 0.0j,  # AO5
-        0.0 + 0.0j,  # AO6
-        0.0 + 0.0j,  # AO7
-        0.0 + 0.0j,  # AO8
-    )
-
     # 创建 8 通道正弦波形
-    base_waveform = get_sine_multi_ch(
+    feedback_waveform = get_sine_multi_ch(
         sampling_info=sampling_info,
         sine_args=sine_args,
         channel_names=_FEEDBACK_AO_CHANNELS,
-        complex_amps=complex_amps,
     )
 
-    # 加载 AO 补偿数据
-    ao_comp_data = load_comp_data_with_fallback(
-        explicit_path=None,
-        default_path=_DEFAULT_AO_COMP_PATH,
-        comp_type="AO",
-    )
+    return feedback_waveform
 
-    # 应用 AO 补偿
-    compensated_waveform = comp_ao_multi_ch_wf(
-        input_waveform=base_waveform,
-        ao_comp_data=ao_comp_data,
-    )
-
-    return compensated_waveform
-
-def static_uniform_feedback(ai_waveform: Waveform) -> Waveform:
+def static_diff_feedback(
+        ai_waveform: Waveform | None,
+        currently_playing_feedback_waveform: Waveform | None,
+        static_output_waveform: Waveform | None,
+        fishnet_tf_data: TFData | None,
+) -> Waveform:
     """
     固定 8 通道反馈函数（原型版本）
 
@@ -107,7 +85,10 @@ def static_uniform_feedback(ai_waveform: Waveform) -> Waveform:
     实际的反馈逻辑（基于 AI 数据生成 AO 输出）将在后续版本中实现。
 
     Args:
-        ai_waveform: 9 通道 AI 波形数据（当前被忽略）
+        - ai_waveform: Waveform | None,  # AI 波形
+        - currently_playing_feedback_waveform: Waveform | None,  # 当前播放的反馈波形
+        - static_output_waveform: Waveform | None,  # 静态输出波形
+        - fishnet_tf_data: TFData | None,  # 渔网 TF 数据
 
     Returns:
         8 通道 AO 反馈波形（已应用补偿）
@@ -118,72 +99,7 @@ def static_uniform_feedback(ai_waveform: Waveform) -> Waveform:
         - 如果补偿文件不存在，将使用无补偿模式
     """
     # 从输入波形获取采样信息（保持与 AI 相同的采样率）
-    sampling_info = ai_waveform.sampling_info
-
-    # 硬编码的正弦波参数（可根据需要手动修改）
-    sine_args = init_sine_args(
-        frequency=3430.0,  # 频率：3430 Hz
-        amplitude=0.03,  # 幅值：0.5 V
-        phase=0.0,  # 初始相位：0 rad
-    )
-
-    complex_amps = (
-        1.0 + 0.0j,  # AO1
-        1.0 + 0.0j,  # AO2
-        1.0 + 0.0j,  # AO3
-        1.0 + 0.0j,  # AO4
-        1.0 + 0.0j,  # AO5
-        1.0 + 0.0j,  # AO6
-        1.0 + 0.0j,  # AO7
-        1.0 + 0.0j,  # AO8
-    )
-
-    # 创建 8 通道正弦波形
-    base_waveform = get_sine_multi_ch(
-        sampling_info=sampling_info,
-        sine_args=sine_args,
-        channel_names=_FEEDBACK_AO_CHANNELS,
-        complex_amps=complex_amps,
-    )
-
-    # 加载 AO 补偿数据
-    ao_comp_data = load_comp_data_with_fallback(
-        explicit_path=None,
-        default_path=_DEFAULT_AO_COMP_PATH,
-        comp_type="AO",
-    )
-
-    # 应用 AO 补偿
-    compensated_waveform = comp_ao_multi_ch_wf(
-        input_waveform=base_waveform,
-        ao_comp_data=ao_comp_data,
-    )
-
-    return compensated_waveform
-
-def static_diff_feedback(ai_waveform: Waveform) -> Waveform:
-    """
-    固定 8 通道反馈函数（原型版本）
-
-    该函数接收 9 通道 AI 波形，但**不使用** AI 数据。
-    相反，它创建一个固定的 8 通道波形，应用 AO 补偿后返回。
-
-    这是第一个反馈函数原型，用于测试和验证反馈机制。
-    实际的反馈逻辑（基于 AI 数据生成 AO 输出）将在后续版本中实现。
-
-    Args:
-        ai_waveform: 9 通道 AI 波形数据（当前被忽略）
-
-    Returns:
-        8 通道 AO 反馈波形（已应用补偿）
-
-    Note:
-        - 波形参数（频率、幅值、相位、采样率、采样点数）硬编码在函数体内
-        - 使用 storage/calib/calib_result_octopus/ao_comp_data.pkl 作为默认补偿数据
-        - 如果补偿文件不存在，将使用无补偿模式
-    """
-    # 从输入波形获取采样信息（保持与 AI 相同的采样率）
-    sampling_info = ai_waveform.sampling_info
+    sampling_info = currently_playing_feedback_waveform.sampling_info
 
     # 硬编码的正弦波参数（可根据需要手动修改）
     sine_args = init_sine_args(
@@ -204,24 +120,11 @@ def static_diff_feedback(ai_waveform: Waveform) -> Waveform:
     )
 
     # 创建 8 通道正弦波形
-    base_waveform = get_sine_multi_ch(
+    feedback_waveform = get_sine_multi_ch(
         sampling_info=sampling_info,
         sine_args=sine_args,
         channel_names=_FEEDBACK_AO_CHANNELS,
         complex_amps=complex_amps,
     )
 
-    # 加载 AO 补偿数据
-    ao_comp_data = load_comp_data_with_fallback(
-        explicit_path=None,
-        default_path=_DEFAULT_AO_COMP_PATH,
-        comp_type="AO",
-    )
-
-    # 应用 AO 补偿
-    compensated_waveform = comp_ao_multi_ch_wf(
-        input_waveform=base_waveform,
-        ao_comp_data=ao_comp_data,
-    )
-
-    return compensated_waveform
+    return feedback_waveform

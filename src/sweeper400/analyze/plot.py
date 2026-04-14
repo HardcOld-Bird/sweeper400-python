@@ -344,7 +344,7 @@ def plot_transfer_function_interpolated_distribution(
     interpolation_method: str = "cubic",
     grid_resolution: int = 100,
     save_path: str | None = None,
-    show_measurement_points: bool = True,
+    show_measurement_points: bool = False,
 ) -> tuple[Figure, tuple[Axes, Axes]]:
     """
     绘制传递函数的插值空间分布图（解决相位周期性问题）
@@ -566,7 +566,7 @@ def plot_transfer_function_instantaneous_field(
     interpolation_method: str = "cubic",
     grid_resolution: int = 100,
     save_path: str | None = None,
-    show_measurement_points: bool = True,
+    show_measurement_points: bool = False,
 ) -> tuple[Figure, Axes]:
     """
     绘制瞬时声压场分布图

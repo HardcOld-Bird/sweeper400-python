@@ -7,10 +7,13 @@
 主要包含按位平均、传递函数计算等数据分析功能。
 """
 
+import gzip
 import pickle
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
 
 from ..logger import get_logger
 from .my_dtypes import (
@@ -26,15 +29,143 @@ from .my_dtypes import (
 logger = get_logger(__name__)
 
 
-# 加载测量数据的工具函数
-def load_sweep_data(file_path: str | Path) -> SweepData:
+def save_compressed_data(
+    data: Any,
+    save_path: str | Path,
+    compress_level: int = 6,
+    data_type_name: str = "数据",
+) -> None:
     """
-    从文件加载测量数据
+    通用压缩数据保存函数（内部使用）
 
-    加载由Sweeper.save_data()保存的测量数据。
+    将任意Python对象序列化并使用gzip压缩保存到磁盘。
 
     Args:
-        file_path: 数据文件的路径（.pkl文件）
+        data: 要保存的数据对象
+        save_path: 保存文件的路径
+        compress_level: gzip压缩级别（0不压缩-9固实压缩），默认6
+        data_type_name: 数据类型名称（用于日志输出）
+
+    Raises:
+        IOError: 当文件保存失败时
+    """
+    save_path = Path(save_path)
+
+    # 确保父目录存在
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"开始保存{data_type_name}: {save_path} (压缩级别: {compress_level})")
+
+    try:
+        # 使用gzip压缩保存
+        with gzip.open(save_path, "wb", compresslevel=compress_level) as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        # 计算并显示文件大小
+        file_size = save_path.stat().st_size
+        file_size_mb = file_size / 1024 / 1024
+        logger.info(f"{data_type_name}保存成功: {save_path}")
+        logger.info(f"文件大小: {file_size_mb:.2f} MB")
+
+    except Exception as e:
+        logger.error(f"{data_type_name}保存失败: {e}", exc_info=True)
+        raise OSError(f"无法保存{data_type_name}到 {save_path}: {e}") from e
+
+
+def load_compressed_data(file_path: str | Path, data_type_name: str = "数据") -> Any:
+    """
+    通用压缩数据加载函数（内部使用）
+
+    从文件加载使用gzip压缩保存的数据。自动检测文件是否为gzip压缩格式。
+
+    Args:
+        file_path: 数据文件的路径
+        data_type_name: 数据类型名称（用于日志输出和错误信息）
+
+    Returns:
+        加载的数据对象
+
+    Raises:
+        FileNotFoundError: 当文件不存在时
+        IOError: 当文件读取失败时
+    """
+    file_path = Path(file_path)
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"{data_type_name}文件不存在: {file_path}")
+
+    logger.info(f"开始加载{data_type_name}: {file_path}")
+
+    try:
+        # 尝试使用gzip打开（处理压缩文件）
+        with gzip.open(file_path, "rb") as f:
+            try:
+                loaded_data = pickle.load(f)
+            except (gzip.BadGzipFile, OSError):
+                # 如果不是gzip格式，使用普通方式打开
+                with open(file_path, "rb") as f_plain:
+                    loaded_data = pickle.load(f_plain)
+
+        logger.info(f"{data_type_name}加载成功")
+        return loaded_data
+
+    except Exception as e:
+        logger.error(f"{data_type_name}加载失败: {e}", exc_info=True)
+        raise OSError(f"无法从 {file_path} 加载{data_type_name}: {e}") from e
+
+
+def save_sweep_data(
+    sweep_data: SweepData,
+    save_path: str | Path,
+    compresslevel: int = 6,
+) -> None:
+    """
+    保存SweepData到文件（支持gzip压缩）
+
+    将SweepData序列化并保存到磁盘，使用gzip压缩以减小文件体积。
+    压缩级别可调，默认为6（平衡压缩率和速度）。
+
+    Args:
+        sweep_data: 要保存的SweepData字典，包含：
+            - "ai_data_list": List[PointSweepData]
+            - "ao_data": Waveform
+        save_path: 保存文件的路径（建议使用.pkl或.pkl.gz扩展名）
+        compresslevel: gzip压缩级别（0-9），默认6。
+                      0表示不压缩，9表示最大压缩。
+                      级别越高压缩率越高但速度越慢。
+
+    Raises:
+        ValueError: 当sweep_data格式不正确时
+        IOError: 当文件保存失败时
+
+    Examples:
+        >>> save_sweep_data(sweep_data, "sweep_data.pkl.gz")
+        >>> save_sweep_data(sweep_data, "sweep_data.pkl", compress_level=9)
+    """
+    # 验证数据格式
+    if (
+        not isinstance(sweep_data, dict)
+        or "ai_data_list" not in sweep_data
+        or "ao_data" not in sweep_data
+    ):
+        raise ValueError(
+            "sweep_data格式不正确，期望包含'ai_data_list'和'ao_data'键的字典"
+        )
+
+    save_compressed_data(
+        sweep_data, save_path, compresslevel, "SweepData"
+    )
+    logger.info(f"包含 {len(sweep_data['ai_data_list'])} 个点的数据")
+
+
+def load_sweep_data(file_path: str | Path) -> SweepData:
+    """
+    从文件加载测量数据（支持gzip压缩和非压缩文件）
+
+    加载由save_sweep_data()保存的测量数据。自动检测文件是否为gzip压缩格式。
+
+    Args:
+        file_path: 数据文件的路径（.pkl或.pkl.gz文件）
 
     Returns:
         SweepData: 包含以下键的字典：
@@ -49,41 +180,28 @@ def load_sweep_data(file_path: str | Path) -> SweepData:
         ValueError: 当数据格式不正确时
 
     Examples:
-        >>> sweep_data = load_sweep_data("sweep_data.pkl")
+        >>> sweep_data = load_sweep_data("sweep_data.pkl.gz")
         >>> ai_data_list = sweep_data["ai_data_list"]
         >>> ao_data = sweep_data["ao_data"]
         >>> print(f"加载了 {len(ai_data_list)} 个点的数据")
         >>> print(f"输出波形采样率: {ao_data.sampling_rate}Hz")
     """
-    file_path = Path(file_path)
+    loaded_data = load_compressed_data(file_path, "SweepData")
 
-    if not file_path.exists():
-        raise FileNotFoundError(f"数据文件不存在: {file_path}")
-
-    logger.info(f"开始加载测量数据: {file_path}")
-
-    try:
-        with open(file_path, "rb") as f:
-            loaded_data = pickle.load(f)
-
-        # 检查数据格式
-        if (
-            isinstance(loaded_data, dict)
-            and "ai_data_list" in loaded_data
-            and "ao_data" in loaded_data
-        ):
-            logger.info("检测到SweepData格式数据")
-            ai_data_list = loaded_data["ai_data_list"]  # type: ignore
-            logger.info(f"数据加载成功，共 {len(ai_data_list)} 个点")  # type: ignore
-            return loaded_data  # type: ignore
-        else:
-            raise ValueError(
-                "数据格式不正确，期望包含'ai_data_list'和'ao_data'键的字典"
-            )
-
-    except Exception as e:
-        logger.error(f"数据加载失败: {e}", exc_info=True)
-        raise OSError(f"无法从 {file_path} 加载数据: {e}") from e
+    # 检查数据格式
+    if (
+        isinstance(loaded_data, dict)
+        and "ai_data_list" in loaded_data
+        and "ao_data" in loaded_data
+    ):
+        logger.info("检测到SweepData格式数据")
+        ai_data_list = loaded_data["ai_data_list"]  # type: ignore
+        logger.info(f"数据加载成功，共 {len(ai_data_list)} 个点")  # type: ignore
+        return loaded_data  # type: ignore
+    else:
+        raise ValueError(
+            "数据格式不正确，期望包含'ai_data_list'和'ao_data'键的字典"
+        )
 
 
 def average_sweep_data(
