@@ -8,7 +8,7 @@
 
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -39,8 +39,8 @@ from ..analyze import (
     comp_ai_sine_args,
     comp_multi_ch_wf,
 )
-from ..logger import get_logger
 from ..measure import SingleChasCSIO
+from ..logger import get_logger
 
 # 获取模块日志器
 logger = get_logger(__name__)
@@ -1128,7 +1128,7 @@ class CaliberOctopus:
             input_array=multi_channel_data,
             sampling_rate=self._sampling_info["sampling_rate"],
             timestamp=self._output_waveform.timestamp,
-            id=self._output_waveform.id,
+            waveform_id=self._output_waveform.waveform_id,
             sine_args=self._sine_args,
         )
 
@@ -2314,13 +2314,8 @@ class CaliberFishNet(CaliberOctopus):
             ao_channel_name = self._ao_channels[ao_channel_idx]  # 真实AO通道名
             ai_waveform = point_data["ai_data"][0]  # 已平均的多通道AI波形
 
-            # 检查AI波形是否为多通道
-            if ai_waveform.ndim != 2:
-                raise ValueError(
-                    f"期望多通道AI波形（2D数组），但得到{ai_waveform.ndim}维数组"
-                )
-
-            num_ai_channels = ai_waveform.shape[0]
+            # 验证AI波形通道数
+            num_ai_channels = ai_waveform.channels_num
             if num_ai_channels != len(self._ai_channels):
                 raise ValueError(
                     f"AI波形通道数({num_ai_channels})与配置的AI通道数({len(self._ai_channels)})不一致"

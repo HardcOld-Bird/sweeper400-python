@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TypedDict
 
 import numpy as np
+from matplotlib import pyplot as plt
 
 from ..analyze import (
     Point2D,
@@ -30,10 +31,14 @@ from ..analyze import (
     init_sine_args,
     load_sweep_data,
     save_sweep_data,
+    plot_transfer_function_discrete_distribution,
+    plot_transfer_function_instantaneous_field,
+    plot_transfer_function_interpolated_distribution,
+    sweep_data_to_point_tf_data,
 )
-from ..logger import get_logger
 from ..measure import SingleChasCSIO
 from ..move import MotorController
+from ..logger import get_logger
 
 # 获取模块日志器
 logger = get_logger(__name__)
@@ -70,13 +75,13 @@ def get_square_grid(
 
     Examples:
         >>> # 生成从(0,0)到(20,20)的网格，点间距10mm
-        >>> grid = get_square_grid(0, 20, 0, 20, 10.0)
-        >>> len(grid)
+        >>> test_grid = get_square_grid(0, 20, 0, 20, 10.0)
+        >>> len(test_grid)
         9
 
         >>> # 支持反向扫场：从(20,20)到(0,0)
-        >>> grid = get_square_grid(20, 0, 20, 0, 10.0)
-        >>> len(grid)
+        >>> test_grid = get_square_grid(20, 0, 20, 0, 10.0)
+        >>> len(test_grid)
         9
     """
     # 计算X和Y方向的距离和点数
@@ -174,8 +179,8 @@ def get_line_grid(  # 暂停维护
 
     Examples:
         >>> # 生成从(0,0)到(100,0)的5个点
-        >>> line = get_line_grid(0, 0, 100, 0, 5)
-        >>> len(line)
+        >>> test_line_grid = get_line_grid(0, 0, 100, 0, 5)
+        >>> len(test_line_grid)
         5
     """
 
@@ -288,14 +293,6 @@ class SweeperCore:
     # 清理资源（自动清理内部控制器）
     sweeper.cleanup()
     ```
-
-    Attributes:
-        ai_channels: AI通道名称元组
-        ao_channels_static: 静态AO通道名称元组
-        static_output_waveform: 静态输出波形对象
-        point_list: 测量点阵列表
-        chunks_per_point: 每个点采集的chunk数量，默认3
-        settle_time: 电机停止后的稳定等待时间（秒），默认0.5秒
     """
 
     # 获取类日志器
@@ -351,10 +348,10 @@ class SweeperCore:
         if static_output_waveform is None:
             # 创建默认波形
             sampling_info = init_sampling_info(10000.0, 5000)
-            sine_args = init_sine_args(frequency=1000.0, amplitude=0.01, phase=0.0)
+            sine_args = init_sine_args(frequency=1000.0, amplitude=0.0, phase=0.0)
             static_output_waveform = get_sine_cycles(sampling_info, sine_args)
             logger.debug(
-                "未提供输出波形，创建默认波形：1000Hz正弦波，幅值0.01，采样率10kHz"
+                "未提供输出波形，创建默认波形：1000Hz正弦波，幅值0.0，采样率10kHz"
             )
         # 类型断言，静态输出波形不可能为None
         assert static_output_waveform is not None
@@ -484,7 +481,6 @@ class SweeperCore:
             )
             logger.debug(f"初始化点 {point_idx} 的数据存储，位置: {current_position}")
 
-        # 提取sweep_ai_channel对应的单通道数据
         # 获取sweep_ai_channel在ai_channels中的索引
         try:
             channel_idx = self._ai_channels.index(self._sweep_ai_channel)
@@ -493,21 +489,16 @@ class SweeperCore:
             return
 
         # 从多通道波形中提取单通道数据
-        if ai_waveform.ndim == 1:
-            # 如果已经是单通道，直接使用
-            single_channel_waveform = ai_waveform
-        else:
-            # 多通道情况，提取指定通道
-            channel_data = ai_waveform[channel_idx, :]
-            # 创建新的单通道Waveform
-            single_channel_waveform = Waveform(
-                input_array=channel_data,
-                sampling_rate=ai_waveform.sampling_rate,
-                channel_names=(self._sweep_ai_channel,),
-                timestamp=ai_waveform.timestamp,
-                id=ai_waveform.id,
-                sine_args=ai_waveform.sine_args,
-            )
+        # Waveform统一使用2D格式 (n_channels, n_samples)
+        channel_data = ai_waveform[channel_idx, :]
+        single_channel_waveform = Waveform(
+            input_array=channel_data,
+            sampling_rate=ai_waveform.sampling_rate,
+            channel_names=(self._sweep_ai_channel,),
+            timestamp=ai_waveform.timestamp,
+            waveform_id=ai_waveform.waveform_id,
+            sine_args=ai_waveform.sine_args,
+        )
 
         # 存储单通道AI数据
         self._sweep_data["ai_data_list"][point_idx]["ai_data"].append(single_channel_waveform)
@@ -789,7 +780,11 @@ class SweeperCore:
             self.reset()
 
             # 存储结果文件夹路径
-            self._result_folder = Path(result_folder) if result_folder is not None else None
+            # 这些属性仅用于传递给wtf，因此暂不在init中定义
+            if result_folder is not None:
+                self._result_folder = Path(result_folder)
+            else:
+                self._result_folder = None
 
             # 存储绘图参数
             self._plot_lowcut = lowcut
@@ -1157,7 +1152,7 @@ class SweeperCore:
             >>> # 现在可以使用plot_data方法进行绘图
             >>> sweeper.plot_data("output.png")
         """
-        file_path = Path(file_path)
+        file_path: Path = Path(file_path)
 
         if not file_path.exists():
             raise FileNotFoundError(f"数据文件不存在: {file_path}")
@@ -1190,13 +1185,13 @@ class SweeperCore:
         Returns:
             SweepData: 测量数据副本
         """
-        data_copy = copy.deepcopy(self._sweep_data)
-        return data_copy  # noqa
+        data_copy: SweepData = copy.deepcopy(self._sweep_data)
+        return data_copy
 
     def save_data(
         self,
         save_path: str | Path,
-        compress_level: int = 6,
+        compress_level: int = 9,
     ) -> None:
         """
         保存测量数据到文件（使用gzip压缩）
@@ -1213,7 +1208,7 @@ class SweeperCore:
 
         Args:
             save_path: 保存文件的路径（建议使用.pkl或.pkl.gz扩展名）
-            compress_level: gzip压缩级别（0-9），默认6。
+            compress_level: gzip压缩级别（0-9），默认9。
                           0表示不压缩，9表示最大压缩。
                           级别越高压缩率越高但速度越慢。
 
@@ -1268,13 +1263,6 @@ class SweeperCore:
             >>> # 生成：output/plot_discrete.png, output/plot_interpolated.png, output/plot_instantaneous.png
             ```
         """
-        from ..analyze import (
-            plot_transfer_function_discrete_distribution,
-            plot_transfer_function_instantaneous_field,
-            plot_transfer_function_interpolated_distribution,
-            sweep_data_to_point_tf_data,
-        )
-
         # 验证数据存在
         if not self._sweep_data or not self._sweep_data["ai_data_list"]:
             raise ValueError("没有可绘制的数据，请先执行扫场测量")
@@ -1310,8 +1298,6 @@ class SweeperCore:
         ]
 
         # 依次绘制三种模式的图像
-        import matplotlib.pyplot as plt
-
         for mode_name, plot_func in plot_configs:
             try:
                 save_path_with_mode = save_path_base.parent / f"{save_path_base.name}_{mode_name}.png"

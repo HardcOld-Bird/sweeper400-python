@@ -230,8 +230,8 @@ class SingleChasCSIO:
         self._queue_lock = threading.Lock()  # 保护队列的锁
 
         # 私有属性 - 数据缓冲和控制
-        self._ai_queue: deque[np.ndarray] = deque()  # 存储AI数据的双端队列
-        self._feedback_ao_queue: deque[np.ndarray] = deque()  # 存储已写入的feedback波形副本
+        self._ai_queue: deque[Any] = deque()  # 存储AI数据的双端队列
+        self._feedback_ao_queue: deque[Waveform] = deque()  # 存储已写入的feedback波形副本
         self._chunks_num = 0
         self._enable_export = False
 
@@ -370,7 +370,7 @@ class SingleChasCSIO:
         channels_num = len(channel_names)
 
         # 情况1：单通道输入，需要多通道输出
-        if waveform.channels_num == 1 and channels_num > 1:
+        if waveform.is_single_channel and channels_num > 1:
             logger.info(f"静态输出波形为单通道，使用get_sine_multi_ch扩展为 {channels_num} 通道")
 
             # 检查是否有sine_args，用于重新生成多通道波形
@@ -385,23 +385,15 @@ class SingleChasCSIO:
                 sine_args=waveform.sine_args,
                 channel_names=channel_names,
                 timestamp=waveform.timestamp,
-                id=waveform.id,
+                waveform_id=waveform.waveform_id,
             )
 
         # 情况2：多通道输入，检查通道数匹配
         elif waveform.channels_num == channels_num:
+            multi_ch_waveform = waveform
             # 确保波形有channel_names
-            if waveform.channel_names is None:
-                multi_ch_waveform = Waveform(
-                    np.array(waveform),
-                    sampling_rate=waveform.sampling_rate,
-                    channel_names=channel_names,
-                    timestamp=waveform.timestamp,
-                    id=waveform.id,
-                    sine_args=waveform.sine_args,
-                )
-            else:
-                multi_ch_waveform = waveform
+            if multi_ch_waveform.channel_names is None:
+                multi_ch_waveform.channel_names = channel_names
 
         # 情况3：通道数不匹配
         else:
@@ -626,7 +618,7 @@ class SingleChasCSIO:
         if task_type == "static":
             self._write_ao_task_waveform_static()
         else:  # feedback
-            self._write_ao_task_waveform_feedback_silence()
+            self._write_ao_task_waveform_feedback_silent()
 
         logger.info(f"{task_type.capitalize()} AO任务创建成功")
 
@@ -648,33 +640,34 @@ class SingleChasCSIO:
 
         try:
             # 提取波形数据
+            # Waveform统一使用2D格式 (n_channels, n_samples)
             waveform_data = np.asarray(self._static_output_waveform)
 
             # 根据通道数处理数据格式
             # nidaqmx要求：单通道任务使用1D数组，多通道任务使用2D数组
             channels_num = len(self._ao_channels_static)
-            if channels_num == 1 and waveform_data.ndim == 2:
+            if channels_num == 1:
                 # 单通道任务：将2D数组squeeze成1D数组
                 waveform_data = waveform_data.squeeze(axis=0)
-                logger.debug(f"单通道任务，将波形数据从2D squeeze为1D: {waveform_data.shape}")
+                logger.debug(f"单通道任务，将波形数据squeeze为1D: {waveform_data.shape}")
 
             # 从缓冲区起始位置（position 0）覆盖写入新波形。
             # 这是在 ALLOW_REGENERATION 模式下更新波形的标准做法：
             # 由于再生模式不释放缓冲区空间，默认的 CURRENT_WRITE_POSITION
             # 会永远阻塞（CurrWritePos 一直停在缓冲区末尾），而 FIRST_SAMPLE
             # 则直接覆盖写入，下一个再生周期即生效。
-            self._ao_task_static.out_stream.relative_to = WriteRelativeTo.FIRST_SAMPLE  # type: ignore
-            self._ao_task_static.out_stream.offset = 0  # type: ignore
+            self._ao_task_static.out_stream.relative_to = WriteRelativeTo.FIRST_SAMPLE
+            self._ao_task_static.out_stream.offset = 0
 
             # 写入数据
-            self._ao_task_static.write(waveform_data, auto_start=False)  # type: ignore
+            self._ao_task_static.write(waveform_data, auto_start=False)
             logger.debug(f"成功写入静态波形数据，shape: {waveform_data.shape}")
 
         except Exception as e:
             logger.error(f"静态波形写入失败: {e}", exc_info=True)
             raise
 
-    def _write_ao_task_waveform_feedback_silence(self):
+    def _write_ao_task_waveform_feedback_silent(self):
         """
         向Feedback AO任务写入全0静音波形
 
@@ -692,31 +685,34 @@ class SingleChasCSIO:
             samples_num = self._static_output_waveform.samples_num * 2  # 2个chunk
             channels_num = len(self._ao_channels_feedback)
 
+            # 统一使用2D格式创建静音波形 (channels_num, samples_num)
+            silent_waveform = np.zeros((channels_num, samples_num), dtype=np.float64)
+
+            # 根据通道数决定写入格式
             if channels_num == 1:
-                # 单通道：一维数组
-                silence_waveform = np.zeros(samples_num, dtype=np.float64)
+                # 单通道任务：squeeze为1D数组
+                write_data = silent_waveform.squeeze(axis=0)
             else:
-                # 多通道：二维数组
-                silence_waveform = np.zeros(
-                    (channels_num, samples_num), dtype=np.float64
-                )
+                # 多通道任务：保持2D数组
+                write_data = silent_waveform
 
             # 写入数据
-            self._ao_task_feedback.write(silence_waveform, auto_start=False)  # type: ignore
+            self._ao_task_feedback.write(write_data, auto_start=False)
 
             # 缓存写入的波形副本（按chunk分割存储）
             chunk_samples = self._static_output_waveform.samples_num
             for i in range(2):  # 2个chunk
                 start_idx = i * chunk_samples
                 end_idx = (i + 1) * chunk_samples
-                if channels_num == 1:
-                    chunk_data = silence_waveform[start_idx:end_idx].copy()
-                else:
-                    chunk_data = silence_waveform[:, start_idx:end_idx].copy()
-                self._feedback_ao_queue.append(chunk_data)
+                sliced_silent_waveform = Waveform(
+                    input_array=silent_waveform[:, start_idx:end_idx].copy(),
+                    sampling_rate=self._sampling_info["sampling_rate"],
+                    channel_names=self._ao_channels_feedback,
+                )
+                self._feedback_ao_queue.append(sliced_silent_waveform)
 
             logger.debug(
-                f"成功写入静音波形数据（2个chunk），shape: {silence_waveform.shape}"
+                f"成功写入静音波形数据（2个chunk），shape: {sliced_silent_waveform.shape}"  # noqa
             )
 
         except Exception as e:
@@ -735,25 +731,21 @@ class SingleChasCSIO:
 
         try:
             # 提取波形数据
-            channels_num = len(self._ao_channels_feedback)
+            # Waveform统一使用2D格式 (n_channels, n_samples)
+            channels_num = self.ao_channels_num_feedback
 
-            if feedback_waveform.ndim == 1:
-                # 单通道：直接使用
-                waveform_data = np.asarray(feedback_waveform)
+            if channels_num == 1:
+                # 单通道任务：提取一维数组
+                waveform_data = np.asarray(feedback_waveform[0, :])
             else:
-                # 多通道
-                if channels_num == 1:
-                    # 单通道任务：提取一维数组
-                    waveform_data = np.asarray(feedback_waveform[0, :])
-                else:
-                    # 多通道任务：使用二维数组
-                    waveform_data = np.asarray(feedback_waveform)
+                # 多通道任务：使用二维数组
+                waveform_data = np.asarray(feedback_waveform)
 
             # 写入数据
-            self._ao_task_feedback.write(waveform_data, auto_start=False)  # type: ignore
+            self._ao_task_feedback.write(waveform_data, auto_start=False)
 
-            # 缓存写入的波形副本
-            self._feedback_ao_queue.append(waveform_data.copy())
+            # 缓存写入的波形副本（保持2D格式）
+            self._feedback_ao_queue.append(feedback_waveform.copy())
 
             logger.debug(f"成功写入反馈波形数据，shape: {waveform_data.shape}")
 
@@ -766,7 +758,7 @@ class SingleChasCSIO:
         task_handle,
         every_n_samples_event_type,
         number_of_samples,
-        callback_data,  # type: ignore
+        callback_data,
     ):
         """
         AI 任务回调函数
@@ -788,7 +780,7 @@ class SingleChasCSIO:
                 return 0
 
             # 读取原始数据
-            data = self._ai_task.read(  # type: ignore
+            data = self._ai_task.read(  # noqa
                 number_of_samples_per_channel=number_of_samples
             )
 
@@ -842,18 +834,13 @@ class SingleChasCSIO:
                 # 在锁外处理数据（避免长时间持有锁）
                 try:
                     # 任务1：数据预处理
-                    # 将原始数据转换为numpy数组并确保是2D格式
                     # 注意：nidaqmx的read()方法：
                     # - 单通道时返回1D列表 [sample1, sample2, ...]
                     # - 多通道时返回2D列表 [[ch1_sample1, ch1_sample2, ...], [ch2_sample1, ch2_sample2, ...]]
-                    data_array = np.array(raw_data, dtype=np.float64)
-                    if data_array.ndim == 1:
-                        # 单通道数据，reshape为(1, samples)
-                        data_array = data_array.reshape(1, -1)
-
-                    # 整体转换为 Waveform 对象，添加通道名称元数据
+                    # 将原始数据转换为 Waveform 对象，添加通道名称元数据
+                    # Waveform.__new__ 会自动将1D数据reshape为(1, samples)的2D格式
                     ai_waveform = Waveform(
-                        input_array=data_array,
+                        input_array=raw_data,
                         sampling_rate=self._sampling_info["sampling_rate"],
                         channel_names=self._ai_channels,
                     )
@@ -872,17 +859,12 @@ class SingleChasCSIO:
                                     self._ai_comp_data,
                                 )
 
-                            # ===== 获取当前播放的feedback波形 =====
-                            # logger.warning("开始获取当前播放的feedback波形")
-                            # 从队列中取出最旧的波形（当前正在播放的）
+                            # ===== 获取对应feedback波形 =====
+                            # logger.warning("开始获取对应feedback波形")
+                            # 从队列中取出最旧的波形（采集时正在播放的）
                             currently_playing: Waveform | None = None
                             if self._feedback_ao_queue:
-                                oldest_data = self._feedback_ao_queue.popleft()
-                                currently_playing = Waveform(
-                                    input_array=oldest_data,
-                                    sampling_rate=self._sampling_info["sampling_rate"],
-                                    channel_names=self._ao_channels_feedback,
-                                )
+                                currently_playing = self._feedback_ao_queue.popleft()
 
                             # ===== 调用反馈函数 =====
                             # logger.warning("开始调用反馈函数")

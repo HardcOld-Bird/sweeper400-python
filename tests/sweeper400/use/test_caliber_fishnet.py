@@ -12,7 +12,7 @@ from sweeper400.analyze import (
     init_sampling_info,
     init_sine_args,
 )
-from calib.caliber import CaliberFishNet
+from use.caliber import CaliberFishNet
 
 
 class TestCaliberFishNet:

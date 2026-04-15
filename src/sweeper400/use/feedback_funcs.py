@@ -9,7 +9,7 @@
 - 输出：8 通道 Waveform（AO 反馈数据）
 """
 
-from ..analyze import Waveform, init_sine_args, get_sine_multi_ch, SineArgs, TFData
+from ..analyze import Waveform, init_sine_args, get_sine_multi_ch, TFData
 
 # 8 个 AO 反馈通道名称
 _FEEDBACK_AO_CHANNELS = (

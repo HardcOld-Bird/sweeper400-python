@@ -19,7 +19,6 @@ from ..logger import get_logger
 from .my_dtypes import (
     CompData,
     PointSweepData,
-    SineArgs,
     SweepData,
     TFData,
     Waveform,
@@ -50,9 +49,9 @@ def save_compressed_data(
         IOError: 当文件保存失败时
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.save_compressed_data")
+    f_logger = get_logger(f"{__name__}.save_compressed_data")
 
-    save_path = Path(save_path)
+    save_path: Path = Path(save_path)
 
     # 确保父目录存在
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,11 +64,11 @@ def save_compressed_data(
         # 计算并显示文件大小
         file_size = save_path.stat().st_size
         file_size_mb = file_size / 1024 / 1024
-        logger.info(f"{data_type_name}保存成功: {save_path}")
-        logger.info(f"文件大小: {file_size_mb:.2f} MB (压缩级别: {compress_level})")
+        f_logger.info(f"{data_type_name}保存成功: {save_path}")
+        f_logger.info(f"文件大小: {file_size_mb:.2f} MB (压缩级别: {compress_level})")
 
     except Exception as e:
-        logger.error(f"{data_type_name}保存失败: {e}", exc_info=True)
+        f_logger.error(f"{data_type_name}保存失败: {e}", exc_info=True)
         raise OSError(f"无法保存{data_type_name}到 {save_path}: {e}") from e
 
 
@@ -91,9 +90,9 @@ def load_compressed_data(file_path: str | Path, data_type_name: str = "数据") 
         IOError: 当文件读取失败时
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.load_compressed_data")
+    f_logger = get_logger(f"{__name__}.load_compressed_data")
 
-    file_path = Path(file_path)
+    file_path: Path = Path(file_path)
 
     if not file_path.exists():
         raise FileNotFoundError(f"{data_type_name}文件不存在: {file_path}")
@@ -108,11 +107,11 @@ def load_compressed_data(file_path: str | Path, data_type_name: str = "数据") 
                 with open(file_path, "rb") as f_plain:
                     loaded_data = pickle.load(f_plain)
 
-        logger.info(f"{data_type_name}加载成功: {file_path}")
+        f_logger.info(f"{data_type_name}加载成功: {file_path}")
         return loaded_data
 
     except Exception as e:
-        logger.error(f"{data_type_name}加载失败: {e}", exc_info=True)
+        f_logger.error(f"{data_type_name}加载失败: {e}", exc_info=True)
         raise OSError(f"无法从 {file_path} 加载{data_type_name}: {e}") from e
 
 
@@ -142,10 +141,10 @@ def save_sweep_data(
 
     Examples:
         >>> save_sweep_data(sweep_data, "sweep_data.pkl.gz")
-        >>> save_sweep_data(sweep_data, "sweep_data.pkl", compress_level=9)
+        >>> save_sweep_data(sweep_data, "sweep_data.pkl", compress_level=6)
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.save_sweep_data")
+    f_logger = get_logger(f"{__name__}.save_sweep_data")
 
     # 验证数据格式
     if (
@@ -160,7 +159,7 @@ def save_sweep_data(
     save_compressed_data(
         sweep_data, save_path, compresslevel, "SweepData"
     )
-    logger.info(f"包含 {len(sweep_data['ai_data_list'])} 个点的数据")
+    f_logger.info(f"包含 {len(sweep_data['ai_data_list'])} 个点的数据")
 
 
 def load_sweep_data(file_path: str | Path) -> SweepData:
@@ -186,13 +185,13 @@ def load_sweep_data(file_path: str | Path) -> SweepData:
 
     Examples:
         >>> sweep_data = load_sweep_data("sweep_data.pkl.gz")
-        >>> ai_data_list = sweep_data["ai_data_list"]
+        >>> test_ai_data_list = sweep_data["ai_data_list"]
         >>> ao_data = sweep_data["ao_data"]
         >>> print(f"加载了 {len(ai_data_list)} 个点的数据")
         >>> print(f"输出波形采样率: {ao_data.sampling_rate}Hz")
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.load_sweep_data")
+    f_logger = get_logger(f"{__name__}.load_sweep_data")
 
     loaded_data = load_compressed_data(file_path, "SweepData")
 
@@ -203,7 +202,7 @@ def load_sweep_data(file_path: str | Path) -> SweepData:
         and "ao_data" in loaded_data
     ):
         ai_data_list = loaded_data["ai_data_list"]
-        logger.info(f"SweepData加载成功，共 {len(ai_data_list)} 个点")
+        f_logger.info(f"SweepData加载成功，共 {len(ai_data_list)} 个点")
         return loaded_data  # type: ignore
     else:
         raise ValueError(
@@ -218,10 +217,7 @@ def average_sweep_data(
     对SweepData中的所有波形进行按位相加并取平均
 
     该函数对SweepData中的所有AI波形进行按位相加并取平均，
-    以减少随机噪声的影响。支持单通道和多通道波形。
-
-    对于单通道波形（1D数组），返回1D平均波形。
-    对于多通道波形（2D数组），对每个通道分别平均，返回2D平均波形。
+    以减少随机噪声的影响。Waveform统一使用2D格式，对所有通道分别平均。
 
     Args:
         sweep_data: 原始的扫场测量数据
@@ -233,7 +229,7 @@ def average_sweep_data(
         ValueError: 当输入数据为空或波形维度不一致时
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.average_sweep_data")
+    f_logger = get_logger(f"{__name__}.average_sweep_data")
 
     # 获取必要参数
     ai_data_list = sweep_data["ai_data_list"]
@@ -244,72 +240,38 @@ def average_sweep_data(
     first_waveform = ai_data_list[0]["ai_data"][0]
     sampling_rate = first_waveform.sampling_rate
     samples_num = first_waveform.samples_num
-    is_multi_channel = first_waveform.ndim == 2
+    channels_num= first_waveform.channels_num
 
-    if is_multi_channel:
-        num_channels = first_waveform.shape[0]
-        logger.debug(f"检测到多通道波形，通道数: {num_channels}")
-    else:
-        logger.debug("检测到单通道波形")
+    f_logger.debug(f"波形信息: 通道数={channels_num}, 采样点数={samples_num}")
 
     averaged_ai_data_list = []
     # 遍历每个测量点
-    for _, point_data in enumerate(ai_data_list):
+    for point_data in ai_data_list:
         # 将所有波形数据按位相加
         ai_waveforms = point_data["ai_data"]
 
-        if is_multi_channel:
-            # 多通道情况：对每个通道分别平均
-            # 初始化累加数组 (num_channels, samples_num)
-            summed_data = np.zeros((num_channels, samples_num), dtype=np.float64)
+        # 初始化累加数组 (channels_num, samples_num)
+        summed_data = np.zeros((channels_num, samples_num), dtype=np.float64)
 
-            for wf in ai_waveforms:
-                # 验证波形维度
-                if wf.ndim != 2 or wf.shape[0] != num_channels:
-                    raise ValueError(
-                        f"波形维度不一致：期望 (num_channels={num_channels}, samples_num={samples_num})，"
-                        f"实际 shape={wf.shape}"
-                    )
-                summed_data += wf
+        for wf in ai_waveforms:
+            # 验证波形维度
+            if wf.channels_num != channels_num:
+                raise ValueError(
+                    f"波形通道数不一致：期望 {channels_num} 通道，"
+                    f"实际 {wf.channels_num} 通道"
+                )
+            summed_data += wf
 
-            # 取平均
-            averaged_data = summed_data / len(ai_waveforms)
+        # 取平均
+        averaged_data = summed_data / len(ai_waveforms)
 
-            # 创建平均后的Waveform对象（保留channel_names元数据）
-            averaged_ai_waveform = Waveform(
-                input_array=averaged_data,
-                sampling_rate=sampling_rate,
-                timestamp=ai_waveforms[0].timestamp,
-                channel_names=ai_waveforms[0].channel_names
-                if hasattr(ai_waveforms[0], "channel_names")
-                else None,
-            )
-        else:
-            # 单通道情况：直接平均
-            summed_data = np.zeros(samples_num, dtype=np.float64)
-
-            for wf in ai_waveforms:
-                # 验证波形维度
-                if wf.ndim == 2:
-                    # 如果是2D但只有1个通道，提取第一个通道
-                    if wf.shape[0] == 1:
-                        summed_data += wf[0, :]
-                    else:
-                        raise ValueError(
-                            f"波形维度不一致：期望单通道，实际 shape={wf.shape}"
-                        )
-                else:
-                    summed_data += wf
-
-            # 取平均
-            averaged_data = summed_data / len(ai_waveforms)
-
-            # 创建平均后的Waveform对象
-            averaged_ai_waveform = Waveform(
-                input_array=averaged_data,
-                sampling_rate=sampling_rate,
-                timestamp=ai_waveforms[0].timestamp,
-            )
+        # 创建平均后的Waveform对象（保留channel_names元数据）
+        averaged_ai_waveform = Waveform(
+            input_array=averaged_data,  # noqa
+            sampling_rate=sampling_rate,
+            channel_names=ai_waveforms[0].channel_names,
+            timestamp=ai_waveforms[0].timestamp,
+        )
 
         # 创建平均后的点数据
         averaged_point_data: PointSweepData = {
@@ -324,20 +286,15 @@ def average_sweep_data(
         "ao_data": sweep_data["ao_data"],
     }
 
-    logger.info(
+    f_logger.info(
         f"SweepData平均完成，共处理{len(averaged_ai_data_list)}个测量点，"
-        f"{'多通道' if is_multi_channel else '单通道'}模式"
+        f"{channels_num}通道"
     )
 
     return averaged_sweep_data
 
 
-def tf_to_comp(
-    tf_data: TFData,
-    sine_args: SineArgs | None = None,
-    mean_amp_ratio: float | None = None,
-    mean_phase_shift: float | None = None,
-) -> CompData:
+def tf_to_comp(tf_data: TFData) -> CompData:
     """将传递函数数据转换为补偿数据。
 
     将 :class:`TFData`（绝对传递函数）转换为 :class:`CompData`（相对于平均值的补偿参数）。
@@ -349,9 +306,6 @@ def tf_to_comp(
 
     参数:
         tf_data: 传递函数数据（必须为行矩阵或列矩阵，即仅一行或一列）
-        sine_args: 正弦波参数（可选，如果为None则使用tf_data中的sine_args）
-        mean_amp_ratio: 所有通道对的平均幅值比（可选，如果为None则使用tf_data中的mean_amp_ratio）
-        mean_phase_shift: 所有通道对的平均相位差（可选，如果为None则使用tf_data中的mean_phase_shift）
 
     返回:
         CompData: 补偿数据，包含相对于平均值的幅值补偿倍率和时间延迟补偿值
@@ -361,28 +315,21 @@ def tf_to_comp(
         ZeroDivisionError: 当某通道对幅值比为 0 时
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.tf_to_comp")
+    f_logger = get_logger(f"{__name__}.tf_to_comp")
 
-    # 使用默认值
-    if sine_args is None:
-        sine_args = tf_data["sine_args"]
-    if mean_amp_ratio is None:
-        mean_amp_ratio = tf_data["mean_amp_ratio"]
-    if mean_phase_shift is None:
-        mean_phase_shift = tf_data["mean_phase_shift"]
+    # 从tf_data中提取参数
+    sine_args = tf_data["sine_args"]
+    mean_amp_ratio = tf_data["mean_amp_ratio"]
+    mean_phase_shift = tf_data["mean_phase_shift"]
 
     frequency = sine_args["frequency"]
-
-    if frequency <= 0:
-        logger.error(f"频率必须为正数，收到: {frequency}")
-        raise ValueError(f"频率必须为正数，收到: {frequency}")
 
     # 验证TFData的形状：必须为行矩阵（1行N列）或列矩阵（N行1列）
     tf_df = tf_data["tf_dataframe"]
     n_rows, n_cols = tf_df.shape
 
     if n_rows != 1 and n_cols != 1:
-        logger.error(
+        f_logger.error(
             f"TFData必须为行矩阵（1行N列）或列矩阵（N行1列），实际形状: ({n_rows}, {n_cols})"
         )
         raise ValueError(
@@ -396,7 +343,7 @@ def tf_to_comp(
 
     # 检查是否有幅值比为0的情况
     if np.any(amp_ratios == 0):
-        logger.error("存在幅值比为0的通道对")
+        f_logger.error("存在幅值比为0的通道对")
         raise ZeroDivisionError("存在幅值比为0的通道对")
 
     # 计算幅值补偿倍率
@@ -434,7 +381,7 @@ def tf_to_comp(
         "mean_phase_shift": mean_phase_shift,
     }
 
-    logger.debug(
+    f_logger.debug(
         f"TFData转换为CompData完成，通道数: {len(channel_names)}, "
         f"平均幅值比: {mean_amp_ratio:.6f}, 平均相位差: {mean_phase_shift:.6f}rad"
     )
@@ -442,12 +389,7 @@ def tf_to_comp(
     return comp_data
 
 
-def comp_to_tf(
-    comp_data: CompData,
-    sine_args: SineArgs | None = None,
-    mean_amp_ratio: float | None = None,
-    mean_phase_shift: float | None = None,
-) -> TFData:
+def comp_to_tf(comp_data: CompData) -> TFData:
     """将补偿数据转换回传递函数数据。
 
     这是 :func:`tf_to_comp` 的逆操作：
@@ -457,9 +399,6 @@ def comp_to_tf(
 
     参数:
         comp_data: 补偿数据（必须为行矩阵或列矩阵）
-        sine_args: 正弦波参数（可选，如果为None则使用comp_data中的sine_args）
-        mean_amp_ratio: 所有通道对的平均幅值比（可选，如果为None则使用comp_data中的mean_amp_ratio）
-        mean_phase_shift: 所有通道对的平均相位差（可选，如果为None则使用comp_data中的mean_phase_shift）
 
     返回:
         TFData: 传递函数数据，包含绝对幅值比和相位差
@@ -469,26 +408,19 @@ def comp_to_tf(
         ZeroDivisionError: 当幅值补偿倍率为 0 时
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.comp_to_tf")
+    f_logger = get_logger(f"{__name__}.comp_to_tf")
 
-    # 使用默认值
-    if sine_args is None:
-        sine_args = comp_data["sine_args"]
-    if mean_amp_ratio is None:
-        mean_amp_ratio = comp_data["mean_amp_ratio"]
-    if mean_phase_shift is None:
-        mean_phase_shift = comp_data["mean_phase_shift"]
+    # 从comp_data中提取参数
+    sine_args = comp_data["sine_args"]
+    mean_amp_ratio = comp_data["mean_amp_ratio"]
+    mean_phase_shift = comp_data["mean_phase_shift"]
 
     frequency = sine_args["frequency"]
-
-    if frequency <= 0:
-        logger.error(f"频率必须为正数，收到: {frequency}")
-        raise ValueError(f"频率必须为正数，收到: {frequency}")
 
     # 验证CompData的形状（DataFrame应该只有2列：amp_multiplier和time_increment）
     comp_df = comp_data["comp_dataframe"]
     if comp_df.shape[1] != 2:
-        logger.error(
+        f_logger.error(
             f"CompData的DataFrame应该有2列（amp_multiplier和time_increment），实际列数: {comp_df.shape[1]}"
         )
         raise ValueError(
@@ -501,7 +433,7 @@ def comp_to_tf(
 
     # 检查是否有幅值补偿倍率为0的情况
     if np.any(amp_multipliers == 0):
-        logger.error("存在幅值补偿倍率为0的通道")
+        f_logger.error("存在幅值补偿倍率为0的通道")
         raise ZeroDivisionError("存在幅值补偿倍率为0的通道")
 
     # 计算幅值比（逆运算）
@@ -542,7 +474,7 @@ def comp_to_tf(
             index=channel_names,
             columns=["TF"],  # 列名任意
         )
-        logger.debug(f"检测到AI通道，构建列矩阵TFData: {n_channels}行1列")
+        f_logger.debug(f"检测到AI通道，构建列矩阵TFData: {n_channels}行1列")
     elif "ao" in first_channel and "ai" not in first_channel:
         # AO通道 -> CaliberOctopus -> 行矩阵（1行N列）
         tf_df = pd.DataFrame(
@@ -550,10 +482,10 @@ def comp_to_tf(
             index=["AI"],  # 行名任意（因为AI通道在CaliberOctopus中是固定的）
             columns=channel_names,
         )
-        logger.debug(f"检测到AO通道，构建行矩阵TFData: 1行{n_channels}列")
+        f_logger.debug(f"检测到AO通道，构建行矩阵TFData: 1行{n_channels}列")
     else:
         # 无法判断，默认为列矩阵
-        logger.warning(
+        f_logger.warning(
             f"无法从通道名判断矩阵类型（第一个通道: {channel_names[0]}），默认构建列矩阵"
         )
         tf_df = pd.DataFrame(
@@ -571,7 +503,7 @@ def comp_to_tf(
         "mean_phase_shift": mean_phase_shift,
     }
 
-    logger.debug(
+    f_logger.debug(
         f"CompData转换为TFData完成，通道数: {len(channel_names)}, "
         f"平均幅值比: {mean_amp_ratio:.6f}, 平均相位差: {mean_phase_shift:.6f}rad"
     )
@@ -608,18 +540,18 @@ def average_comp_data_list(comp_data_list: list[CompData]) -> CompData:
         >>> comp_data_1 = {...}  # 第1次测量
         >>> comp_data_2 = {...}  # 第2次测量
         >>> comp_data_3 = {...}  # 第3次测量
-        >>> averaged = average_comp_data_list([comp_data_1, comp_data_2, comp_data_3])
+        >>> averaged = average_comp_data_list([comp_data_1, comp_data_2, comp_data_3])  # noqa
         >>> # averaged包含8个通道的平均补偿参数
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.average_comp_data_list")
+    f_logger = get_logger(f"{__name__}.average_comp_data_list")
 
-    logger.info(f"开始平均 {len(comp_data_list)} 个CompData")
+    f_logger.info(f"开始平均 {len(comp_data_list)} 个CompData")
 
     # 验证输入列表非空
     if not comp_data_list:
         error_msg = "输入的CompData列表为空,无法进行平均"
-        logger.error(error_msg)
+        f_logger.error(error_msg)
         raise ValueError(error_msg)
 
     # 验证所有CompData的comp_dataframe形状一致
@@ -635,14 +567,14 @@ def average_comp_data_list(comp_data_list: list[CompData]) -> CompData:
                 f"CompData列表中第 {idx} 个元素的comp_dataframe形状({current_shape}) "
                 f"与第0个元素的形状({first_shape})不一致"
             )
-            logger.error(error_msg)
+            f_logger.error(error_msg)
             raise ValueError(error_msg)
 
         if current_index != first_index:
             error_msg = (
                 f"CompData列表中第 {idx} 个元素的comp_dataframe索引与第0个元素不一致"
             )
-            logger.error(error_msg)
+            f_logger.error(error_msg)
             raise ValueError(error_msg)
 
     # 将所有CompData的DataFrame按位平均
@@ -653,7 +585,7 @@ def average_comp_data_list(comp_data_list: list[CompData]) -> CompData:
     # 注意：所有DataFrame的index和columns必须一致
     averaged_df = pd.concat(all_dfs).groupby(level=0).mean()
 
-    logger.debug(
+    f_logger.debug(
         f"DataFrame平均完成，通道数: {len(averaged_df)}, "
         f"平均amp_multiplier范围: "
         f"[{averaged_df['amp_multiplier'].min():.6f}, "
@@ -674,13 +606,13 @@ def average_comp_data_list(comp_data_list: list[CompData]) -> CompData:
     # 采样信息和正弦波参数: 假定所有 CompData 一致, 使用第一个
     if "sampling_info" not in comp_data_list[0]:
         error_msg = "平均 CompData 失败: 缺少 sampling_info 字段"
-        logger.error(error_msg)
+        f_logger.error(error_msg)
         raise ValueError(error_msg)
 
     avg_sampling_info = comp_data_list[0]["sampling_info"]
     avg_sine_args = comp_data_list[0]["sine_args"]
 
-    logger.info(
+    f_logger.info(
         f"平均完成: 频率={avg_sine_args['frequency']:.2f}Hz, "
         f"平均mean_amp_ratio={avg_mean_amp_ratio:.6f}, "
         f"平均mean_phase_shift={avg_mean_phase_shift:.6f}rad"
@@ -727,18 +659,18 @@ def average_tf_data_list(tf_data_list: list[TFData]) -> TFData:
         >>> tf_data_1 = {...}  # 第1次测量
         >>> tf_data_2 = {...}  # 第2次测量
         >>> tf_data_3 = {...}  # 第3次测量
-        >>> averaged = average_tf_data_list([tf_data_1, tf_data_2, tf_data_3])
+        >>> averaged = average_tf_data_list([tf_data_1, tf_data_2, tf_data_3])  # noqa
         >>> # averaged包含8个通道的平均传递函数参数
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.average_tf_data_list")
+    f_logger = get_logger(f"{__name__}.average_tf_data_list")
 
-    logger.info(f"开始平均 {len(tf_data_list)} 个TFData")
+    f_logger.info(f"开始平均 {len(tf_data_list)} 个TFData")
 
     # 验证输入列表非空
     if not tf_data_list:
         error_msg = "输入的TFData列表为空,无法进行平均"
-        logger.error(error_msg)
+        f_logger.error(error_msg)
         raise ValueError(error_msg)
 
     # 验证所有TFData的tf_dataframe形状一致
@@ -756,14 +688,14 @@ def average_tf_data_list(tf_data_list: list[TFData]) -> TFData:
                 f"TFData列表中第 {idx} 个元素的tf_dataframe形状({current_shape}) "
                 f"与第0个元素的形状({first_shape})不一致"
             )
-            logger.error(error_msg)
+            f_logger.error(error_msg)
             raise ValueError(error_msg)
 
         if current_index != first_index or current_columns != first_columns:
             error_msg = (
                 f"TFData列表中第 {idx} 个元素的tf_dataframe索引或列名与第0个元素不一致"
             )
-            logger.error(error_msg)
+            f_logger.error(error_msg)
             raise ValueError(error_msg)
 
     # 将所有TFData的DataFrame按位平均
@@ -793,7 +725,7 @@ def average_tf_data_list(tf_data_list: list[TFData]) -> TFData:
     avg_amp_ratios = np.abs(avg_tf_complex)
     avg_phase_shifts = np.angle(avg_tf_complex)
 
-    logger.debug(
+    f_logger.debug(
         f"DataFrame平均完成，通道对数: {averaged_df.size}, "
         f"平均幅值比范围: [{avg_amp_ratios.min():.6f}, {avg_amp_ratios.max():.6f}], "
         f"平均相位差范围: [{avg_phase_shifts.min():.6f}rad, {avg_phase_shifts.max():.6f}rad]"
@@ -810,13 +742,13 @@ def average_tf_data_list(tf_data_list: list[TFData]) -> TFData:
     # 采样信息和正弦波参数: 假定所有 TFData 一致, 使用第一个
     if "sampling_info" not in tf_data_list[0]:
         error_msg = "平均 TFData 失败: 缺少 sampling_info 字段"
-        logger.error(error_msg)
+        f_logger.error(error_msg)
         raise ValueError(error_msg)
 
     avg_sampling_info = tf_data_list[0]["sampling_info"]
     avg_sine_args = tf_data_list[0]["sine_args"]
 
-    logger.info(
+    f_logger.info(
         f"平均完成: 频率={avg_sine_args['frequency']:.2f}Hz, "
         f"平均mean_amp_ratio={avg_mean_amp_ratio:.6f}, "
         f"平均mean_phase_shift={avg_mean_phase_shift:.6f}rad"

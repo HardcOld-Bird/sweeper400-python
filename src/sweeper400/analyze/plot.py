@@ -19,7 +19,7 @@ from scipy.interpolate import griddata
 from ..logger import get_logger
 from .basic_sine import extract_single_tone_information_vvi
 from .filter import filter_sweep_data
-from .my_dtypes import Point2D, SineArgs, init_sine_args, Waveform, SweepData
+from .my_dtypes import Point2D, SineArgs, Waveform, SweepData
 from .post_process import average_sweep_data
 
 
@@ -76,16 +76,17 @@ def sweep_data_to_point_tf_data(
     Examples:
         ```python
         >>> # 假设已有SweepData
-        >>> sweep_data = load_sweep_data("measurement.pkl")  # noqa
+        >>> from analyze import load_sweep_data
+        >>> test_sweep_data = load_sweep_data("measurement.pkl")
         >>> plot_tf_results = sweep_data_to_point_tf_data(sweep_data)
         >>> # 现在可以使用绘图函数
         >>> fig, axes = plot_transfer_function_discrete_distribution(plot_tf_results)
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.sweep_data_to_point_tf_data")
+    f_logger = get_logger(f"{__name__}.sweep_data_to_point_tf_data")
 
-    logger.info("开始将SweepData转换为PointTFData列表")
+    f_logger.info("开始将SweepData转换为PointTFData列表")
 
     # 验证输入数据
     if not sweep_data["ai_data_list"]:
@@ -102,21 +103,21 @@ def sweep_data_to_point_tf_data(
     # 避免幅值为0，影响传递函数计算
     if ref_sine_args["amplitude"] == 0.0:
         ref_amplitude = 1.0
-        logger.warning("ref_sine_args幅值为0，已替换为1")
+        f_logger.warning("ref_sine_args幅值为0，已替换为1")
     else:
         ref_amplitude = ref_sine_args["amplitude"]
 
     ref_frequency = ref_sine_args["frequency"]
     ref_phase = ref_sine_args["phase"]
 
-    logger.info(f"参考信号参数: 频率={ref_frequency}Hz, 幅值={ref_amplitude}, 相位={ref_phase}rad")
+    f_logger.info(f"参考信号参数: 频率={ref_frequency}Hz, 幅值={ref_amplitude}, 相位={ref_phase}rad")
 
     # 1. 对SweepData进行平均
-    logger.debug("步骤1: 对SweepData进行平均")
+    f_logger.debug("步骤1: 对SweepData进行平均")
     averaged_sweep_data = average_sweep_data(sweep_data)
 
     # 2. 对平均后的数据进行滤波
-    logger.debug("步骤2: 对平均后的数据进行滤波")
+    f_logger.debug("步骤2: 对平均后的数据进行滤波")
     filtered_sweep_data = filter_sweep_data(
         averaged_sweep_data,
         lowcut=lowcut,
@@ -126,7 +127,7 @@ def sweep_data_to_point_tf_data(
     )
 
     # 3. 对每个点的波形提取单频信息并计算传递函数
-    logger.debug("步骤3: 提取单频信息并计算传递函数")
+    f_logger.debug("步骤3: 提取单频信息并计算传递函数")
     tf_results: list[PointTFData] = []
 
     for point_data in filtered_sweep_data["ai_data_list"]:
@@ -158,7 +159,7 @@ def sweep_data_to_point_tf_data(
         }
         tf_results.append(point_tf_data)
 
-    logger.info(f"SweepData转换完成，共 {len(tf_results)} 个点的传递函数数据")
+    f_logger.info(f"SweepData转换完成，共 {len(tf_results)} 个点的传递函数数据")
 
     return tf_results
 
@@ -208,23 +209,23 @@ def plot_transfer_function_discrete_distribution(
     Examples:
         ```python
         >>> # 假设已有传递函数计算结果
-        >>> plot_tf_results = calculate_transfer_function(raw_data)  # noqa
-        >>> fig, (ax1, ax2) = plot_transfer_function_discrete_distribution(plot_tf_results)
+        >>> test_plot_tf_results = sweep_data_to_point_tf_data(test_sweep_data)  # noqa
+        >>> test_fig, (ax1, ax2) = plot_transfer_function_discrete_distribution(test_plot_tf_results)
         >>> plt.show()
         >>> # 或者保存图片
-        >>> fig, axes = plot_transfer_function_discrete_distribution(  # noqa
+        >>> test_fig, axes = plot_transfer_function_discrete_distribution(  # noqa
         ...     plot_tf_results, save_path="transfer_function.png"
         ... )
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.plot_transfer_function_discrete_distribution")
+    f_logger = get_logger(f"{__name__}.plot_transfer_function_discrete_distribution")
 
     if not plot_tf_results:
-        logger.error("传递函数结果为空，无法绘图")
+        f_logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
 
-    logger.info(f"绘制 {len(plot_tf_results)} 个点的传递函数分布（方形色块版本）")
+    f_logger.info(f"绘制 {len(plot_tf_results)} 个点的传递函数分布（方形色块版本）")
 
     # 2. 提取数据
     x_coords = np.array([result["position"].x for result in plot_tf_results])
@@ -232,7 +233,7 @@ def plot_transfer_function_discrete_distribution(
     amp_ratios = np.array([result["amp_ratio"] for result in plot_tf_results])
     phase_shifts = np.array([result["phase_shift"] for result in plot_tf_results])
 
-    logger.debug(
+    f_logger.debug(
         f"数据范围: X=[{x_coords.min():.2f}, {x_coords.max():.2f}], "
         f"Y=[{y_coords.min():.2f}, {y_coords.max():.2f}], "
         f"幅值比=[{amp_ratios.min():.4f}, {amp_ratios.max():.4f}], "
@@ -258,7 +259,7 @@ def plot_transfer_function_discrete_distribution(
     block_width = dx * 0.9
     block_height = dy * 0.9
 
-    logger.debug(
+    f_logger.debug(
         f"网格间距: dx={dx:.2f}, dy={dy:.2f}, "
         f"色块尺寸: {block_width:.2f}x{block_height:.2f}"
     )
@@ -297,7 +298,7 @@ def plot_transfer_function_discrete_distribution(
     cbar1 = fig.colorbar(scatter1, ax=ax1, label="幅值比")
     cbar1.ax.tick_params(labelsize=10)
 
-    logger.debug("幅值比分布图绘制完成")
+    f_logger.debug("幅值比分布图绘制完成")
 
     # 6. 绘制相位差分布图（方形色块）
     for _i, (x, y, phase) in enumerate(
@@ -332,7 +333,7 @@ def plot_transfer_function_discrete_distribution(
     cbar2 = fig.colorbar(scatter2, ax=ax2, label="相位差 (rad)")
     cbar2.ax.tick_params(labelsize=10)
 
-    logger.debug("相位差分布图绘制完成")
+    f_logger.debug("相位差分布图绘制完成")
 
     # 6. 调整布局
     plt.tight_layout()
@@ -340,7 +341,7 @@ def plot_transfer_function_discrete_distribution(
     # 7. 保存图片（如果指定了路径）
     if save_path is not None:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
-        logger.info(f"离散分布图已保存至: {save_path}")
+        f_logger.info(f"离散分布图已保存至: {save_path}")
 
     return fig, (ax1, ax2)
 
@@ -382,13 +383,14 @@ def plot_transfer_function_interpolated_distribution(
     Examples:
         ```python
         >>> # 假设已有传递函数计算结果
-        >>> plot_tf_results = calculate_transfer_function(raw_data)  # noqa
-        >>> fig, (ax1, ax2) = plot_transfer_function_interpolated_distribution(
+        >>> from analyze import sweep_data_to_point_tf_data
+        >>> test_plot_tf_results = sweep_data_to_point_tf_data(test_sweep_data)  # noqa
+        >>> test_fig, (test_ax1, test_ax2) = plot_transfer_function_interpolated_distribution(
         ...     plot_tf_results
         ... )
         >>> plt.show()
         >>> # 或者保存图片并使用线性插值
-        >>> fig, axes = plot_transfer_function_interpolated_distribution(  # noqa
+        >>> test_fig, axes = plot_transfer_function_interpolated_distribution(  # noqa
         ...     plot_tf_results,
         ...     interpolation_method="linear",
         ...     save_path="transfer_function_interpolated.png"
@@ -396,13 +398,13 @@ def plot_transfer_function_interpolated_distribution(
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.plot_transfer_function_interpolated_distribution")
+    f_logger = get_logger(f"{__name__}.plot_transfer_function_interpolated_distribution")
 
     if not plot_tf_results:
-        logger.error("传递函数结果为空，无法绘图")
+        f_logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
 
-    logger.info(f"绘制 {len(plot_tf_results)} 个点的传递函数插值分布")
+    f_logger.info(f"绘制 {len(plot_tf_results)} 个点的传递函数插值分布")
 
     # 2. 提取数据
     x_coords = np.array([result["position"].x for result in plot_tf_results])
@@ -410,7 +412,7 @@ def plot_transfer_function_interpolated_distribution(
     amp_ratios = np.array([result["amp_ratio"] for result in plot_tf_results])
     phase_shifts = np.array([result["phase_shift"] for result in plot_tf_results])
 
-    logger.debug(
+    f_logger.debug(
         f"数据范围: X=[{x_coords.min():.2f}, {x_coords.max():.2f}], "
         f"Y=[{y_coords.min():.2f}, {y_coords.max():.2f}], "
         f"幅值比=[{amp_ratios.min():.4f}, {amp_ratios.max():.4f}], "
@@ -431,7 +433,7 @@ def plot_transfer_function_interpolated_distribution(
     yi = np.linspace(y_min - y_margin, y_max + y_margin, grid_resolution)
     Xi, Yi = np.meshgrid(xi, yi)
 
-    logger.debug(
+    f_logger.debug(
         f"创建插值网格: {grid_resolution}x{grid_resolution}, "
         f"方法: {interpolation_method}"
     )
@@ -440,7 +442,7 @@ def plot_transfer_function_interpolated_distribution(
     # 将相位转换为复数形式进行插值，避免-π到π的跳跃
     phase_complex = np.exp(1j * phase_shifts)  # 转换为单位圆上的复数
 
-    logger.debug("处理相位周期性，转换为复数形式进行插值")
+    f_logger.debug("处理相位周期性，转换为复数形式进行插值")
 
     # 5. 执行插值
     points = np.column_stack((x_coords, y_coords))
@@ -474,13 +476,13 @@ def plot_transfer_function_interpolated_distribution(
         )
         phase_interpolated = np.angle(phase_interpolated_complex)  # 转换回相位角度
 
-        logger.debug("插值计算完成（包含相位周期性处理）")
+        f_logger.debug("插值计算完成（包含相位周期性处理）")
 
     except Exception as e:
-        logger.error(f"插值计算失败: {e}")
+        f_logger.error(f"插值计算失败: {e}")
         # 如果cubic插值失败，回退到linear插值
         if interpolation_method == "cubic":
-            logger.warning("cubic插值失败，回退到linear插值")
+            f_logger.warning("cubic插值失败，回退到linear插值")
             amp_interpolated = griddata(
                 points, amp_ratios, (Xi, Yi), method="linear", fill_value=np.nan
             )
@@ -528,7 +530,7 @@ def plot_transfer_function_interpolated_distribution(
             zorder=10,
         )
 
-    logger.debug("幅值比插值分布图绘制完成")
+    f_logger.debug("幅值比插值分布图绘制完成")
 
     # 7. 绘制相位差插值分布图
     im2 = ax2.contourf(
@@ -556,7 +558,7 @@ def plot_transfer_function_interpolated_distribution(
             zorder=10,
         )
 
-    logger.debug("相位差插值分布图绘制完成")
+    f_logger.debug("相位差插值分布图绘制完成")
 
     # 8. 调整布局
     plt.tight_layout()
@@ -564,7 +566,7 @@ def plot_transfer_function_interpolated_distribution(
     # 9. 保存图片（如果指定了路径）
     if save_path is not None:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
-        logger.info(f"插值分布图已保存至: {save_path}")
+        f_logger.info(f"插值分布图已保存至: {save_path}")
 
     return fig, (ax1, ax2)
 
@@ -604,11 +606,12 @@ def plot_transfer_function_instantaneous_field(
     Examples:
         ```python
         >>> # 假设已有传递函数计算结果
-        >>> plot_tf_results = calculate_transfer_function(raw_data)  # noqa
-        >>> fig, ax = plot_transfer_function_instantaneous_field(plot_tf_results)
+        >>> from analyze import sweep_data_to_point_tf_data
+        >>> test_plot_tf_results = sweep_data_to_point_tf_data(test_sweep_data)  # noqa
+        >>> test_fig, test_ax = plot_transfer_function_instantaneous_field(plot_tf_results)
         >>> plt.show()
         >>> # 或者保存图片并使用线性插值
-        >>> fig, ax = plot_transfer_function_instantaneous_field(  # noqa
+        >>> test_fig, test_ax = plot_transfer_function_instantaneous_field(  # noqa
         ...     plot_tf_results,
         ...     interpolation_method="linear",
         ...     save_path="instantaneous_field.png"
@@ -616,13 +619,13 @@ def plot_transfer_function_instantaneous_field(
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.plot_transfer_function_instantaneous_field")
+    f_logger = get_logger(f"{__name__}.plot_transfer_function_instantaneous_field")
 
     if not plot_tf_results:
-        logger.error("传递函数结果为空，无法绘图")
+        f_logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
 
-    logger.info(f"绘制 {len(plot_tf_results)} 个点的瞬时声压场分布")
+    f_logger.info(f"绘制 {len(plot_tf_results)} 个点的瞬时声压场分布")
 
     # 1. 提取数据
     x_coords = np.array([result["position"].x for result in plot_tf_results])
@@ -633,7 +636,7 @@ def plot_transfer_function_instantaneous_field(
     # 2. 计算瞬时声压场值 A·sin(φ)
     instantaneous_field = amp_ratios * np.sin(phase_shifts)
 
-    logger.debug(
+    f_logger.debug(
         f"数据范围: X=[{x_coords.min():.2f}, {x_coords.max():.2f}], "
         f"Y=[{y_coords.min():.2f}, {y_coords.max():.2f}], "
         f"瞬时声压场=[{instantaneous_field.min():.4f}, {instantaneous_field.max():.4f}]"
@@ -653,7 +656,7 @@ def plot_transfer_function_instantaneous_field(
     yi = np.linspace(y_min - y_margin, y_max + y_margin, grid_resolution)
     Xi, Yi = np.meshgrid(xi, yi)
 
-    logger.debug(
+    f_logger.debug(
         f"创建插值网格: {grid_resolution}x{grid_resolution}, "
         f"方法: {interpolation_method}"
     )
@@ -671,13 +674,13 @@ def plot_transfer_function_instantaneous_field(
             fill_value=np.nan,
         )
 
-        logger.debug("瞬时声压场插值计算完成")
+        f_logger.debug("瞬时声压场插值计算完成")
 
     except Exception as e:
-        logger.error(f"插值计算失败: {e}")
+        f_logger.error(f"插值计算失败: {e}")
         # 如果cubic插值失败，回退到linear插值
         if interpolation_method == "cubic":
-            logger.warning("cubic插值失败，回退到linear插值")
+            f_logger.warning("cubic插值失败，回退到linear插值")
             field_interpolated = griddata(
                 points,
                 instantaneous_field,
@@ -701,7 +704,7 @@ def plot_transfer_function_instantaneous_field(
     vmax = max(original_field_max, interpolated_field_max)
     vmin = -vmax
 
-    logger.debug(f"颜色范围: [{vmin:.4f}, {vmax:.4f}]")
+    f_logger.debug(f"颜色范围: [{vmin:.4f}, {vmax:.4f}]")
 
     # 使用 contourf 但不使用 extend 参数，避免颜色突变
     im = ax.contourf(
@@ -736,7 +739,7 @@ def plot_transfer_function_instantaneous_field(
             zorder=10,
         )
 
-    logger.debug("瞬时声压场分布图绘制完成")
+    f_logger.debug("瞬时声压场分布图绘制完成")
 
     # 7. 调整布局
     plt.tight_layout()
@@ -744,7 +747,7 @@ def plot_transfer_function_instantaneous_field(
     # 8. 保存图片（如果指定了路径）
     if save_path is not None:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
-        logger.info(f"瞬时声压场分布图已保存至: {save_path}")
+        f_logger.info(f"瞬时声压场分布图已保存至: {save_path}")
 
     return fig, ax
 
@@ -787,35 +790,35 @@ def plot_waveform(
     Examples:
         ```python
         假设已有一个Waveform对象
-        >>> waveform = Waveform(np.sin(2*np.pi*1000*np.linspace(0, 1, 10000)),
+        >>> test_waveform = Waveform(np.sin(2*np.pi*1000*np.linspace(0, 1, 10000)),
         ...                     sampling_rate=10000)
-        >>> fig, ax = plot_waveform(waveform)
+        >>> test_fig, test_ax = plot_waveform(waveform)
         >>> plt.show()
         或者保存图片
-        >>> fig, ax = plot_waveform(waveform, save_path="waveform.png")
+        >>> test_fig, test_ax = plot_waveform(waveform, save_path="waveform.png")
         放大10倍，仅绘制前1/10的波形
-        >>> fig, ax = plot_waveform(waveform, zoom_factor=10)
+        >>> test_fig, test_ax = plot_waveform(waveform, zoom_factor=10)
         >>> plt.show()
         指定数据点和波形序号
-        >>> fig, ax = plot_waveform(waveform, point_index=5, waveform_index=2)
+        >>> test_fig, test_ax = plot_waveform(waveform, point_index=5, waveform_index=2)
         >>> plt.show()
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.plot_waveform")
+    f_logger = get_logger(f"{__name__}.plot_waveform")
 
-    logger.info("开始绘制Waveform时域波形图")
+    f_logger.info("开始绘制Waveform时域波形图")
 
     # 验证输入
     if waveform.size == 0:
-        logger.error("输入的Waveform对象为空，无法绘图")
+        f_logger.error("输入的Waveform对象为空，无法绘图")
         raise ValueError("Waveform对象不能为空")
 
     if zoom_factor <= 0:
-        logger.error(f"zoom_factor必须大于0，当前值: {zoom_factor}")
+        f_logger.error(f"zoom_factor必须大于0，当前值: {zoom_factor}")
         raise ValueError("zoom_factor必须大于0")
 
-    logger.info(
+    f_logger.info(
         f"绘制Waveform: shape={waveform.shape}, "
         f"sampling_rate={waveform.sampling_rate}Hz, "
         f"duration={waveform.duration:.6f}s, "
@@ -828,7 +831,7 @@ def plot_waveform(
 
     # 确保至少绘制2个采样点
     if samples_to_plot < 2:
-        logger.warning(
+        f_logger.warning(
             f"zoom_factor={zoom_factor}过大，导致绘制样本数不足2个，"
             f"将调整为绘制2个采样点"
         )
@@ -837,7 +840,7 @@ def plot_waveform(
     # 计算实际绘制的时长
     duration_to_plot = samples_to_plot / waveform.sampling_rate
 
-    logger.debug(
+    f_logger.debug(
         f"zoom_factor={zoom_factor}, 总样本数={total_samples}, "
         f"绘制样本数={samples_to_plot}, 绘制时长={duration_to_plot:.6f}s"
     )
@@ -845,7 +848,7 @@ def plot_waveform(
     # 2. 生成时间轴（仅包含需要绘制的部分）
     time_array = np.linspace(0, duration_to_plot, samples_to_plot, endpoint=False)
 
-    logger.debug(
+    f_logger.debug(
         f"时间轴范围: [0, {duration_to_plot:.6f}]s, 采样点数: {samples_to_plot}"
     )
 
@@ -853,29 +856,18 @@ def plot_waveform(
     fig, ax = plt.subplots(1, 1, figsize=figsize)
 
     # 4. 绘制波形（仅绘制需要的部分）
-    if waveform.ndim == 1:
-        # 单通道波形
+    # Waveform统一使用2D格式 (n_channels, n_samples)
+    colors = plt.cm.tab10(np.linspace(0, 1, waveform.channels_num))
+    for ch_idx in range(waveform.channels_num):
         ax.plot(
             time_array,
-            waveform[:samples_to_plot],
+            waveform[ch_idx, :samples_to_plot],
             linewidth=1.0,
-            color="blue",
-            label="通道 1",
+            color=colors[ch_idx],
+            label=f"通道 {ch_idx + 1}",
+            alpha=0.8,
         )
-        logger.debug("绘制单通道波形")
-    else:
-        # 多通道波形
-        colors = plt.cm.tab10(np.linspace(0, 1, waveform.channels_num))
-        for ch_idx in range(waveform.channels_num):
-            ax.plot(
-                time_array,
-                waveform[ch_idx, :samples_to_plot],
-                linewidth=1.0,
-                color=colors[ch_idx],
-                label=f"通道 {ch_idx + 1}",
-                alpha=0.8,
-            )
-        logger.debug(f"绘制 {waveform.channels_num} 个通道的波形")
+    f_logger.debug(f"绘制 {waveform.channels_num} 个通道的波形")
 
     # 5. 设置坐标轴标签和标题
     ax.set_xlabel("时间 (s)", fontsize=12)
@@ -922,7 +914,7 @@ def plot_waveform(
     if show_grid:
         ax.grid(True, alpha=0.3, linestyle="--")
 
-    logger.debug("波形图绘制完成")
+    f_logger.debug("波形图绘制完成")
 
     # 8. 调整布局
     plt.tight_layout()
@@ -930,7 +922,7 @@ def plot_waveform(
     # 9. 保存图片（如果指定了路径）
     if save_path is not None:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
-        logger.info(f"波形图已保存至: {save_path}")
+        f_logger.info(f"波形图已保存至: {save_path}")
 
     return fig, ax
 
@@ -1116,120 +1108,71 @@ def plot_sweepdata_as_single_waveform(
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.plot_sweepdata_as_single_waveform")
+    f_logger = get_logger(f"{__name__}.plot_sweepdata_as_single_waveform")
 
-    logger.info("开始绘制SweepData的融合波形图")
+    f_logger.info("开始绘制SweepData的融合波形图")
 
     # 验证输入
     ai_data_list = sweep_data["ai_data_list"]
     if not ai_data_list:
-        logger.error("输入的SweepData对象为空，无法绘图")
+        f_logger.error("输入的SweepData对象为空，无法绘图")
         raise ValueError("SweepData对象不能为空")
 
-    logger.info(f"输入SweepData包含 {len(ai_data_list)} 个测量点")
+    f_logger.info(f"输入SweepData包含 {len(ai_data_list)} 个测量点")
 
     # 第一步：对SweepData进行平均（每个测量点的多个波形平均为一个波形）
-    logger.info("对SweepData进行平均处理")
+    f_logger.info("对SweepData进行平均处理")
     averaged_sweep_data = average_sweep_data(sweep_data)
 
     # 第二步：获取参考波形的元数据
     first_point_waveform = averaged_sweep_data["ai_data_list"][0]["ai_data"][0]
     sampling_rate = first_point_waveform.sampling_rate
     samples_num = first_point_waveform.samples_num
-    is_multi_channel = first_point_waveform.ndim == 2
+    num_channels = first_point_waveform.channels_num
 
-    if is_multi_channel:
-        num_channels = first_point_waveform.shape[0]
-        logger.debug(
-            f"检测到多通道波形，通道数: {num_channels}，采样点数: {samples_num}"
-        )
-    else:
-        logger.debug(f"检测到单通道波形，采样点数: {samples_num}")
+    f_logger.debug(
+        f"波形信息: 通道数={num_channels}，采样点数={samples_num}"
+    )
 
     # 第三步：按位相加所有测量点的所有AI波形
     total_waveforms = 0  # 计算总波形数
 
-    if is_multi_channel:
-        # 多通道情况：初始化累加数组 (num_channels, samples_num)
-        summed_data = np.zeros((num_channels, samples_num), dtype=np.float64)
+    # 初始化累加数组 (num_channels, samples_num)
+    summed_data = np.zeros((num_channels, samples_num), dtype=np.float64)
 
-        for point_data in averaged_sweep_data["ai_data_list"]:
-            for waveform in point_data["ai_data"]:
-                # 验证波形维度
-                if waveform.ndim != 2 or waveform.shape != (num_channels, samples_num):
-                    logger.warning(
-                        f"波形维度不一致：期望 ({num_channels}, {samples_num})，"
-                        f"实际 shape={waveform.shape}，跳过此波形"
-                    )
-                    continue
-                summed_data += waveform
-                total_waveforms += 1
+    for point_data in averaged_sweep_data["ai_data_list"]:
+        for waveform in point_data["ai_data"]:
+            # 验证波形维度
+            if waveform.channels_num != num_channels or waveform.samples_num != samples_num:
+                f_logger.warning(
+                    f"波形维度不一致：期望 ({num_channels}, {samples_num})，"
+                    f"实际 ({waveform.channels_num}, {waveform.samples_num})，跳过此波形"
+                )
+                continue
+            summed_data += waveform
+            total_waveforms += 1
 
-        # 取平均
-        if total_waveforms == 0:
-            logger.error("没有有效的波形数据可供融合")
-            raise ValueError("没有有效的波形数据可供融合")
+    # 取平均
+    if total_waveforms == 0:
+        f_logger.error("没有有效的波形数据可供融合")
+        raise ValueError("没有有效的波形数据可供融合")
 
-        averaged_data = summed_data / total_waveforms
+    averaged_data = summed_data / total_waveforms
 
-        # 创建融合后的Waveform对象（保留channel_names元数据）
-        fusion_waveform = Waveform(
-            input_array=averaged_data,
-            sampling_rate=sampling_rate,
-            timestamp=first_point_waveform.timestamp,
-            channel_names=first_point_waveform.channel_names
-            if hasattr(first_point_waveform, "channel_names")
-            else None,
-        )
+    # 创建融合后的Waveform对象（保留channel_names元数据）
+    fusion_waveform = Waveform(
+        input_array=averaged_data,
+        sampling_rate=sampling_rate,
+        timestamp=first_point_waveform.timestamp,
+        channel_names=first_point_waveform.channel_names,
+    )
 
-        logger.info(
-            f"融合完成：多通道模式，{num_channels}个通道，融合了{total_waveforms}个波形"
-        )
-    else:
-        # 单通道情况：初始化累加数组
-        summed_data = np.zeros(samples_num, dtype=np.float64)
-
-        for point_data in averaged_sweep_data["ai_data_list"]:
-            for waveform in point_data["ai_data"]:
-                # 验证波形维度
-                if waveform.ndim == 2:
-                    # 如果是2D但只有1个通道，提取第一个通道
-                    if waveform.shape[0] == 1:
-                        summed_data += waveform[0, :]
-                    else:
-                        logger.warning(
-                            f"波形维度不一致：期望单通道，实际 shape={waveform.shape}，"
-                            f"跳过此波形"
-                        )
-                        continue
-                else:
-                    if waveform.shape != (samples_num,):
-                        logger.warning(
-                            f"波形维度不一致：期望 ({samples_num},)，"
-                            f"实际 shape={waveform.shape}，跳过此波形"
-                        )
-                        continue
-                    summed_data += waveform
-                total_waveforms += 1
-
-        # 取平均
-        if total_waveforms == 0:
-            logger.error("没有有效的波形数据可供融合")
-            raise ValueError("没有有效的波形数据可供融合")
-
-        averaged_data = summed_data / total_waveforms
-
-        # 创建融合后的Waveform对象
-        fusion_waveform = Waveform(
-            input_array=averaged_data,
-            sampling_rate=sampling_rate,
-            timestamp=first_point_waveform.timestamp,
-        )
-
-        logger.info(f"融合完成：单通道模式，融合了{total_waveforms}个波形")
+    f_logger.info(
+        f"融合完成: {num_channels}个通道，融合了{total_waveforms}个波形"
+    )
 
     # 第四步：使用plot_waveform函数绘制融合波形
-    logger.info("绘制融合波形")
+    f_logger.info("绘制融合波形")
 
     # 构建默认标题（如果未指定）
     if title is None:
@@ -1247,6 +1190,6 @@ def plot_sweepdata_as_single_waveform(
         zoom_factor=zoom_factor,
     )
 
-    logger.info("SweepData融合波形图绘制完成")
+    f_logger.info("SweepData融合波形图绘制完成")
 
     return fig, ax

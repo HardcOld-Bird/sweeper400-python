@@ -4,23 +4,21 @@
 模块路径：`sweeper400.analyze.basic_sine`
 
 本模块包含与最简单的**单频正弦波**相关的函数和类。
-（本模块函数较为复杂，故均配备函数日志器）
 """
 
 import numpy as np
-from scipy.linalg import lstsq  # noqa
-from scipy.optimize import curve_fit  # noqa
-from scipy.signal import periodogram  # noqa
+from scipy.linalg import lstsq
+from scipy.optimize import curve_fit
+from scipy.signal import periodogram
 
-from ..logger import get_logger
 from .my_dtypes import (
-    CompData,
     PositiveFloat,
     SamplingInfo,
     SineArgs,
     Waveform,
     init_sine_args,
 )
+from ..logger import get_logger
 
 # 获取模块日志器
 logger = get_logger(__name__)
@@ -29,8 +27,9 @@ logger = get_logger(__name__)
 def get_sine(
     sampling_info: SamplingInfo,
     sine_args: SineArgs,
+    channel_name: str | None = None,
     timestamp: np.datetime64 | None = None,
-    id: int | None = None,
+    waveform_id: int | None = None,
 ) -> Waveform:
     """
     使用几个简单的参数生成包含单频正弦波时域信号的Waveform对象
@@ -38,32 +37,35 @@ def get_sine(
     Args:
         sampling_info: 采样信息，包含采样率和采样点数
         sine_args: 正弦波参数，包含频率、幅值和相位信息
+        channel_name: 通道名称，默认值为None
         timestamp: 采样开始时间戳，默认值为None
-        id: 波形的唯一标识符，默认值为None
+        waveform_id: 波形的唯一标识符，默认值为None
 
     Returns:
         output_sine_wave: 包含单频正弦波的Waveform对象
 
     Examples:
         ```python
-        >>> sampling_info = init_sampling_info(1000, 1024)  # noqa
-        >>> sine_args = init_sine_args(50.0, 1.0, 0.0)
+        >>> from analyze import init_sampling_info
+        >>> test_sampling_info = init_sampling_info(1000, 1024)
+        >>> test_sine_args = init_sine_args(50.0, 1.0, 0.0)
         >>> sine_wave = get_sine(sampling_info, sine_args)
         >>> print(sine_wave.shape)
-        (1024,)
+        (1, 1024)
         >>> print(sine_wave.sampling_rate)
         1000.0
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.get_sine")
+    f_logger = get_logger(f"{__name__}.get_sine")
 
-    logger.debug(
+    f_logger.debug(
         f"生成正弦波: frequency={sine_args['frequency']}Hz, "
         f"amplitude={sine_args['amplitude']}, phase={sine_args['phase']}rad, "
         f"sampling_rate={sampling_info['sampling_rate']}Hz, "
         f"samples_num={sampling_info['samples_num']}, "
-        f"timestamp={timestamp}, id={id}"
+        f"channel_name={channel_name}, "
+        f"timestamp={timestamp}, waveform_id={waveform_id}"
     )
 
     # 生成时间序列
@@ -78,16 +80,23 @@ def get_sine(
         2 * np.pi * sine_args["frequency"] * time_array + sine_args["phase"]
     )
 
+    # 设置通道名称
+    if channel_name is not None:
+        channel_names = (channel_name,)
+    else:
+        channel_names = None
+
     # 创建Waveform对象
     output_sine_wave = Waveform(
         input_array=sine_data,
         sampling_rate=sampling_info["sampling_rate"],
+        channel_names=channel_names,
         timestamp=timestamp,
-        id=id,
+        waveform_id=waveform_id,
         sine_args=sine_args,
     )
 
-    logger.debug(f"成功生成正弦波Waveform对象: {output_sine_wave}")
+    f_logger.debug(f"成功生成正弦波Waveform对象: {output_sine_wave}")
 
     return output_sine_wave
 
@@ -95,8 +104,9 @@ def get_sine(
 def get_sine_cycles(
     sampling_info: SamplingInfo,
     sine_args: SineArgs,
+    channel_name: str | None = None,
     timestamp: np.datetime64 | None = None,
-    id: int | None = None,
+    waveform_id: int | None = None,
 ) -> Waveform:
     """
     生成若干个完整周期的连续正弦波形Waveform
@@ -107,8 +117,9 @@ def get_sine_cycles(
     Args:
         sampling_info: 采样信息，包含采样率和采样点数
         sine_args: 正弦波参数，包含频率、幅值和相位信息（注意：相位参数会被忽略）
+        channel_name: 通道名称，默认值为None
         timestamp: 采样开始时间戳，默认值为None
-        id: 波形的唯一标识符，默认值为None
+        waveform_id: 波形的唯一标识符，默认值为None
 
     Returns:
         output_sine_wave: 包含整数个周期正弦波的Waveform对象
@@ -119,22 +130,24 @@ def get_sine_cycles(
     Examples:
         ```python
         >>> # 生成1000Hz采样率下50Hz的正弦波，包含完整周期
-        >>> sampling_info = init_sampling_info(1000, 1024)  # type: ignore
-        >>> sine_args = init_sine_args(50.0, 1.0, 0.0)  # 相位参数会被忽略
-        >>> sine_wave = get_sine_cycles(sampling_info, sine_args)
+        >>> from analyze import init_sampling_info, init_sine_args
+        >>> test_sampling_info = init_sampling_info(1000, 1024)
+        >>> test_sine_args = init_sine_args(50.0, 1.0, 0.0)  # 相位参数会被忽略
+        >>> sine_wave = get_sine_cycles(test_sampling_info, test_sine_args)
         >>> print(f"实际采样点数: {sine_wave.shape[0]}")
         >>> print(f"周期数: {sine_wave.shape[0] * 50.0 / 1000}")
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.get_sine_cycles")
+    f_logger = get_logger(f"{__name__}.get_sine_cycles")
 
-    logger.debug(
+    f_logger.debug(
         f"生成整周期正弦波: frequency={sine_args['frequency']}Hz, "
         f"amplitude={sine_args['amplitude']}, "
         f"sampling_rate={sampling_info['sampling_rate']}Hz, "
         f"requested_samples={sampling_info['samples_num']}, "
-        f"timestamp={timestamp}, id={id}"
+        f"channel_name={channel_name}, "
+        f"timestamp={timestamp}, waveform_id={waveform_id}"
     )
 
     # 1. 检查采样率是否是频率的整数倍
@@ -146,7 +159,7 @@ def get_sine_cycles(
 
     # 检查是否为整数（允许小的浮点误差）
     if abs(samples_per_cycle - round(samples_per_cycle)) > 1e-10:
-        logger.error(
+        f_logger.error(
             f"采样率 {sampling_rate}Hz 不是频率 {frequency}Hz 的整数倍。"
             f"一个周期需要 {samples_per_cycle:.6f} 个采样点，不是整数。",
             exc_info=True,
@@ -157,7 +170,7 @@ def get_sine_cycles(
         )
 
     samples_per_cycle_int = int(round(samples_per_cycle))
-    logger.debug(f"每个周期采样点数: {samples_per_cycle_int}")
+    f_logger.debug(f"每个周期采样点数: {samples_per_cycle_int}")
 
     # 2. 根据输入的samples_num计算总周期数（向上取整）
     requested_samples = sampling_info["samples_num"]
@@ -167,7 +180,7 @@ def get_sine_cycles(
     # 计算实际的采样点数（整数个周期）
     actual_samples = total_cycles_int * samples_per_cycle_int
 
-    logger.debug(
+    f_logger.debug(
         f"请求采样点数: {requested_samples}, "
         f"计算周期数: {total_cycles:.2f} -> {total_cycles_int}, "
         f"实际采样点数: {actual_samples}"
@@ -190,16 +203,23 @@ def get_sine_cycles(
         phase=0.0,  # 始终从0相位开始
     )
 
+    # 设置通道名称
+    if channel_name is not None:
+        channel_names = (channel_name,)
+    else:
+        channel_names = None
+
     # 创建Waveform对象
     output_sine_wave = Waveform(
         input_array=sine_data,
         sampling_rate=sampling_rate,
+        channel_names=channel_names,
         timestamp=timestamp,
-        id=id,
+        waveform_id=waveform_id,
         sine_args=actual_sine_args,
     )
 
-    logger.debug(
+    f_logger.debug(
         f"成功生成整周期正弦波Waveform对象: {output_sine_wave}, "
         f"周期数: {total_cycles_int}"
     )
@@ -213,7 +233,7 @@ def get_sine_multi_ch(
     channel_names: tuple[str, ...],
     complex_amps: tuple[complex, ...] = (),
     timestamp: np.datetime64 | None = None,
-    id: int | None = None,
+    waveform_id: int | None = None,
 ) -> Waveform:
     """
     生成多通道正弦波形，支持为每个通道应用不同的复振幅调整
@@ -234,7 +254,7 @@ def get_sine_multi_ch(
                       如果元素数少于通道数，多出的通道使用原始波形。
                       如果元素数多于通道数，多出的复数被忽略。
         timestamp: 采样开始时间戳，默认值为None
-        id: 波形的唯一标识符，默认值为None
+        waveform_id: 波形的唯一标识符，默认值为None
 
     Returns:
         output_waveform: 多通道正弦波形（二维数组，每行对应一个通道）
@@ -242,10 +262,11 @@ def get_sine_multi_ch(
     Examples:
         ```python
         >>> # 生成8通道同步正弦波形（所有通道相同）
-        >>> sampling_info = init_sampling_info(171500.0, 85750)  # noqa
-        >>> sine_args = init_sine_args(3430.0, 0.01, 0.0)
+        >>> from analyze import init_sampling_info, init_sine_args
+        >>> test_sampling_info = init_sampling_info(171500.0, 85750)
+        >>> test_sine_args = init_sine_args(3430.0, 0.01, 0.0)
         >>> ao_channels = ("PXI1Slot2/ao0", "PXI1Slot2/ao1", ...)
-        >>> multi_ch_waveform = get_sine_multi_ch(sampling_info, sine_args, ao_channels)
+        >>> multi_ch_waveform = get_sine_multi_ch(sampling_info, test_sine_args, ao_channels)
         >>> print(multi_ch_waveform.shape)  # (8, 85750)
 
         >>> # 生成带复振幅调整的波形
@@ -256,12 +277,12 @@ def get_sine_multi_ch(
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.get_sine_multi_ch")
+    f_logger = get_logger(f"{__name__}.get_sine_multi_ch")
 
     channels_num = len(channel_names)
     has_complex_amps = len(complex_amps) > 0
 
-    logger.debug(
+    f_logger.debug(
         f"生成多通道正弦波形: frequency={sine_args['frequency']}Hz, "
         f"amplitude={sine_args['amplitude']}, phase={sine_args['phase']}rad, "
         f"sampling_rate={sampling_info['sampling_rate']}Hz, "
@@ -283,9 +304,9 @@ def get_sine_multi_ch(
 
             # 计算调整后的幅值和相位
             adjusted_amplitude = sine_args["amplitude"] * amp_multiplier
-            adjusted_phase = sine_args["phase"] + phase_addition
+            adjusted_phase: float = sine_args["phase"] + phase_addition  # noqa
 
-            logger.debug(
+            f_logger.debug(
                 f"通道 {ch_idx} ({channel_names[ch_idx]}): "
                 f"幅值乘子={amp_multiplier:.6f}, 相位加子={phase_addition:.6f}rad, "
                 f"调整后幅值={adjusted_amplitude:.6f}, 调整后相位={adjusted_phase:.6f}rad"
@@ -295,7 +316,7 @@ def get_sine_multi_ch(
             adjusted_sine_args = init_sine_args(
                 frequency=sine_args["frequency"],
                 amplitude=adjusted_amplitude,
-                phase=adjusted_phase,  # noqa
+                phase=adjusted_phase,
             )
 
             # 生成该通道的波形
@@ -303,7 +324,7 @@ def get_sine_multi_ch(
                 sampling_info=sampling_info,
                 sine_args=adjusted_sine_args,
                 timestamp=timestamp,
-                id=id,
+                waveform_id=waveform_id,
             )
         else:
             # 没有复振幅调整，使用原始参数
@@ -311,7 +332,7 @@ def get_sine_multi_ch(
                 sampling_info=sampling_info,
                 sine_args=sine_args,
                 timestamp=timestamp,
-                id=id,
+                waveform_id=waveform_id,
             )
 
         # 将波形数据存入多通道数组
@@ -323,11 +344,11 @@ def get_sine_multi_ch(
         sampling_rate=sampling_info["sampling_rate"],
         channel_names=channel_names,
         timestamp=timestamp,
-        id=id,
+        waveform_id=waveform_id,
         sine_args=sine_args,
     )
 
-    logger.debug(
+    f_logger.debug(
         f"成功生成多通道正弦波形: shape={output_waveform.shape}, "
         f"channels_num={output_waveform.channels_num}"
     )
@@ -361,7 +382,8 @@ def estimate_sine_args(
     Examples:
         ```python
         >>> # 生成测试波形
-        >>> sampling_info = init_sampling_info(1000, 1024)  # type: ignore
+        >>> from analyze import init_sampling_info, init_sine_args
+        >>> sampling_info = init_sampling_info(1000, 1024)
         >>> sine_args = init_sine_args(50.0, 2.0, 0.5)
         >>> test_wave = get_sine(sampling_info, sine_args)
         >>> estimated_args = estimate_sine_args(test_wave, approx_freq=50.0)
@@ -369,9 +391,9 @@ def estimate_sine_args(
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.estimate_sine_args")
+    f_logger = get_logger(f"{__name__}.estimate_sine_args")
 
-    logger.debug(
+    f_logger.debug(
         f"开始粗略正弦波参数估计: approx_freq={approx_freq}Hz, "
         f"error_percentage={error_percentage}%, "
         f"waveform_shape={input_waveform.shape}, "
@@ -379,39 +401,39 @@ def estimate_sine_args(
     )
 
     # 处理多通道数据，只使用第一个通道
-    if input_waveform.ndim == 2:
-        waveform_data = input_waveform[0, :]
-        logger.debug("检测到多通道数据，使用第一个通道进行分析")
-    else:
-        waveform_data = input_waveform
+    # Waveform 现在统一使用 2D 格式 (n_channels, n_samples)
+    waveform_data = input_waveform[0, :]
+    if not input_waveform.is_single_channel:
+        f_logger.warning(f"检测到多通道数据({input_waveform.channels_num}通道)，使用第一个通道进行分析")
 
     # 获取基本参数
-    sampling_rate = float(input_waveform.sampling_rate)
-    samples_num = int(input_waveform.samples_num)
+    sampling_rate = input_waveform.sampling_rate
+    samples_num = input_waveform.samples_num
     nyquist_freq = sampling_rate / 2.0
 
     # 确定搜索频率范围
-    if approx_freq is None:
-        # 全频率范围搜索
-        freq_min = 0.0
-        freq_max = nyquist_freq
-        logger.debug(f"全频率范围搜索: 0Hz - {nyquist_freq:.2f}Hz")
-    else:
+    if approx_freq is not None:
         # 根据误差百分比确定搜索范围
-        freq_min = float(approx_freq) * (1 - float(error_percentage) / 100.0)
-        freq_max_candidate = float(approx_freq) / (1 - float(error_percentage) / 100.0)
+        freq_min_candidate = approx_freq * (1 - error_percentage / 100.0)
+        freq_min = max(freq_min_candidate, 0.0)
+        freq_max_candidate = approx_freq / (1 - error_percentage / 100.0)
         freq_max = min(freq_max_candidate, nyquist_freq)
 
-        logger.debug(
+        f_logger.debug(
             f"限定频率范围搜索: {freq_min:.2f}Hz - {freq_max:.2f}Hz "
             f"(中心频率: {approx_freq:.2f}Hz, 误差: ±{error_percentage:.1f}%)"
         )
+    else:
+        # 全频率范围搜索
+        freq_min = 0.0
+        freq_max = nyquist_freq
+        f_logger.debug(f"全频率范围搜索: 0Hz - {nyquist_freq:.2f}Hz")
 
     # 使用Periodogram方法计算功率谱
     # window: 使用Hann窗以提高频率分辨率和降低频谱泄漏
     # scaling: 'spectrum' 返回功率谱（单位V^2），峰值的平方根是RMS幅度
     # return_onesided: 只返回正频率部分
-    psd_freqs, psd_values = periodogram(  # noqa
+    psd_freqs, psd_values = periodogram(
         waveform_data,
         fs=sampling_rate,
         window="hann",
@@ -420,9 +442,8 @@ def estimate_sine_args(
         scaling="spectrum",  # 使用功率谱
     )
 
-    logger.debug(
-        f"Periodogram方法参数: window='hann', scaling='spectrum', "
-        f"频率分辨率={psd_freqs[1] - psd_freqs[0]:.6f}Hz"
+    f_logger.debug(
+        f"Periodogram频率分辨率={psd_freqs[1] - psd_freqs[0]:.6f}Hz"
     )
 
     # 将功率谱转换为幅度谱
@@ -434,7 +455,7 @@ def estimate_sine_args(
     # 在指定频率范围内搜索峰值
     freq_range_mask = (psd_freqs >= freq_min) & (psd_freqs <= freq_max)
     if not np.any(freq_range_mask):
-        logger.error(
+        f_logger.error(
             f"指定的频率范围 [{freq_min:.2f}, {freq_max:.2f}] Hz 超出了有效范围",
             exc_info=True,
         )
@@ -458,7 +479,7 @@ def estimate_sine_args(
         y3 = psd_magnitude_in_range[max_magnitude_idx + 1]
 
         # 抛物线插值公式，计算精确频率
-        # 检查分母是否为零，避免除零错误
+        # 检查分母是否为零（这意味着三点共线，不太可能发生）
         denominator = float(y1 - 2 * y2 + y3)
         if abs(denominator) > 1e-12:  # 避免数值不稳定
             delta = 0.5 * float(y1 - y3) / denominator
@@ -469,7 +490,7 @@ def estimate_sine_args(
             refined_magnitude = float(y2) - 0.25 * float(y1 - y3) * delta
             initial_amplitude = refined_magnitude  # 已经是峰值幅度
 
-            logger.debug(
+            f_logger.debug(
                 f"抛物线拟合改进: 频率={initial_frequency:.6f}Hz, "
                 f"幅值={initial_amplitude:.6f}, delta={delta:.6f}"
             )
@@ -478,7 +499,7 @@ def estimate_sine_args(
             initial_frequency = coarse_frequency
             initial_amplitude = coarse_magnitude  # 已经是峰值幅度
 
-            logger.debug(
+            f_logger.debug(
                 f"抛物线拟合分母接近零，使用粗略估计: "
                 f"频率={initial_frequency:.6f}Hz, 幅值={initial_amplitude:.6f}"
             )
@@ -486,12 +507,12 @@ def estimate_sine_args(
         initial_frequency = coarse_frequency
         initial_amplitude = coarse_magnitude  # 已经是峰值幅度
 
-        logger.debug(
+        f_logger.debug(
             f"边界情况，使用粗略估计: "
             f"频率={initial_frequency:.6f}Hz, 幅值={initial_amplitude:.6f}"
         )
 
-    logger.debug(
+    f_logger.debug(
         f"Periodogram+抛物线拟合初始估计: "
         f"频率={initial_frequency:.6f}Hz, 幅值={initial_amplitude:.6f}"
     )
@@ -505,7 +526,7 @@ def estimate_sine_args(
     # 确保不超过原始信号长度
     phase_estimation_samples = min(phase_estimation_samples, samples_num)
 
-    logger.debug(
+    f_logger.debug(
         f"相位估计参数: 使用前{cycles_for_phase_estimation}个周期, "
         f"每周期{samples_per_cycle:.1f}个采样点, "
         f"总计{phase_estimation_samples}个采样点 (原始信号{samples_num}个点)"
@@ -520,25 +541,20 @@ def estimate_sine_args(
     sin_term_init = np.sin(2 * np.pi * initial_frequency * time_array_for_phase)
     design_matrix_init = np.column_stack([cos_term_init, sin_term_init])
 
-    result_init = lstsq(  # type: ignore
+    result_init = lstsq(
         design_matrix_init, waveform_data_for_phase, lapack_driver="gelsd"
     )
-    # 断言确保lstsq返回了有效结果，帮助类型检查器
-    assert result_init is not None, "lstsq应该总是返回一个元组"
+    coefficients_init = result_init[0]
+    residuals_init = result_init[1] if len(result_init) > 1 else None
+    rank_init = result_init[2] if len(result_init) > 2 else None
+    s_init = result_init[3] if len(result_init) > 3 else None
 
-    coefficients_init = result_init[0]  # type: ignore
-    residuals_init = result_init[1] if len(result_init) > 1 else None  # type: ignore
-    rank_init = result_init[2] if len(result_init) > 2 else None  # type: ignore
-    s_init = result_init[3] if len(result_init) > 3 else None  # type: ignore
-
-    # 确保coefficients_init是一个包含两个元素的数组
-    assert len(coefficients_init) >= 2, "coefficients_init应该至少包含两个系数"  # type: ignore
-    a_init, b_init = float(coefficients_init[0]), float(coefficients_init[1])  # type: ignore
+    a_init, b_init = float(coefficients_init[0]), float(coefficients_init[1])
     initial_phase = float(np.arctan2(a_init, b_init))
 
     # 安全地处理可能为None的返回值
     condition_number_str = "N/A"
-    if s_init is not None and len(s_init) > 0:  # type: ignore
+    if s_init is not None and len(s_init) > 0:  # noqa
         condition_number_str = f"{s_init[0] / s_init[-1]:.2e}"
 
     residuals_str = "N/A"
@@ -546,17 +562,17 @@ def estimate_sine_args(
         # residuals_init 可能是标量或数组
         if np.isscalar(residuals_init):
             residuals_str = f"{residuals_init:.6e}"
-        elif len(residuals_init) > 0:
+        elif len(residuals_init) > 0:  # noqa
             residuals_str = f"{residuals_init[0]:.6e}"
 
-    logger.debug(
+    f_logger.debug(
         f"相位线性拟合结果: a={a_init:.6f}, b={b_init:.6f}, "
         f"矩阵秩={rank_init}, 条件数={condition_number_str}"
     )
-    logger.debug(f"相位拟合残差平方和: {residuals_str}")
+    f_logger.debug(f"相位拟合残差平方和: {residuals_str}")
 
     # 验证初始估计的质量
-    logger.debug(
+    f_logger.debug(
         f"粗略估计完成: 频率={initial_frequency:.6f}Hz (Periodogram+抛物线插值), "
         f"幅值={initial_amplitude:.6f} (Periodogram+抛物线插值), "
         f"相位={initial_phase:.6f}rad ({initial_phase * 180 / np.pi:.1f}°) (线性拟合)"
@@ -589,10 +605,11 @@ def extract_single_tone_information_vvi(
     Examples:
         ```python
         >>> # 生成测试波形
-        >>> sampling_info = init_sampling_info(1000, 1024)  # type: ignore
+        >>> from analyze import init_sampling_info, init_sine_args
+        >>> sampling_info = init_sampling_info(1000, 1024)
         >>> sine_args = init_sine_args(50.0, 2.0, 0.0)
         >>> test_wave = get_sine(sampling_info, sine_args)
-        >>> detected_sine_args = extract_single_tone_information_vvi(
+        >>> test_sine_args = extract_single_tone_information_vvi(
         ...     test_wave, approx_freq=50.0
         ... )
         >>> print(
@@ -603,9 +620,9 @@ def extract_single_tone_information_vvi(
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.extract_single_tone_information_vvi")
+    f_logger = get_logger(f"{__name__}.extract_single_tone_information_vvi")
 
-    logger.debug(
+    f_logger.debug(
         f"开始精确单频信息提取: approx_freq={approx_freq}Hz, "
         f"error_percentage={error_percentage}%, "
         f"waveform_shape={input_waveform.shape}, "
@@ -619,17 +636,16 @@ def extract_single_tone_information_vvi(
     initial_amplitude = estimated_args["amplitude"]
     initial_phase = estimated_args["phase"]
 
-    logger.debug(
+    f_logger.debug(
         f"粗略估计结果: 频率={initial_frequency:.6f}Hz, "
         f"幅值={initial_amplitude:.6f}, 相位={initial_phase:.6f}rad"
     )
 
     # 处理多通道数据，只使用第一个通道
-    if input_waveform.ndim == 2:
-        waveform_data = input_waveform[0, :]
-        logger.debug("检测到多通道数据，使用第一个通道进行分析")
-    else:
-        waveform_data = input_waveform
+    # Waveform 现在统一使用 2D 格式 (n_channels, n_samples)
+    waveform_data = input_waveform[0, :]
+    if not input_waveform.is_single_channel:
+        f_logger.warning(f"检测到多通道数据({input_waveform.channels_num}通道)，使用第一个通道进行分析")
 
     samples_num = input_waveform.samples_num
     sampling_rate = input_waveform.sampling_rate
@@ -638,12 +654,16 @@ def extract_single_tone_information_vvi(
     time_array = np.arange(samples_num) / sampling_rate
 
     # 计算频率搜索范围
+    nyquist_freq = sampling_rate / 2
     if approx_freq is not None:
-        freq_min = approx_freq * (1 - error_percentage / 100)
-        freq_max = approx_freq * (1 + error_percentage / 100)
+        # 根据误差百分比确定搜索范围
+        freq_min_candidate = approx_freq * (1 - error_percentage / 100.0)
+        freq_min = max(freq_min_candidate, 0.0)
+        freq_max_candidate = approx_freq / (1 - error_percentage / 100.0)
+        freq_max = min(freq_max_candidate, nyquist_freq)
     else:
         freq_min = 0.0
-        freq_max = sampling_rate / 2
+        freq_max = nyquist_freq
 
     # 定义正弦波模型函数
     def sine_model(
@@ -664,7 +684,7 @@ def extract_single_tone_information_vvi(
 
     try:
         # 使用curve_fit进行非线性最小二乘拟合
-        optimal_params, _ = curve_fit(  # type: ignore
+        optimal_params, _ = curve_fit(
             sine_model,
             time_array,
             waveform_data,
@@ -684,26 +704,26 @@ def extract_single_tone_information_vvi(
 
         # 计算拟合质量
         fitted_signal = sine_model(
-            time_array, detected_amplitude, detected_frequency, detected_phase
+            time_array, detected_amplitude, detected_frequency, detected_phase  # noqa
         )
         residuals = waveform_data - fitted_signal
         rms_error = np.sqrt(np.mean(residuals**2))
 
-        logger.debug(
+        f_logger.debug(
             f"curve_fit优化结果: 幅值={detected_amplitude:.6f}, "
             f"频率={detected_frequency:.6f}, 相位={detected_phase:.6f}"
         )
-        logger.debug(f"拟合RMS误差: {rms_error:.6f}")
+        f_logger.debug(f"拟合RMS误差: {rms_error:.6f}")
 
     except Exception as e:
-        logger.warning(f"curve_fit优化失败: {e}")
-        logger.warning("回退到粗略估计")
+        f_logger.warning(f"curve_fit优化失败: {e}")
+        f_logger.warning("回退到粗略估计")
 
         detected_frequency = initial_frequency
         detected_amplitude = initial_amplitude
         detected_phase = initial_phase
 
-    logger.debug(
+    f_logger.debug(
         f"精确估计环节结果: 频率={detected_frequency:.6f}Hz, "
         f"幅值={detected_amplitude:.6f}, 相位={detected_phase:.6f}rad"
     )

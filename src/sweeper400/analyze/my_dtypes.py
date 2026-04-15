@@ -6,7 +6,8 @@
 本模块定义了sweeper400项目中特有的自定义**数据类型和容器**。
 主要包含用于管理时域波形数据的Waveform类。
 """
-
+# 允许类型前向引用（也即"Waveform"可以写为Waveform）
+from __future__ import annotations
 from typing import Annotated, Any, NamedTuple, TypedDict, TypeGuard
 
 import numpy as np
@@ -126,8 +127,8 @@ def init_sampling_info(
 
     Examples:
         ```python
-        >>> sampling_info = init_sampling_info(PositiveInt(1000), PositiveInt(2048))
-        >>> print(sampling_info)
+        >>> test_sampling_info = init_sampling_info(PositiveInt(1000), PositiveInt(2048))
+        >>> print(test_sampling_info)
         {'sampling_rate': 1000, 'samples_num': 2048}
         ```
     """
@@ -177,8 +178,8 @@ def init_sine_args(
 
     Examples:
         ```python
-        >>> sine_args = init_sine_args(1000, 1.0, 0.0)
-        >>> print(sine_args)
+        >>> test_sine_args = init_sine_args(1000, 1.0, 0.0)
+        >>> print(test_sine_args)
         {'frequency': 1000, 'amplitude': 1.0, 'phase': 0.0}
         ```
     """
@@ -202,9 +203,9 @@ def _rebuild_waveform_from_pickle(
     sampling_rate: PositiveFloat,
     channel_names: tuple[str, ...] | None,
     timestamp: np.datetime64,
-    id: int | None,
+    waveform_id: int | None,
     sine_args: SineArgs | None,
-) -> "Waveform":
+) -> Waveform:
     """
     从pickle数据重建Waveform对象
 
@@ -213,20 +214,20 @@ def _rebuild_waveform_from_pickle(
         sampling_rate: 采样率
         channel_names: 通道名称元组
         timestamp: 时间戳
-        id: ID
+        waveform_id: 波形ID（整数）
         sine_args: 正弦波参数
 
     Returns:
         重建的Waveform对象
     """
     # 转换为Waveform类型
-    waveform_obj = array_data.view(Waveform)
+    waveform_obj: Waveform = array_data.view(Waveform)  # noqafrom __future__ import annotations
 
     # 设置所有自定义属性（包括None值，确保属性存在）
     waveform_obj._sampling_rate = sampling_rate
     waveform_obj._channel_names = channel_names
     waveform_obj.timestamp = timestamp
-    waveform_obj.id = id
+    waveform_obj.waveform_id = waveform_id
     waveform_obj.sine_args = sine_args
 
     return waveform_obj
@@ -238,32 +239,39 @@ class Waveform(np.ndarray):
     # 时域波形数据容器类
 
     继承自`numpy.ndarray`，用于管理时域波形数据及其元数据。
-    支持单通道数据（一维数组）和多通道数据（二维数组）。
+    **统一使用二维数组存储**，形状始终为 `(n_channels, n_samples)`。
+
+    ## 设计原则：
+        - 内部数据**始终为 2D**，形状为 `(n_channels, n_samples)`
+        - 单通道数据自动转换为 `(1, n_samples)` 形状
+        - 这消除了处理 1D/2D 混合数据时的复杂性
 
     ## 新增属性：
         - **sampling_rate**: 波形数据的**采样率**（Hz），只读属性
         - **channel_names**: 波形的**通道名称元组**，只读属性，可选属性
         - **timestamp**: 波形采样开始**时间戳**，可修改属性
-        - **id**: 波形的**唯一标识符**，可修改属性，可选属性
+        - **waveform_id**: 波形的**唯一标识符**，可修改属性，可选属性
         - **sine_args**: 波形的**正弦波参数**，可修改属性，可选属性
 
     ## 使用示例：
-        创建单通道波形：
+        创建单通道波形（自动转换为 2D）：
         ```python
-        data = np.array([1.0, 2.0, 3.0, 4.0])
-        waveform = Waveform(data, sampling_rate=1000, channel_names=None)
+        >>> data = np.array([1.0, 2.0, 3.0, 4.0])  # 1D 输入
+        >>> waveform = Waveform(data, sampling_rate=1000, channel_names=None)
+        >>> # 内部存储为 shape=(1, 4) 的 2D 数组
         ```
 
         创建多通道波形：
         ```python
-        data = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        waveform = Waveform(data, sampling_rate=1000, channel_names=("ch1", "ch2"))
+        >>> data = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])  # (2, 3) 形状
+        >>> waveform = Waveform(data, sampling_rate=1000, channel_names=("ch1", "ch2"))
+        >>> # 内部存储为 shape=(2, 3) 的 2D 数组
         ```
 
-        指定时间戳：
+        检查是否为单通道：
         ```python
-        waveform = Waveform(data, sampling_rate=1000, channel_names=None,
-                           timestamp=np.datetime64("2024-01-01T12:00:00", "ns"))
+        >>> if waveform.is_single_channel:
+        >>>     print("这是单通道波形")
         ```
     """
 
@@ -272,7 +280,7 @@ class Waveform(np.ndarray):
     _sampling_rate: PositiveFloat
     _channel_names: tuple[str, ...] | None
     timestamp: np.datetime64
-    id: int | None
+    waveform_id: int | None
     sine_args: SineArgs | None
 
     # 获取类日志器（类属性，所有实例共享）
@@ -284,47 +292,66 @@ class Waveform(np.ndarray):
         sampling_rate: PositiveFloat,
         channel_names: tuple[str, ...] | None = None,
         timestamp: np.datetime64 | None = None,
-        id: int | None = None,
+        waveform_id: int | None = None,
         sine_args: SineArgs | None = None,
         **kwargs: Any,
-    ) -> "Waveform":
+    ) -> Waveform:
         """
         创建Waveform对象
 
+        输入数组会被**统一转换为 2D 形状** `(n_channels, n_samples)`：
+        - 1D 输入 `(n_samples,)` → 自动 reshape 为 `(1, n_samples)`
+        - 2D 输入 `(n_channels, n_samples)` → 保持原状
+
         Args:
-            input_array: 输入的波形数据数组
+            input_array: 输入的波形数据数组（1D 或 2D）
             sampling_rate: 采样率（Hz），必须为正实数
             channel_names: 通道名称元组，长度必须等于通道数，可选
             timestamp: 采样开始时间戳，可选，默认为当前时间
-            id: 波形的唯一标识符，可选，默认为None
+            waveform_id: 波形的唯一标识符，可选，默认为None
             sine_args: 正弦波参数，可选，默认为None
             **kwargs: 传递给numpy.ndarray的其他参数
 
         Returns:
-            Waveform对象实例
+            Waveform对象实例，内部数据始终为 2D
+
+        Raises:
+            TypeError: 当输入数据无法转换为numpy数组时
+            ValueError: 当输入数组维度不是1D或2D时
+            ValueError: 当channel_names长度与通道数不匹配时
         """
         # 转换输入数组为numpy数组
         try:
-            obj = np.asarray(input_array, dtype=np.float64).view(cls)
+            arr = np.asarray(input_array, dtype=np.float64)
         except Exception as e:
             logger.error(f"输入数据无法转换为numpy数组: {e}", exc_info=True)
             raise TypeError(f"输入数据无法转换为numpy数组: {e}") from e
 
-        # 验证数组维度（只支持1D和2D）
-        if obj.ndim not in [1, 2]:
-            logger.error(f"只支持1维或2维数组，得到{obj.ndim}维数组", exc_info=True)
-            raise ValueError(f"只支持1维或2维数组，得到{obj.ndim}维数组")
+        # 统一转换为 2D 形状 (n_channels, n_samples)
+        if arr.ndim == 1:
+            # 1D 输入: (n_samples,) -> (1, n_samples)
+            arr = arr.reshape(1, -1)
+            logger.debug(f"1D 输入自动转换为 2D: shape={arr.shape}")
+        elif arr.ndim == 2:
+            # 2D 输入: 保持原状 (n_channels, n_samples)
+            pass
+        else:
+            logger.error(f"只支持1维或2维数组，得到{arr.ndim}维数组", exc_info=True)
+            raise ValueError(f"只支持1维或2维数组，得到{arr.ndim}维数组")
 
-        # 验证channel_names长度
+        # 创建 Waveform 视图
+        obj: Waveform = arr.view(cls)  # noqa
+
+        # 验证channel_names长度（现在 obj 始终为 2D）
         if channel_names is not None:
-            expected_channels = 1 if obj.ndim == 1 else obj.shape[0]
-            if len(channel_names) != expected_channels:
+            n_channels = obj.shape[0]
+            if len(channel_names) != n_channels:
                 logger.error(
-                    f"channel_names长度({len(channel_names)})与通道数({expected_channels})不匹配",
+                    f"channel_names长度({len(channel_names)})与通道数({n_channels})不匹配",
                     exc_info=True,
                 )
                 raise ValueError(
-                    f"channel_names长度({len(channel_names)})与通道数({expected_channels})不匹配"
+                    f"channel_names长度({len(channel_names)})与通道数({n_channels})不匹配"
                 )
 
         # 设置只读属性
@@ -340,7 +367,7 @@ class Waveform(np.ndarray):
             logger.debug(f"使用指定时间戳: {obj.timestamp}")
 
         # 设置其他可选的元数据
-        obj.id = id
+        obj.waveform_id = waveform_id
         obj.sine_args = sine_args
 
         logger.debug(
@@ -360,27 +387,27 @@ class Waveform(np.ndarray):
 
         # 安全地获取属性
         if hasattr(obj, "_sampling_rate"):
-            self._sampling_rate = obj._sampling_rate  # type: ignore
+            self._sampling_rate = obj._sampling_rate  # noqa
         else:  # 如果没有，说明是在__new__中，稍后会设置
             pass  # 保持现有值
 
         if hasattr(obj, "_channel_names"):
-            self._channel_names = obj._channel_names  # type: ignore
+            self._channel_names = obj._channel_names  # noqa
         else:
             pass  # 同理
 
         if hasattr(obj, "timestamp"):
-            self.timestamp = obj.timestamp  # type: ignore
+            self.timestamp = obj.timestamp
         else:
             pass  # 同理
 
-        if hasattr(obj, "id"):
-            self.id = obj.id  # type: ignore
+        if hasattr(obj, "waveform_id"):
+            self.waveform_id = obj.waveform_id
         else:
             pass  # 同理
 
         if hasattr(obj, "sine_args"):
-            self.sine_args = obj.sine_args  # type: ignore
+            self.sine_args = obj.sine_args
         else:
             pass  # 同理
 
@@ -399,7 +426,7 @@ class Waveform(np.ndarray):
                 self._sampling_rate,  # 不应为None
                 getattr(self, "_channel_names", None),
                 self.timestamp,  # 不应为None
-                getattr(self, "id", None),
+                getattr(self, "waveform_id", None),
                 getattr(self, "sine_args", None),
             ),
         )
@@ -409,30 +436,36 @@ class Waveform(np.ndarray):
         """
         通道数
 
+        由于内部数据始终为 2D，直接返回 shape[0]。
         （ndarray的shape为元组，不会被意外更改，直接传出是安全的）
 
         Returns:
-            通道数，单通道返回1，多通道返回通道数
+            通道数（始终 >= 1）
         """
-        if self.ndim == 1:
-            return 1
-        else:
-            return self.shape[0]
+        return self.shape[0]
+
+    @property
+    def is_single_channel(self) -> bool:
+        """
+        检查是否为单通道波形
+
+        Returns:
+            如果是单通道（channels_num == 1）返回 True，否则返回 False
+        """
+        return self.shape[0] == 1
 
     @property
     def samples_num(self) -> PositiveInt:
         """
         采样点数
 
+        由于内部数据始终为 2D，直接返回 shape[1]。
         （ndarray的shape为元组，不会被意外更改，直接传出是安全的）
 
         Returns:
             每个通道的采样点数
         """
-        if self.ndim == 1:
-            return self.shape[0]
-        else:
-            return self.shape[1]
+        return self.shape[1]
 
     @property
     def sampling_rate(self) -> PositiveFloat:
@@ -459,6 +492,20 @@ class Waveform(np.ndarray):
             通道名称元组，如果未设置则返回None
         """
         return self._channel_names
+
+    @channel_names.setter
+    def channel_names(self, new_value: tuple[str, ...]) -> None:
+        """
+        设置通道名称元组
+
+        Args:
+            new_value: 新的通道名称元组，长度必须等于通道数
+        """
+        if len(new_value) != self.channels_num:
+            raise ValueError(
+                f"channel_names长度({len(new_value)})与通道数({self.channels_num})不匹配"
+            )
+        self._channel_names = new_value
 
     @property
     def sampling_info(self) -> SamplingInfo:
@@ -492,7 +539,7 @@ class Waveform(np.ndarray):
             f"sampling_rate={self.sampling_rate}Hz, "
             f"duration={self.duration:.6f}s, "
             f"timestamp={self.timestamp}, "
-            f"id={self.id})"
+            f"waveform_id={self.waveform_id})"
         )
 
     def __str__(self) -> str:

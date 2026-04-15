@@ -123,7 +123,7 @@ class MotorController:
         """
         try:
             # 设置DLL路径并加载
-            dll_path = os.path.join(os.path.dirname(__file__), "MT_API.dll")
+            dll_path: str = os.path.join(os.path.dirname(__file__), "MT_API.dll")  # noqa
             self._api = windll.LoadLibrary(dll_path)
             logger.debug(f"成功加载DLL: {dll_path}")
 

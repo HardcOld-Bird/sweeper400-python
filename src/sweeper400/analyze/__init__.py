@@ -58,8 +58,6 @@ from .post_process import (
     save_compressed_data,
     tf_to_comp,
 )
-from .waveform_generator import SineGenerator, WaveformGenerator
-
 # 控制 import * 的行为
 __all__ = [
     "average_sweep_data",
@@ -82,8 +80,6 @@ __all__ = [
     "get_sine_multi_ch",
     "estimate_sine_args",
     "extract_single_tone_information_vvi",
-    "WaveformGenerator",
-    "SineGenerator",
     "tf_to_comp",
     "comp_to_tf",
     "load_sweep_data",

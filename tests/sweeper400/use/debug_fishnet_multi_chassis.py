@@ -73,7 +73,7 @@ class TestMultiChassisAIDataCollection:
             input_array=multi_channel_data,
             sampling_rate=sampling_info["sampling_rate"],
             timestamp=single_waveform.timestamp,
-            id=single_waveform.id,
+            waveform_id=single_waveform.id,
             sine_args=sine_args,
         )
 
@@ -222,7 +222,7 @@ class TestMultiChassisAIDataCollection:
             input_array=multi_channel_data,
             sampling_rate=sampling_info["sampling_rate"],
             timestamp=single_waveform.timestamp,
-            id=single_waveform.id,
+            waveform_id=single_waveform.id,
             sine_args=sine_args,
         )
 
