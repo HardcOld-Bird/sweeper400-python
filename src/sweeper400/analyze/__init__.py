@@ -9,6 +9,7 @@
 # 将模块功能提升至包级别，可缩短外部import语句
 from .basic_sine import (
     estimate_sine_args,
+    esti_vvi_multi_ch,
     extract_single_tone_information_vvi,
     get_sine,
     get_sine_cycles,
@@ -49,6 +50,7 @@ from .plot import (
 )
 from .post_process import (
     average_comp_data_list,
+    average_single_waveform,
     average_sweep_data,
     average_tf_data_list,
     comp_to_tf,
@@ -61,6 +63,7 @@ from .post_process import (
 # 控制 import * 的行为
 __all__ = [
     "average_sweep_data",
+    "average_single_waveform",
     "average_comp_data_list",
     "average_tf_data_list",
     "CompData",
@@ -79,6 +82,7 @@ __all__ = [
     "get_sine_cycles",
     "get_sine_multi_ch",
     "estimate_sine_args",
+    "esti_vvi_multi_ch",
     "extract_single_tone_information_vvi",
     "tf_to_comp",
     "comp_to_tf",

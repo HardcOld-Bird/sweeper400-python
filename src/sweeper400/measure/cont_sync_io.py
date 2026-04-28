@@ -144,6 +144,9 @@ class SingleChasCSIO:
         - Static AO和Feedback AO通道至少要有一个非空
     """
 
+    # 获取类日志器（类属性，所有实例共享）
+    logger = get_logger(f"{__name__}.SingleChasCSIO")
+
     def __init__(
         self,
         ai_channels: tuple[str, ...],
@@ -250,7 +253,7 @@ class SingleChasCSIO:
         # 加载Fishnet传递函数数据
         self._fishnet_tf_data = load_data_with_fallback(
             explicit_path=fishnet_tf_data,
-            default_path=Path("storage/calib/calib_result_fishnet/fishnet_tf_data.pkl"),
+            default_path=Path("storage/calib/calib_result_fishnet/tf_data.pkl"),
             data_type="Fishnet传递函数数据",
         )
 

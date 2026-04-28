@@ -128,7 +128,7 @@ class CaliberSardine:
         - 用户需要手动更换传声器位置，确保所有传声器在同一物理位置测量
     """
 
-    # 获取类日志器
+    # 获取类日志器（类属性，所有实例共享）
     logger = get_logger(f"{__name__}.CaliberSardine")
 
     def __init__(
@@ -985,7 +985,7 @@ class CaliberOctopus:
         - 使用comp_data参数进行校准验证时，应使用相同的通道配置和测量参数
     """
 
-    # 获取类日志器
+    # 获取类日志器（类属性，所有实例共享）
     logger = get_logger(f"{__name__}.CaliberOctopus")
 
     def __init__(
@@ -2177,7 +2177,7 @@ class CaliberFishNet(CaliberOctopus):
           最后使用CaliberFishNet并同时提供两个补偿数据以获得最精确的传递函数矩阵
     """
 
-    # 获取类日志器
+    # 获取类日志器（类属性，所有实例共享）
     logger = get_logger(f"{__name__}.CaliberFishNet")
 
     def __init__(
@@ -2858,7 +2858,7 @@ class PowerTester:
         - 测试过程可能较长，请耐心等待
     """
 
-    # 获取类日志器
+    # 获取类日志器（类属性，所有实例共享）
     logger = get_logger(f"{__name__}.PowerTester")
 
     def __init__(

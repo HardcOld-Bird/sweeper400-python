@@ -13,11 +13,14 @@ from .caliber import (
     CaliberSardine,
     PowerTester,
 )
+from .evolver import Evolver, load_evolved_waveform
 from .feedback_funcs import static_uniform_feedback, static_diff_feedback
 from .sweeper import SweeperCore, get_square_grid
 
 # 控制 import * 的行为
 __all__ = [
+    "Evolver",
+    "load_evolved_waveform",
     "get_square_grid",
     "SweeperCore",
     "static_uniform_feedback",

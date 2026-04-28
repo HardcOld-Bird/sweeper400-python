@@ -160,7 +160,12 @@ def filter_waveform(
     try:
         # 直接使用scipy处理1D和2D数据，自动沿指定轴操作
         # 2D数据形状 (n_channels, n_samples)，axis=-1 表示对最后一个轴，即时间轴滤波
-        filtered_data, zf = sosfilt(sos, input_waveform, axis=-1, zi=zi)
+        # sosfilt 仅在 zi 不为 None 时才返回 (filtered_data, zf)，否则只返回 filtered_data
+        if zi is not None:
+            filtered_data, zf = sosfilt(sos, input_waveform, axis=-1, zi=zi)
+        else:
+            filtered_data = sosfilt(sos, input_waveform, axis=-1)
+            zf = None
         f_logger.debug(f"完成{input_waveform.ndim}维波形滤波")
 
     except Exception as e:
@@ -183,9 +188,8 @@ def filter_waveform(
         f"数据范围: [{np.min(filtered_data):.6f}, {np.max(filtered_data):.6f}]"
     )
 
-    # scipy的sosfilt也是类似实现的，仅在具有zi参数时才返回zf
     if zi is not None:
-        return filtered_waveform, zf
+        return filtered_waveform, zf  # noqa
     return filtered_waveform
 
 

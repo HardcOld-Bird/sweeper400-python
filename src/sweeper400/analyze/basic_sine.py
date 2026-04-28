@@ -733,3 +733,261 @@ def extract_single_tone_information_vvi(
     )
 
     return detected_sine_args
+
+
+def esti_vvi_multi_ch(  # 待改进
+    input_waveform: Waveform,
+    approx_freq: PositiveFloat | None = None,
+    error_percentage: PositiveFloat = 5.0,
+    use_curve_fit: bool = False,
+) -> np.ndarray:
+    """
+    对多通道Waveform进行单频信息提取，返回各通道的复振幅
+
+    该函数专为多通道波形设计，注重效率优化。它对所有通道进行单频检测，
+    并将结果转化为复振幅形式返回，便于后续进一步处理。
+
+    优化策略：
+    1. 频率估计在所有通道间共享（假设所有通道频率相同），只做一次Periodogram估计
+    2. 相位估计使用向量化线性最小二乘，一次性处理所有通道
+    3. 可选的curve_fit优化（默认关闭以提升速度）
+
+    Args:
+        input_waveform: 目标多通道波形，形状为 (n_channels, n_samples)
+        approx_freq: 搜索的中心频率（Hz）。默认为None，表示在全频率范围内搜索
+        error_percentage: 允许的频率误差百分数，无单位。默认值为5.0
+        use_curve_fit: 是否使用curve_fit进行精确优化。默认为False，
+                      使用粗略估计以获得更高效率。设为True可获得更高精度但速度较慢。
+
+    Returns:
+        complex_amplitudes: 一维复数ndarray，形状为 (n_channels,)
+            每个元素对应一个通道的复振幅：amp * exp(1j * phase)
+
+    Examples:
+        ```python
+        >>> # 生成8通道测试波形
+        >>> from analyze import init_sampling_info, init_sine_args, get_sine_multi_ch
+        >>> sampling_info = init_sampling_info(171500.0, 85750)
+        >>> sine_args = init_sine_args(3430.0, 1.0, 0.0)
+        >>> channels = tuple(f"ch{i}" for i in range(8))
+        >>> test_wave = get_sine_multi_ch(sampling_info, sine_args, channels)
+        >>> # 提取多通道复振幅
+        >>> complex_amps = esti_vvi_multi_ch(test_wave, approx_freq=3430.0)
+        >>> print(f"通道0复振幅: {complex_amps[0]:.4f}")
+        >>> print(f"所有通道幅值: {np.abs(complex_amps)}")
+        ```
+    """
+    # 获取函数日志器
+    f_logger = get_logger(f"{__name__}.esti_vvi_multi_ch")
+
+    n_channels = input_waveform.channels_num
+    samples_num = input_waveform.samples_num
+    sampling_rate = input_waveform.sampling_rate
+
+    f_logger.debug(
+        f"开始多通道单频信息提取: channels={n_channels}, samples={samples_num}, "
+        f"sampling_rate={sampling_rate}Hz, approx_freq={approx_freq}Hz, "
+        f"use_curve_fit={use_curve_fit}"
+    )
+
+    # 获取波形数据 (n_channels, n_samples)
+    waveform_data = np.asarray(input_waveform)
+
+    # ==================== 第一阶段：共享频率估计 ====================
+    # 使用第一个通道进行频率估计（假设所有通道频率相同）
+    # 这样可以避免对每个通道都做一次Periodogram
+    first_channel_data = waveform_data[0, :]
+
+    # 复用estimate_sine_args的逻辑进行频率和幅值估计
+    # 但为了效率，我们手动实现核心逻辑
+    nyquist_freq = sampling_rate / 2.0
+
+    # 确定搜索频率范围
+    if approx_freq is not None:
+        freq_min_candidate = approx_freq * (1 - error_percentage / 100.0)
+        freq_min = max(freq_min_candidate, 0.0)
+        freq_max_candidate = approx_freq / (1 - error_percentage / 100.0)
+        freq_max = min(freq_max_candidate, nyquist_freq)
+    else:
+        freq_min = 0.0
+        freq_max = nyquist_freq
+
+    # 使用Periodogram计算功率谱
+    psd_freqs, psd_values = periodogram(
+        first_channel_data,
+        fs=sampling_rate,
+        window="hann",
+        detrend=False,
+        return_onesided=True,
+        scaling="spectrum",
+    )
+
+    # 转换为幅度谱
+    psd_magnitude = np.sqrt(psd_values) * np.sqrt(2.0)
+
+    # 在指定频率范围内搜索峰值
+    freq_range_mask = (psd_freqs >= freq_min) & (psd_freqs <= freq_max)
+    psd_magnitude_in_range = psd_magnitude[freq_range_mask]
+    psd_freqs_in_range = psd_freqs[freq_range_mask]
+
+    # 找到幅度最大的频率点
+    max_magnitude_idx = np.argmax(psd_magnitude_in_range)
+    coarse_frequency = psd_freqs_in_range[max_magnitude_idx]
+
+    # 抛物线拟合精细化频率估计
+    if 0 < max_magnitude_idx < len(psd_magnitude_in_range) - 1:
+        y1 = psd_magnitude_in_range[max_magnitude_idx - 1]
+        y2 = psd_magnitude_in_range[max_magnitude_idx]
+        y3 = psd_magnitude_in_range[max_magnitude_idx + 1]
+        denominator = float(y1 - 2 * y2 + y3)
+        if abs(denominator) > 1e-12:
+            delta = 0.5 * float(y1 - y3) / denominator
+            freq_resolution = float(psd_freqs[1] - psd_freqs[0])
+            estimated_frequency = float(coarse_frequency) + delta * freq_resolution
+        else:
+            estimated_frequency = float(coarse_frequency)
+    else:
+        estimated_frequency = float(coarse_frequency)
+
+    f_logger.debug(f"共享频率估计结果: {estimated_frequency:.6f}Hz")
+
+    # ==================== 第二阶段：向量化相位估计（所有通道）====================
+    # 使用线性最小二乘对所有通道同时进行相位估计
+    # 构建设计矩阵
+    cycles_for_phase_estimation = 3
+    samples_per_cycle = float(sampling_rate) / estimated_frequency
+    phase_estimation_samples = int(cycles_for_phase_estimation * samples_per_cycle)
+    phase_estimation_samples = min(phase_estimation_samples, samples_num)
+
+    time_array_for_phase = np.arange(phase_estimation_samples) / sampling_rate
+    cos_term = np.cos(2 * np.pi * estimated_frequency * time_array_for_phase)
+    sin_term = np.sin(2 * np.pi * estimated_frequency * time_array_for_phase)
+    design_matrix = np.column_stack([cos_term, sin_term])
+
+    # 截取所有通道的前phase_estimation_samples个样本 (n_channels, phase_estimation_samples)
+    waveform_data_for_phase = waveform_data[:, :phase_estimation_samples]
+
+    # 向量化最小二乘求解：对每个通道求解 [a, b] 使得 y ≈ a*cos + b*sin
+    # 使用numpy的lstsq，但需要对每个通道单独调用
+    # 更高效的方式是手动求解正规方程: (X^T X)^(-1) X^T y
+
+    # 计算 (X^T X)^(-1) X^T (2, phase_estimation_samples)
+    XtX = design_matrix.T @ design_matrix
+    try:
+        XtX_inv = np.linalg.inv(XtX)
+    except np.linalg.LinAlgError:
+        # 如果矩阵奇异，使用伪逆
+        XtX_inv = np.linalg.pinv(XtX)
+    XtX_inv_Xt = XtX_inv @ design_matrix.T  # shape: (2, phase_estimation_samples)
+
+    # 对所有通道同时计算系数: (n_channels, 2) = (n_channels, n_samples) @ (n_samples, 2)
+    coefficients = waveform_data_for_phase @ XtX_inv_Xt.T  # shape: (n_channels, 2)
+
+    # 提取a和b系数
+    a_coeffs = coefficients[:, 0]  # cos系数
+    b_coeffs = coefficients[:, 1]  # sin系数
+
+    # 计算相位
+    estimated_phases = np.arctan2(a_coeffs, b_coeffs)
+
+    # 计算幅值（使用RMS方法）
+    # 对于正弦波，幅值 = sqrt(2) * RMS
+    rms_values = np.sqrt(np.mean(waveform_data**2, axis=1))
+    estimated_amplitudes = rms_values * np.sqrt(2)
+
+    f_logger.debug(
+        f"向量化相位/幅值估计完成: 幅值范围[{estimated_amplitudes.min():.6f}, "
+        f"{estimated_amplitudes.max():.6f}], 相位范围[{estimated_phases.min():.6f}, "
+        f"{estimated_phases.max():.6f}]"
+    )
+
+    # ==================== 第三阶段：可选的curve_fit优化 ====================
+    if use_curve_fit:
+        f_logger.debug("开始curve_fit优化...")
+        time_array = np.arange(samples_num) / sampling_rate
+
+        # 多通道情况下，所有通道共享相同频率
+        # 策略：使用第一个通道优化频率、幅值、相位，然后将优化后的频率应用到所有通道
+        # 再对每个通道单独优化幅值和相位（固定频率）
+
+        # 初始化优化结果数组
+        optimized_amplitudes = np.zeros(n_channels)
+        optimized_phases = np.zeros(n_channels)
+
+        # 第一步：使用第一个通道优化所有三个参数
+        def sine_model_full(
+            t: np.ndarray, amplitude: float, frequency: float, phase: float
+        ) -> np.ndarray:
+            """完整正弦波模型: y = amplitude * sin(2π * f * t + phase)"""
+            return amplitude * np.sin(2 * np.pi * frequency * t + phase)
+
+        first_channel_data = waveform_data[0, :]
+        initial_params_full = [
+            estimated_amplitudes[0],
+            estimated_frequency,
+            estimated_phases[0],
+        ]
+
+        try:
+            optimal_params_full, _ = curve_fit(
+                sine_model_full,
+                time_array,
+                first_channel_data,
+                p0=initial_params_full,
+                bounds=([0.0, freq_min, -np.pi], [np.inf, freq_max, np.pi]),
+                maxfev=5000,
+            )
+            optimized_frequency = float(optimal_params_full[1])
+            optimized_amplitudes[0] = float(optimal_params_full[0])
+            optimized_phases[0] = float(optimal_params_full[2])
+            f_logger.debug(f"频率优化结果: {optimized_frequency:.6f}Hz")
+        except Exception as e:
+            f_logger.warning(f"频率优化失败: {e}，使用粗略估计的频率")
+            optimized_frequency = estimated_frequency
+            optimized_amplitudes[0] = estimated_amplitudes[0]
+            optimized_phases[0] = estimated_phases[0]
+
+        # 第二步：使用优化后的频率，对每个通道优化幅值和相位
+        def sine_model_fixed_freq(
+            t: np.ndarray, amplitude: float, phase: float
+        ) -> np.ndarray:
+            """正弦波模型（固定频率）: y = amplitude * sin(2π * f * t + phase)"""
+            return amplitude * np.sin(2 * np.pi * optimized_frequency * t + phase)
+
+        # 优化剩余通道
+        for ch_idx in range(1, n_channels):
+            channel_data = waveform_data[ch_idx, :]
+            initial_params = [estimated_amplitudes[ch_idx], estimated_phases[ch_idx]]
+
+            try:
+                optimal_params, _ = curve_fit(
+                    sine_model_fixed_freq,
+                    time_array,
+                    channel_data,
+                    p0=initial_params,
+                    bounds=([0.0, -np.pi], [np.inf, np.pi]),
+                    maxfev=5000,
+                )
+                optimized_amplitudes[ch_idx] = float(optimal_params[0])
+                optimized_phases[ch_idx] = float(optimal_params[1])
+            except Exception as e:
+                f_logger.warning(f"通道{ch_idx}的curve_fit优化失败: {e}，使用粗略估计")
+                optimized_amplitudes[ch_idx] = estimated_amplitudes[ch_idx]
+                optimized_phases[ch_idx] = estimated_phases[ch_idx]
+
+        # 使用优化后的值
+        estimated_amplitudes = optimized_amplitudes
+        estimated_phases = optimized_phases
+        f_logger.debug("curve_fit优化完成")
+
+    # ==================== 构建复振幅结果 ====================
+    # 复振幅 = 幅值 * exp(1j * 相位)
+    complex_amplitudes = estimated_amplitudes * np.exp(1j * estimated_phases)
+
+    f_logger.debug(
+        f"多通道单频信息提取完成: 输出形状={complex_amplitudes.shape}, "
+        f"复振幅幅值范围=[{np.abs(complex_amplitudes).min():.6f}, "
+        f"{np.abs(complex_amplitudes).max():.6f}]"
+    )
+
+    return complex_amplitudes

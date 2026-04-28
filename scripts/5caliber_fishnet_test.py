@@ -45,8 +45,8 @@ caliber = CaliberFishNet(
 
 # %% 执行校准
 caliber.calibrate(
-    starts_num=2,
-    chunks_per_start=3,
+    starts_num=1,
+    chunks_per_start=1,
     result_folder="D:\\EveryoneDownloaded\\fishnet_calib",
 )
 

@@ -70,7 +70,7 @@ class MotorController:
         - 脱机模式下部分功能使用本地计算
     """
 
-    # 获取类日志器
+    # 获取类日志器（类属性，所有实例共享）
     logger = get_logger(f"{__name__}.MotorController")
 
     def __init__(

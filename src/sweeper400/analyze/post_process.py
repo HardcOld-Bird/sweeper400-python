@@ -22,6 +22,7 @@ from .my_dtypes import (
     SweepData,
     TFData,
     Waveform,
+    PositiveInt,
 )
 
 # 获取模块日志器
@@ -208,6 +209,81 @@ def load_sweep_data(file_path: str | Path) -> SweepData:
         raise ValueError(
             "数据格式不正确，期望包含'ai_data_list'和'ao_data'键的字典"
         )
+
+
+def average_single_waveform(
+    waveform: Waveform,
+    segments: PositiveInt = 10,
+) -> Waveform:
+    """
+    对单个Waveform进行分段平均处理
+
+    将输入的Waveform切分为等长的segments段，然后对各段进行按位相加并取平均，
+    返回平均后的同形状Waveform。这种处理方式可以有效减少随机噪声的影响。
+
+    Args:
+        waveform: 输入的波形数据，形状为 (n_channels, n_samples)
+        segments: 切分的段数，默认为10。必须为正整数。
+
+    Returns:
+        平均后的Waveform对象，形状与输入相同
+
+    Raises:
+        ValueError: 当segments不是正整数时
+        ValueError: 当波形采样点数不能被segments整除时
+
+    Examples:
+        >>> from numpy import ndarray        >>> # 创建一个1000点的波形，进行10段平均
+        >>> data = np.random.randn(2, 1000)  # 2通道，1000点
+        >>> wf = Waveform(data, sampling_rate=10000)  # noqa
+        >>> averaged_wf = average_single_waveform(wf, segments=10)
+        >>> # 结果形状仍为 (2, 100)，每段100点平均后得到100点
+    """
+    # 获取函数日志器
+    f_logger = get_logger(f"{__name__}.average_single_waveform")
+
+    samples_num = waveform.samples_num
+    channels_num = waveform.channels_num
+
+    # 检查采样点数是否能被segments整除
+    if samples_num % segments != 0:
+        error_msg = (
+            f"波形采样点数({samples_num})不能被segments({segments})整除，"
+            f"余数为 {samples_num % segments}。为避免引入相位误差，"
+            f"请调整segments值或波形长度。"
+        )
+        f_logger.error(error_msg)
+        raise ValueError(error_msg)
+
+    # 计算每段的采样点数
+    segment_samples = samples_num // segments
+
+    f_logger.debug(
+        f"开始分段平均: 通道数={channels_num}, 总采样点数={samples_num}, "
+        f"段数={segments}, 每段采样点数={segment_samples}"
+    )
+
+    # 将波形重塑为 (channels_num, segments, segment_samples)
+    # 然后对segments维度取平均
+    reshaped = waveform.reshape(channels_num, segments, segment_samples)
+    averaged_data = reshaped.mean(axis=1)  # 对segments维度取平均
+
+    # 创建平均后的Waveform对象
+    averaged_waveform = Waveform(
+        input_array=averaged_data,
+        sampling_rate=waveform.sampling_rate,
+        channel_names=waveform.channel_names,
+        timestamp=waveform.timestamp,
+        waveform_id=waveform.waveform_id,
+        sine_args=waveform.sine_args,
+    )
+
+    f_logger.debug(
+        f"波形分段平均完成: 原始形状({channels_num}, {samples_num}) -> "
+        f"平均后形状({channels_num}, {segment_samples}), 段数={segments}"
+    )
+
+    return averaged_waveform
 
 
 def average_sweep_data(

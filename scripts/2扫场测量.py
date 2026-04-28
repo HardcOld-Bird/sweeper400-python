@@ -43,7 +43,7 @@ ao_channels_feedback = (
 # 因此，建议至少停顿0.5s（例如0.2s×3）
 sampling_info = init_sampling_info(171500.0, 34300)  # 采样率171.5kHz, 0.2秒
 sine_args = init_sine_args(
-    frequency=3430.0, amplitude=0.00, phase=0.0
+    frequency=3430.0, amplitude=0.05, phase=0.0
 )  # 3430Hz正弦波，波长10cm
 static_output_waveform = get_sine_cycles(sampling_info, sine_args)
 
@@ -57,7 +57,7 @@ swp = SweeperCore(
     ao_channels_static=ao_channels_static,
     ao_channels_feedback=ao_channels_feedback,
     static_output_waveform=static_output_waveform,
-    feedback_function=static_uniform_feedback,
+    # feedback_function=static_uniform_feedback,
     point_list=grid,
 )
 
@@ -68,13 +68,19 @@ swp.calib()
 swp.where()
 
 # %% 移动位置
-swp.move_to(160.0, 10.0)
+swp.move_to(0.0, 0.0)
 
 # %% 移动位置
-swp.move_to(310.0, 310.0)
+swp.move_to(1.0, 311.0)
+
+# %% 移动位置
+swp.move_to(312.0, 155.0)
+
+# %% 移动位置
+swp.move_to(312.0, 312.0)
 
 # %% 创建点阵
-grid = get_square_grid(10.0, 310.0, 10.0, 310.0)
+grid = get_square_grid(1.0, 311.0, 1.0, 311.0)
 swp.new_point_list(grid)
 
 # %% 开始扫场测量
