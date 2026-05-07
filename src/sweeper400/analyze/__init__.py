@@ -38,6 +38,7 @@ from .my_dtypes import (
     Waveform,
     init_sampling_info,
     init_sine_args,
+    init_comp_data,
 )
 from .plot import (
     plot_sweep_waveforms,
@@ -67,6 +68,7 @@ __all__ = [
     "average_comp_data_list",
     "average_tf_data_list",
     "CompData",
+    "init_comp_data",
     "PositiveInt",
     "PositiveFloat",
     "SamplingInfo",

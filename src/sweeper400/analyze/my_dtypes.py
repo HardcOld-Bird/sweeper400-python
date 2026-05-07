@@ -655,3 +655,42 @@ class CompData(TypedDict):
     sine_args: SineArgs
     mean_amp_ratio: float
     mean_phase_shift: float
+
+
+def init_comp_data(
+    comp_dataframe: pd.DataFrame,
+    sampling_info: SamplingInfo,
+    sine_args: SineArgs,
+    mean_amp_ratio: float,
+    mean_phase_shift: float,
+) -> CompData:
+    """
+    手动获取CompData的工具函数
+
+    Args:
+        comp_dataframe: 补偿参数DataFrame
+        sampling_info: 采样信息（必选）
+        sine_args: 正弦波参数（包含频率、幅值和相位信息）
+        mean_amp_ratio: 所有通道对的平均幅值比
+        mean_phase_shift: 所有通道对的平均相位差（弧度制）
+
+    Returns:
+        CompData: 补偿参数计算结果容器格式
+    """
+    logger.debug(
+        f"手动创建CompData: comp_dataframe={comp_dataframe}, "
+        f"sampling_info={sampling_info}, "
+        f"sine_args={sine_args}, "
+        f"mean_amp_ratio={mean_amp_ratio}, "
+        f"mean_phase_shift={mean_phase_shift}"
+    )
+
+    comp_data = CompData(
+        comp_dataframe=comp_dataframe,
+        sampling_info=sampling_info,
+        sine_args=sine_args,
+        mean_amp_ratio=mean_amp_ratio,
+        mean_phase_shift=mean_phase_shift,
+    )
+
+    return comp_data

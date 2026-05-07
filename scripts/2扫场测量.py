@@ -68,7 +68,10 @@ swp.calib()
 swp.where()
 
 # %% 移动位置
-swp.move_to(0.0, 0.0)
+swp.move_to(1.0, 1.0)
+
+# %% 移动位置
+swp.move_to(1.0, 155.0)
 
 # %% 移动位置
 swp.move_to(1.0, 311.0)

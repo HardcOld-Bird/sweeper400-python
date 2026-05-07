@@ -347,25 +347,24 @@ class SingleChasCSIO:
             timestamp=currently_playing_feedback_waveform.timestamp,
         )
 
+    @staticmethod
     def _process_waveform_for_channels(
-        self,
         waveform: Waveform,
         channel_names: tuple[str, ...],
     ) -> Waveform:
         """
-        处理波形以匹配通道要求（单通道扩展/补充通道信息/检查匹配/应用AO补偿）
+        处理波形以匹配通道要求（单通道扩展/补充通道信息/检查匹配）
 
         该方法处理波形以匹配目标通道数量：
         1. 如果输入是单通道波形且需要多通道输出，使用get_sine_multi_ch重新生成多通道波形
         2. 如果波形已有正确通道数，直接添加channel_names
-        3. 最后使用comp_ao_multi_ch_wf应用AO补偿（如果已加载）
 
         Args:
             waveform: 输入波形对象
             channel_names: 目标通道名称元组
 
         Returns:
-            处理后的波形对象（已应用AO补偿，如果可用）
+            处理后的波形对象（未应用AO补偿）
 
         Raises:
             ValueError: 当波形通道数与目标通道数不匹配时
@@ -404,11 +403,6 @@ class SingleChasCSIO:
                 f"静态输出波形通道数 ({waveform.channels_num}) "
                 f"与目标通道数 ({channels_num}) 不匹配"
             )
-
-        # 应用AO补偿（如果已加载）
-        if self._ao_comp_data is not None:
-            logger.debug("应用AO补偿到波形")
-            return comp_multi_ch_wf(multi_ch_waveform, self._ao_comp_data)
 
         return multi_ch_waveform
 
@@ -467,19 +461,19 @@ class SingleChasCSIO:
             raise ValueError("输出波形不能为空")
 
         # 处理输出波形（单通道扩展/补充通道信息/检查匹配）
-        processed_waveform = self._process_waveform_for_channels(
+        raw_waveform = self._process_waveform_for_channels(
             new_waveform, self._ao_channels_static
         )
 
         # 验证采样率是否匹配
-        if processed_waveform.sampling_rate != self._sampling_info["sampling_rate"]:
+        if raw_waveform.sampling_rate != self._sampling_info["sampling_rate"]:
             logger.warning(
-                f"新波形采样率 ({processed_waveform.sampling_rate} Hz) "
+                f"新波形采样率 ({raw_waveform.sampling_rate} Hz) "
                 f"与原采样率 ({self._sampling_info['sampling_rate']} Hz) 不匹配"
             )
 
         # 更新内部波形
-        self._static_output_waveform = processed_waveform
+        self._static_output_waveform = raw_waveform
 
         # 更新Static AO任务的波形数据
         if self._ao_task_static is not None:
@@ -536,7 +530,7 @@ class SingleChasCSIO:
 
         # 注册回调函数
         callback_samples = self._static_output_waveform.samples_num
-        self._ai_task.register_every_n_samples_acquired_into_buffer_event(  # type: ignore
+        self._ai_task.register_every_n_samples_acquired_into_buffer_event(
             callback_samples, self._ai_callback
         )
         logger.debug(f"  已注册AI回调函数，每 {callback_samples} 样本触发一次")
@@ -594,13 +588,13 @@ class SingleChasCSIO:
 
         # 添加所有AO通道
         for channel_name in channels:
-            task.ao_channels.add_ao_voltage_chan(  # type: ignore
+            task.ao_channels.add_ao_voltage_chan(
                 channel_name, min_val=-10.0, max_val=10.0
             )
             logger.debug(f"  添加通道: {channel_name}")
 
         # 配置时钟源和采样
-        task.timing.cfg_samp_clk_timing(  # type: ignore
+        task.timing.cfg_samp_clk_timing(
             rate=self._sampling_info["sampling_rate"],
             sample_mode=AcquisitionType.CONTINUOUS,
         )
@@ -642,9 +636,19 @@ class SingleChasCSIO:
             return
 
         try:
+            # 写入之前，对静态输出波形应用AO补偿
+            if self._ao_comp_data is not None:
+                logger.debug("对静态输出波形应用AO补偿")
+                comped_static_waveform: Waveform = comp_multi_ch_wf(
+                    self._static_output_waveform,
+                    self._ao_comp_data,
+                )
+            else:
+                comped_static_waveform = self._static_output_waveform
+
             # 提取波形数据
             # Waveform统一使用2D格式 (n_channels, n_samples)
-            waveform_data = np.asarray(self._static_output_waveform)
+            waveform_data = np.asarray(comped_static_waveform)
 
             # 根据通道数处理数据格式
             # nidaqmx要求：单通道任务使用1D数组，多通道任务使用2D数组
@@ -699,7 +703,7 @@ class SingleChasCSIO:
                 # 多通道任务：保持2D数组
                 write_data = silent_waveform
 
-            # 写入数据
+            # 写入数据（全0波形无需补偿）
             self._ao_task_feedback.write(write_data, auto_start=False)
 
             # 缓存写入的波形副本（按chunk分割存储）
@@ -722,35 +726,34 @@ class SingleChasCSIO:
             logger.error(f"静音波形写入失败: {e}", exc_info=True)
             raise
 
-    def _write_ao_task_waveform_feedback(self, feedback_waveform: Waveform):
+    def _write_ao_task_waveform_feedback(self, raw_feedback_waveform: Waveform):
         """
         向Feedback AO任务写入波形数据
 
         Args:
-            feedback_waveform: 反馈波形数据（包含所有feedback通道）
+            raw_feedback_waveform: 未补偿的反馈波形数据（包含所有feedback通道）
         """
         if self._ao_task_feedback is None:
             return
 
         try:
-            # 提取波形数据
-            # Waveform统一使用2D格式 (n_channels, n_samples)
-            channels_num = self.ao_channels_num_feedback
-
-            if channels_num == 1:
-                # 单通道任务：提取一维数组
-                waveform_data = np.asarray(feedback_waveform[0, :])
+            # 写入之前，对feedback波形应用AO补偿
+            if self._ao_comp_data is not None:
+                logger.debug("对反馈波形应用AO补偿")
+                comped_feedback_waveform: Waveform = comp_multi_ch_wf(
+                    raw_feedback_waveform,
+                    self._ao_comp_data,
+                )
             else:
-                # 多通道任务：使用二维数组
-                waveform_data = np.asarray(feedback_waveform)
+                comped_feedback_waveform = raw_feedback_waveform
 
             # 写入数据
-            self._ao_task_feedback.write(waveform_data, auto_start=False)
+            self._ao_task_feedback.write(comped_feedback_waveform, auto_start=False)
 
             # 缓存写入的波形副本（保持2D格式）
-            self._feedback_ao_queue.append(feedback_waveform.copy())
+            self._feedback_ao_queue.append(raw_feedback_waveform.copy())
 
-            logger.debug(f"成功写入反馈波形数据，shape: {waveform_data.shape}")
+            logger.debug(f"成功写入反馈波形数据，shape: {comped_feedback_waveform.shape}")
 
         except Exception as e:
             logger.error(f"反馈波形写入失败: {e}", exc_info=True)
@@ -820,7 +823,7 @@ class SingleChasCSIO:
 
         while not self._stop_event.is_set():
             # 等待数据就绪事件
-            _ = self._data_ready_event.wait(timeout=timeout)
+            self._data_ready_event.wait(timeout=timeout)
 
             # 清除事件标志
             self._data_ready_event.clear()
@@ -836,7 +839,7 @@ class SingleChasCSIO:
 
                 # 在锁外处理数据（避免长时间持有锁）
                 try:
-                    # 任务1：数据预处理
+                    # ===== 任务1：数据预处理 =====
                     # 注意：nidaqmx的read()方法：
                     # - 单通道时返回1D列表 [sample1, sample2, ...]
                     # - 多通道时返回2D列表 [[ch1_sample1, ch1_sample2, ...], [ch2_sample1, ch2_sample2, ...]]
@@ -847,21 +850,18 @@ class SingleChasCSIO:
                         sampling_rate=self._sampling_info["sampling_rate"],
                         channel_names=self._ai_channels,
                     )
+                    # 首先，对AI波形应用AI补偿
+                    if self._ai_comp_data is not None:
+                        logger.debug("对AI波形应用AI补偿")
+                        ai_waveform = comp_multi_ch_wf(
+                            ai_waveform,
+                            self._ai_comp_data,
+                        )
 
-                    # 任务2：处理反馈
+                    # ===== 任务2：处理反馈 =====
                     feedback_waveform = None
                     if self._ao_channels_feedback:
                         try:
-                            # ===== AI补偿阶段 =====
-                            # logger.warning("开始AI补偿阶段")
-                            # 对AI波形应用AI补偿
-                            if self._ai_comp_data is not None:
-                                logger.debug("对AI波形应用AI补偿")
-                                ai_waveform = comp_multi_ch_wf(
-                                    ai_waveform,
-                                    self._ai_comp_data,
-                                )
-
                             # ===== 获取对应feedback波形 =====
                             # logger.warning("开始获取对应feedback波形")
                             # 从队列中取出最旧的波形（采集时正在播放的）
@@ -873,21 +873,11 @@ class SingleChasCSIO:
                             # logger.warning("开始调用反馈函数")
                             # 使用补偿后的AI波形、当前播放的波形和fishnet_tf_data调用feedback_function
                             feedback_waveform = self._feedback_function(
-                                ai_waveform,
-                                self._static_output_waveform,
-                                currently_playing,
+                                ai_waveform,  # 使用已补偿的AI波形，消除硬件偏差
+                                self._static_output_waveform,  # 使用未补偿的AO波形，方便处理
+                                currently_playing,  # 未补偿的AO波形
                                 self._fishnet_tf_data,
                             )
-
-                            # ===== AO补偿阶段 =====
-                            # logger.warning("开始AO补偿阶段")
-                            # 对feedback波形应用AO补偿
-                            if self._ao_comp_data is not None:
-                                logger.debug("对反馈波形应用AO补偿")
-                                feedback_waveform = comp_multi_ch_wf(
-                                    feedback_waveform,
-                                    self._ao_comp_data,
-                                )
 
                             # ===== 波形写入阶段 =====
                             # logger.warning("开始写入Feedback AO任务")
@@ -898,15 +888,15 @@ class SingleChasCSIO:
                             logger.error(f"调用反馈函数失败: {e}", exc_info=True)
                             feedback_waveform = None  # 重置为None，表示反馈失败
 
-                    # 任务3：处理导出
+                    # ===== 任务3：处理导出 =====
                     if self._enable_export:
                         # 增加导出计数
                         self._chunks_num += 1
                         # 导出所有波形：AI、Static AO、Feedback AO
                         self._export_function(
-                            ai_waveform,
-                            self._static_output_waveform,
-                            feedback_waveform,
+                            ai_waveform,  # 已补偿的AI波形
+                            self._static_output_waveform,  # 未补偿的AO波形
+                            feedback_waveform,  # 未补偿的AO波形
                             self._chunks_num,
                         )
                     else:
