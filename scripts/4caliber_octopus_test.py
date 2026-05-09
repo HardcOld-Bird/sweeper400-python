@@ -5,10 +5,11 @@
 """
 
 from sweeper400.analyze import init_sampling_info, init_sine_args, plot_sweep_waveforms
-from sweeper400.use import CaliberOctopus, load_sweep_data
+from sweeper400.calib import CaliberOctopus
+from sweeper400.analyze import load_sweep_data
 
 # %% 创建采样信息和正弦波参数（使用推荐的参数）
-sampling_info = init_sampling_info(171500.0, 85750)  # 采样率171.5kHz, 0.5秒
+sampling_info = init_sampling_info(171500.0, 34300)  # 采样率171.5kHz, 0.2秒
 sine_args = init_sine_args(frequency=3430.0, amplitude=0.01, phase=0.0)  # 3430Hz正弦波，波长10cm
 
 # 定义通道配置
@@ -44,7 +45,7 @@ sd = load_sweep_data("D:\\EveryoneDownloaded\\before_calib\\raw_sweep_data.pkl")
 plot_sweep_waveforms(
     sd,
     "D:\\EveryoneDownloaded\\before_calib",
-    zoom_factor=1,
+    zoom_factor=100,
 )
 
 # %% 创建验证对象并再次校准

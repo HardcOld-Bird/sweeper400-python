@@ -5,11 +5,12 @@
 """
 
 from sweeper400.analyze import init_sampling_info, init_sine_args
-from sweeper400.use import CaliberFishNet
+from sweeper400.calib import CaliberFishNet
 
 # %% 创建采样信息和正弦波参数（使用推荐的参数）
+# 经测试，chunk size 设置为0.2秒可能导致波形更新不及时，建议大于该时长
 sampling_info = init_sampling_info(171500.0, 85750)  # 采样率171.5kHz, 0.5秒
-sine_args = init_sine_args(frequency=3430.0, amplitude=0.02, phase=0.0)  # 3430Hz正弦波，波长10cm
+sine_args = init_sine_args(frequency=3430.0, amplitude=0.05, phase=0.0)  # 3430Hz正弦波，波长10cm
 
 # 定义通道配置
 ai_channels = (
@@ -21,7 +22,7 @@ ai_channels = (
     "PXI1Slot5/ai1",
     "PXI1Slot6/ai0",
     "PXI1Slot6/ai1",
-    # "PXI1Slot2/ai0",
+    "PXI1Slot2/ai0",
 )
 ao_channels = (
     "PXI1Slot3/ao0",
@@ -46,7 +47,7 @@ caliber = CaliberFishNet(
 # %% 执行校准
 caliber.calibrate(
     starts_num=1,
-    chunks_per_start=1,
+    chunks_per_start=3,
     result_folder="D:\\EveryoneDownloaded\\fishnet_calib",
 )
 

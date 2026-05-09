@@ -211,10 +211,11 @@ def comp_multi_ch_wf(
     **补偿原理**：
     - 预处理：对每个通道进行去趋势处理（去除直流偏移），避免循环移位时产生基线跳变
     - 幅值补偿：输出幅值 = 输入幅值 × 幅值补偿倍率
-    - 时间补偿：根据时间延迟计算采样点延迟，对信号进行循环移位
-      - 采样点延迟 = 时间延迟 × 采样率
-      - 通过np.roll进行循环移位（正延迟向右移，负延迟向左移）
-      - 为确保信号开头不受影响，统一将信号开头部分移到末尾
+    - 时间补偿：根据时间增量计算采样点偏移，对信号进行循环移位
+      - time_increment 的物理含义：需要施加给信号的相位变化 = time_increment × 2πf
+      - 由于 np.roll(signal, +n) 使信号相位减少 2πf×n/fs，
+        为获得正确的相位增加方向，使用 np.roll(signal, -sample_delay)
+      - 采样点偏移 = round(time_increment × 采样率)
 
     Args:
         input_waveform: 输入的波形（统一使用2D格式，单通道为(1, n_samples)），
@@ -335,19 +336,19 @@ def comp_multi_ch_wf(
         compensated_amplitude = detrended_waveform[ch_idx, :] * amp_multiplier
 
         # 8.2 时间补偿（通过循环移位）
-        # 计算采样点延迟（四舍五入以获得整数采样点）
-        # time_increment是时间延迟补偿值（秒）
-        # np.roll的shift参数：正值向右移（延迟），负值向左移（提前）
+        # time_increment 的物理含义：需要施加的相位变化 = time_increment × 2πf
+        # （与 comp_ai_sine_args 中 phase += time_increment * 2πf 保持一致）
+        # 由于 np.roll(signal, +n) 使相位减少 2πf*n/fs（正移位=延迟=相位减少），
+        # 而我们需要相位增加 time_increment*2πf，因此使用 -sample_delay
         sample_delay = int(np.round(time_increment * sampling_rate))
 
         f_logger.debug(
             f"通道 {channel_name}: 时间增量={time_increment * 1e6:.3f}μs, "
-            f"采样点延迟={sample_delay}"
+            f"采样点偏移={-sample_delay}（负号修正roll方向）"
         )
 
-        # 使用np.roll进行循环移位
-        # np.roll(array, shift): shift>0向右移，shift<0向左移
-        compensated_signal = np.roll(compensated_amplitude, sample_delay)
+        # 使用np.roll进行循环移位（取反以匹配相位增加方向）
+        compensated_signal = np.roll(compensated_amplitude, -sample_delay)
 
         # 存储到输出数组
         output_data[ch_idx, :] = compensated_signal

@@ -11,13 +11,11 @@ from .caliber import (
     CaliberAnemone,
     CaliberFishNet,
     CaliberOctopus,
-    CaliberSardine,
     PowerTester,
 )
 
 # 控制 import * 的行为
 __all__ = [
-    "CaliberSardine",
     "CaliberOctopus",
     "CaliberFishNet",
     "CaliberAnemone",

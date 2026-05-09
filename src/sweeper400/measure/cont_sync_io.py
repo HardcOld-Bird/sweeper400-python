@@ -156,8 +156,8 @@ class SingleChasCSIO:
         export_function: Callable[[Waveform, Waveform, Waveform | None, PositiveInt], Any],
         feedback_function: Callable[[Waveform, Waveform, Waveform, TFData], Waveform] | None = None,
         buffer_size_multiplier: PositiveInt = 5,
-        ao_comp_data: str | Path | None = None,
         ai_comp_data: str | Path | None = None,
+        ao_comp_data: str | Path | None = None,
         fishnet_tf_data: str | Path | None = None,
     ):
         """
@@ -184,9 +184,9 @@ class SingleChasCSIO:
             buffer_size_multiplier: AI和Feedback AO缓冲区大小倍数
                 （相对于static_output_waveform.samples_num），
                 默认为5。增大此值可减少缓冲区溢出风险，但会增加内存占用。
-            ao_comp_data: AO补偿数据文件路径（可选），用于补偿输出波形。
-                如果提供，将使用load_data_with_fallback加载并存储为属性。
             ai_comp_data: AI补偿数据文件路径（可选），用于补偿输入信号的正弦参数。
+                如果提供，将使用load_data_with_fallback加载并存储为属性。
+            ao_comp_data: AO补偿数据文件路径（可选），用于补偿输出波形。
                 如果提供，将使用load_data_with_fallback加载并存储为属性。
             fishnet_tf_data: Fishnet传递函数数据文件路径（可选），用于反馈控制。
                 如果提供，将使用load_data_with_fallback加载并存储为属性。
@@ -238,17 +238,17 @@ class SingleChasCSIO:
         self._chunks_num = 0
         self._enable_export = False
 
+        # 加载AI补偿数据
+        self._ai_comp_data = load_data_with_fallback(
+            explicit_path=ai_comp_data,
+            default_path=Path("storage/calib/calib_result_anemone/ai_comp_data.pkl"),
+            data_type="AI补偿数据",
+        )
         # 加载AO补偿数据
         self._ao_comp_data = load_data_with_fallback(
             explicit_path=ao_comp_data,
             default_path=Path("storage/calib/calib_result_octopus/ao_comp_data.pkl"),
             data_type="AO补偿数据",
-        )
-        # 加载AI补偿数据
-        self._ai_comp_data = load_data_with_fallback(
-            explicit_path=ai_comp_data,
-            default_path=Path("storage/calib/calib_result_sardine/ai_comp_data.pkl"),
-            data_type="AI补偿数据",
         )
         # 加载Fishnet传递函数数据
         self._fishnet_tf_data = load_data_with_fallback(

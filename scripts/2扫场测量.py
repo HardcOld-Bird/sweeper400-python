@@ -77,10 +77,10 @@ swp.move_to(1.0, 155.0)
 swp.move_to(1.0, 311.0)
 
 # %% 移动位置
-swp.move_to(312.0, 155.0)
+swp.move_to(311.0, 155.0)
 
 # %% 移动位置
-swp.move_to(312.0, 312.0)
+swp.move_to(311.0, 312.0)
 
 # %% 创建点阵
 grid = get_square_grid(1.0, 311.0, 1.0, 311.0)

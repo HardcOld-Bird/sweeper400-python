@@ -4,7 +4,7 @@
 这是一个用于实际硬件测试的脚本，可以直接运行来测试校准功能。
 """
 
-from sweeper400.use import PowerTester
+from sweeper400.calib import PowerTester
 
 # 创建测试对象
 tester = PowerTester(
