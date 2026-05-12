@@ -735,7 +735,7 @@ def extract_single_tone_information_vvi(
     return detected_sine_args
 
 
-def esti_vvi_multi_ch(  # 待改进
+def esti_vvi_multi_ch(
     input_waveform: Waveform,
     approx_freq: PositiveFloat | None = None,
     error_percentage: PositiveFloat = 5.0,
@@ -753,14 +753,14 @@ def esti_vvi_multi_ch(  # 待改进
     3. 可选的curve_fit优化（默认关闭以提升速度）
 
     Args:
-        input_waveform: 目标多通道波形，形状为 (n_channels, n_samples)
+        input_waveform: 目标多通道波形，形状为 (channels_num, n_samples)
         approx_freq: 搜索的中心频率（Hz）。默认为None，表示在全频率范围内搜索
         error_percentage: 允许的频率误差百分数，无单位。默认值为5.0
         use_curve_fit: 是否使用curve_fit进行精确优化。默认为False，
                       使用粗略估计以获得更高效率。设为True可获得更高精度但速度较慢。
 
     Returns:
-        complex_amplitudes: 一维复数ndarray，形状为 (n_channels,)
+        complex_amplitudes: 一维复数ndarray，形状为 (channels_num,)
             每个元素对应一个通道的复振幅：amp * exp(1j * phase)
 
     Examples:
@@ -780,17 +780,17 @@ def esti_vvi_multi_ch(  # 待改进
     # 获取函数日志器
     f_logger = get_logger(f"{__name__}.esti_vvi_multi_ch")
 
-    n_channels = input_waveform.channels_num
+    channels_num = input_waveform.channels_num
     samples_num = input_waveform.samples_num
     sampling_rate = input_waveform.sampling_rate
 
     f_logger.debug(
-        f"开始多通道单频信息提取: channels={n_channels}, samples={samples_num}, "
+        f"开始多通道单频信息提取: channels={channels_num}, samples={samples_num}, "
         f"sampling_rate={sampling_rate}Hz, approx_freq={approx_freq}Hz, "
         f"use_curve_fit={use_curve_fit}"
     )
 
-    # 获取波形数据 (n_channels, n_samples)
+    # 获取波形数据 (channels_num, n_samples)
     waveform_data = np.asarray(input_waveform)
 
     # ==================== 第一阶段：共享频率估计 ====================
@@ -864,7 +864,7 @@ def esti_vvi_multi_ch(  # 待改进
     sin_term = np.sin(2 * np.pi * estimated_frequency * time_array_for_phase)
     design_matrix = np.column_stack([cos_term, sin_term])
 
-    # 截取所有通道的前phase_estimation_samples个样本 (n_channels, phase_estimation_samples)
+    # 截取所有通道的前phase_estimation_samples个样本 (channels_num, phase_estimation_samples)
     waveform_data_for_phase = waveform_data[:, :phase_estimation_samples]
 
     # 向量化最小二乘求解：对每个通道求解 [a, b] 使得 y ≈ a*cos + b*sin
@@ -880,8 +880,8 @@ def esti_vvi_multi_ch(  # 待改进
         XtX_inv = np.linalg.pinv(XtX)
     XtX_inv_Xt = XtX_inv @ design_matrix.T  # shape: (2, phase_estimation_samples)
 
-    # 对所有通道同时计算系数: (n_channels, 2) = (n_channels, n_samples) @ (n_samples, 2)
-    coefficients = waveform_data_for_phase @ XtX_inv_Xt.T  # shape: (n_channels, 2)
+    # 对所有通道同时计算系数: (channels_num, 2) = (channels_num, n_samples) @ (n_samples, 2)
+    coefficients = waveform_data_for_phase @ XtX_inv_Xt.T  # shape: (channels_num, 2)
 
     # 提取a和b系数
     a_coeffs = coefficients[:, 0]  # cos系数
@@ -911,8 +911,8 @@ def esti_vvi_multi_ch(  # 待改进
         # 再对每个通道单独优化幅值和相位（固定频率）
 
         # 初始化优化结果数组
-        optimized_amplitudes = np.zeros(n_channels)
-        optimized_phases = np.zeros(n_channels)
+        optimized_amplitudes = np.zeros(channels_num)
+        optimized_phases = np.zeros(channels_num)
 
         # 第一步：使用第一个通道优化所有三个参数
         def sine_model_full(
@@ -955,7 +955,7 @@ def esti_vvi_multi_ch(  # 待改进
             return amplitude * np.sin(2 * np.pi * optimized_frequency * t + phase)
 
         # 优化剩余通道
-        for ch_idx in range(1, n_channels):
+        for ch_idx in range(1, channels_num):
             channel_data = waveform_data[ch_idx, :]
             initial_params = [estimated_amplitudes[ch_idx], estimated_phases[ch_idx]]
 

@@ -2925,6 +2925,13 @@ class PowerTester:
         """
         return self._sine_args
 
+    # 近零功率点幅值常量，用于线性度验证
+    NEAR_ZERO_POWER: float = 0.01
+    # work阶段后的冷却等待时间（秒），用于消除温度对传递函数的影响
+    COOLING_TIME: float = 120.0
+    # 两次校准测量之间的间隔时间（秒），避免连续测量的热效应累积
+    EXAMINE_INTERVAL: float = 30.0
+
     def test(
         self,
         min_power: PositiveFloat = 0.01,
@@ -2939,9 +2946,13 @@ class PowerTester:
         该方法创建多个CaliberOctopus对象，以不同功率（Amplitude）进行测试，
         观察AO通道在越来越高功率持续工作下传输特性的变化。
 
-        每个功率点的测试包含两个阶段：
+        每个功率点的测试包含三个阶段：
         1. work阶段：高强度工作模拟（使用_single_calibrate，不保存数据）
-        2. examine阶段：检测阶段（使用calibrate，保存数据用于分析）
+        2. examine阶段：在当前功率点进行校准检测
+        3. near-zero examine阶段：在近零功率点(0.01V)进行校准检测，验证线性度
+
+        通过对比两个功率点处的传递函数变化，可以追踪哪个功率点的工作负荷
+        破坏了通道的线性度。
 
         测试完成后，绘制PowerTest概览图，展示传输特性随功率的变化趋势。
 
@@ -2965,7 +2976,10 @@ class PowerTester:
             f"开始功率测试 - "
             f"功率范围: {min_power}V ~ {max_power}V, "
             f"步数: {step_num}, "
-            f"work_chunks_num: {work_chunks_num}"
+            f"work_chunks_num: {work_chunks_num}, "
+            f"近零功率点: {self.NEAR_ZERO_POWER}V, "
+            f"冷却时间: {self.COOLING_TIME}s, "
+            f"校准间隔: {self.EXAMINE_INTERVAL}s"
         )
 
         # 生成功率序列
@@ -2980,11 +2994,14 @@ class PowerTester:
         # 存储每个功率点的测试结果
         # 格式: [(power, tf_complex), ...]
         test_results: list[tuple[float, complex]] = []
+        # 存储近零功率点的线性度测试结果
+        # 格式: [(work_power, tf_complex_at_near_zero), ...]
+        near_zero_results: list[tuple[float, complex]] = []
 
         # 遍历每个功率值进行测试
         for power_idx, power in enumerate(power_values):
             self.logger.info(
-                "=" * 60
+                "\n" + "=" * 60
                 + f"\n开始第 {power_idx + 1}/{step_num} 个功率点测试: {power}V"
                 + "\n" + "=" * 60
             )
@@ -3019,8 +3036,16 @@ class PowerTester:
                 self.logger.error(f"work阶段发生错误: {e}", exc_info=True)
                 # 继续执行examine阶段，即使work阶段失败
 
-            # 第二阶段：examine（检测）
-            self.logger.info("开始examine阶段（检测）")
+            # 冷却等待阶段：消除温度对传递函数的影响
+            self.logger.info(
+                f"开始冷却等待阶段，等待 {self.COOLING_TIME}s "
+                f"以消除温度影响..."
+            )
+            time.sleep(self.COOLING_TIME)
+            self.logger.info("冷却等待完成")
+
+            # 第二阶段：examine（在当前功率点检测）
+            self.logger.info("开始examine阶段（当前功率点检测）")
 
             # 创建当前功率点的结果子文件夹
             power_result_folder = result_path / f"power_{power_idx + 1}_{power:.4f}V"
@@ -3064,12 +3089,85 @@ class PowerTester:
                 # 使用NaN标记失败的数据点
                 test_results.append((float(power), complex(np.nan, np.nan)))
 
+            # 两次校准之间的间隔等待
+            self.logger.info(
+                f"等待校准间隔 {self.EXAMINE_INTERVAL}s..."
+            )
+            time.sleep(self.EXAMINE_INTERVAL)
+
+            # 第三阶段：near-zero examine（在近零功率点检测线性度）
+            self.logger.info(
+                f"开始near-zero examine阶段（近零功率点线性度检测，"
+                f"amplitude={self.NEAR_ZERO_POWER}V）"
+            )
+
+            # 创建近零功率点的SineArgs
+            near_zero_sine_args: SineArgs = {
+                "frequency": self._sine_args["frequency"],
+                "amplitude": self.NEAR_ZERO_POWER,
+                "phase": self._sine_args["phase"],
+            }
+
+            # 创建近零功率点的CaliberOctopus对象
+            caliber_near_zero = CaliberOctopus(
+                ai_channels=(self._ai_channel,),
+                ao_channels=(self._ao_channel,),
+                sampling_info=self._sampling_info,
+                sine_args=near_zero_sine_args,
+                ao_comp_data=self._ao_comp_data_path,
+            )
+
+            # 创建近零功率点的结果子文件夹
+            near_zero_result_folder = (
+                result_path / f"power_{power_idx + 1}_{power:.4f}V_near_zero"
+            )
+
+            try:
+                caliber_near_zero.calibrate(
+                    starts_num=3,
+                    chunks_per_start=3,
+                    apply_filter=False,
+                    result_folder=near_zero_result_folder,
+                    settle_time=None,
+                )
+
+                # 从caliber_near_zero获取近零功率点的传递函数结果
+                if caliber_near_zero._result_averaged_tf_data is not None:
+                    tf_df_nz = caliber_near_zero._result_averaged_tf_data[
+                        "tf_dataframe"
+                    ]
+                    tf_complex_nz = tf_df_nz.iloc[0, 0]
+                    near_zero_results.append(
+                        (float(power), complex(tf_complex_nz))
+                    )
+                    self.logger.info(
+                        f"near-zero examine阶段完成 - "
+                        f"work功率: {power}V, "
+                        f"近零测量幅值比: {np.abs(tf_complex_nz):.6f}, "
+                        f"近零测量相位差: {np.angle(tf_complex_nz):.6f}rad"
+                    )
+                else:
+                    self.logger.warning(
+                        f"near-zero examine阶段未产生有效数据，work功率: {power}V"
+                    )
+                    near_zero_results.append(
+                        (float(power), complex(np.nan, np.nan))
+                    )
+
+            except Exception as e:
+                self.logger.error(
+                    f"near-zero examine阶段发生错误: {e}", exc_info=True
+                )
+                near_zero_results.append(
+                    (float(power), complex(np.nan, np.nan))
+                )
+
         # 绘制PowerTest概览图
         self.logger.info("=" * 60)
         self.logger.info("绘制PowerTest概览图")
         self.logger.info("=" * 60)
 
-        self._plot_power_test_overview(test_results, result_path)
+        self._plot_power_test_overview(test_results, near_zero_results, result_path)
 
         self.logger.info("=" * 60)
         self.logger.info(f"功率测试完成，所有结果已保存到: {result_path}")
@@ -3078,6 +3176,7 @@ class PowerTester:
     def _plot_power_test_overview(
         self,
         test_results: list[tuple[float, complex]],
+        near_zero_results: list[tuple[float, complex]],
         save_path: Path,
     ) -> None:
         """
@@ -3085,66 +3184,70 @@ class PowerTester:
 
         类似于CaliberOctopus的plot_comp_data所输出的polar图，
         但数据点是各个功率点的传递函数结果，并使用折线连接。
+        包含两条折线：当前功率点线性度和近零功率点线性度。
 
         Args:
             test_results: 测试结果列表，格式为[(power, tf_complex), ...]
+            near_zero_results: 近零功率点测试结果列表，
+                              格式为[(work_power, tf_complex_at_near_zero), ...]
             save_path: 结果保存路径
         """
         # 过滤掉无效数据点（NaN）
         valid_results = [
             (power, tf) for power, tf in test_results if not np.isnan(tf.real)
         ]
+        valid_near_zero_results = [
+            (power, tf) for power, tf in near_zero_results if not np.isnan(tf.real)
+        ]
 
-        if not valid_results:
+        if not valid_results and not valid_near_zero_results:
             self.logger.warning("没有有效的测试结果，无法绘制概览图")
             return
-
-        # 提取功率、幅值比和相位差
-        powers = [r[0] for r in valid_results]
-        tf_complexes = [r[1] for r in valid_results]
-        amp_ratios = [np.abs(tf) for tf in tf_complexes]
-        phase_shifts = [np.angle(tf) for tf in tf_complexes]
 
         # 创建极坐标图
         fig = plt.figure(figsize=(12, 10))
         ax = fig.add_subplot(111, projection="polar")
 
-        # 使用相位差作为角度（已经是弧度）
-        angles = phase_shifts
+        # 绘制当前功率点折线
+        if valid_results:
+            powers = [r[0] for r in valid_results]
+            tf_complexes = [r[1] for r in valid_results]
+            amp_ratios = [np.abs(tf) for tf in tf_complexes]
+            phase_shifts = [np.angle(tf) for tf in tf_complexes]
 
-        # 绘制折线图（连接各功率点）
-        ax.plot(
-            angles,
-            amp_ratios,
-            marker="o",
-            markersize=10,
-            linewidth=2,
-            color="blue",
-            alpha=0.8,
-            label="功率测试轨迹",
-        )
-
-        # 添加功率标注
-        for angle, magnitude, power in zip(angles, amp_ratios, powers, strict=True):
-            ax.annotate(
-                f"{power:.4f}V",
-                xy=(angle, magnitude),
-                xytext=(5, 5),
-                textcoords="offset points",
-                fontsize=9,
+            ax.plot(
+                phase_shifts,
+                amp_ratios,
+                marker="o",
+                markersize=10,
+                linewidth=2,
+                color="blue",
                 alpha=0.8,
-                bbox={
-                    "boxstyle": "round,pad=0.3",
-                    "facecolor": "wheat",
-                    "alpha": 0.7,
-                },
-                zorder=4,
+                label="当前功率点线性度",
             )
 
-        # 标记起始点（最小功率）
-        if angles:
+            # 添加功率标注
+            for angle, magnitude, power in zip(
+                phase_shifts, amp_ratios, powers, strict=True
+            ):
+                ax.annotate(
+                    f"{power:.4f}V",
+                    xy=(angle, magnitude),
+                    xytext=(5, 5),
+                    textcoords="offset points",
+                    fontsize=9,
+                    alpha=0.8,
+                    bbox={
+                        "boxstyle": "round,pad=0.3",
+                        "facecolor": "lightskyblue",
+                        "alpha": 0.7,
+                    },
+                    zorder=4,
+                )
+
+            # 标记起始点（最小功率）
             ax.scatter(
-                [angles[0]],
+                [phase_shifts[0]],
                 [amp_ratios[0]],
                 c="green",
                 s=200,
@@ -3153,17 +3256,55 @@ class PowerTester:
                 zorder=5,
             )
 
-        # 标记终点（最大功率）
-        if len(angles) > 1:
-            ax.scatter(
-                [angles[-1]],
-                [amp_ratios[-1]],
-                c="red",
-                s=200,
-                marker="^",
-                label=f"终点 ({powers[-1]:.4f}V)",
-                zorder=5,
+            # 标记终点（最大功率）
+            if len(phase_shifts) > 1:
+                ax.scatter(
+                    [phase_shifts[-1]],
+                    [amp_ratios[-1]],
+                    c="red",
+                    s=200,
+                    marker="^",
+                    label=f"终点 ({powers[-1]:.4f}V)",
+                    zorder=5,
+                )
+
+        # 绘制近零功率点折线
+        if valid_near_zero_results:
+            nz_powers = [r[0] for r in valid_near_zero_results]
+            nz_tf_complexes = [r[1] for r in valid_near_zero_results]
+            nz_amp_ratios = [np.abs(tf) for tf in nz_tf_complexes]
+            nz_phase_shifts = [np.angle(tf) for tf in nz_tf_complexes]
+
+            ax.plot(
+                nz_phase_shifts,
+                nz_amp_ratios,
+                marker="D",
+                markersize=8,
+                linewidth=2,
+                color="purple",
+                alpha=0.8,
+                linestyle="--",
+                label=f"近零功率点线性度 ({self.NEAR_ZERO_POWER}V)",
             )
+
+            # 添加近零功率点标注（标注对应的work功率）
+            for angle, magnitude, work_power in zip(
+                nz_phase_shifts, nz_amp_ratios, nz_powers, strict=True
+            ):
+                ax.annotate(
+                    f"w:{work_power:.4f}V",
+                    xy=(angle, magnitude),
+                    xytext=(-5, -10),
+                    textcoords="offset points",
+                    fontsize=8,
+                    alpha=0.7,
+                    bbox={
+                        "boxstyle": "round,pad=0.3",
+                        "facecolor": "plum",
+                        "alpha": 0.7,
+                    },
+                    zorder=4,
+                )
 
         # 标记原始传递函数（从ao_comp_data还原的值）
         original_amp = np.abs(self._original_tf_complex)
@@ -3205,53 +3346,108 @@ class PowerTester:
         self.logger.info("PowerTest概览图绘制完成")
 
         # 额外绘制一幅直角坐标图，展示幅值比和相位差随功率的变化
-        self._plot_power_test_cartesian(valid_results, save_path)
+        self._plot_power_test_cartesian(
+            valid_results, valid_near_zero_results, save_path
+        )
 
     def _plot_power_test_cartesian(
         self,
         valid_results: list[tuple[float, complex]],
+        valid_near_zero_results: list[tuple[float, complex]],
         save_path: Path,
     ) -> None:
         """
         绘制PowerTest直角坐标图
 
-        展示幅值比和相位差随功率的变化趋势。
+        展示幅值比和相位差随功率的变化趋势，包含当前功率点和近零功率点两条折线。
 
         Args:
             valid_results: 有效测试结果列表，格式为[(power, tf_complex), ...]
+            valid_near_zero_results: 有效近零功率点测试结果列表，
+                                    格式为[(work_power, tf_complex_at_near_zero), ...]
             save_path: 结果保存路径
         """
-        # 提取数据
-        powers = [r[0] for r in valid_results]
-        tf_complexes = [r[1] for r in valid_results]
-        amp_ratios = [np.abs(tf) for tf in tf_complexes]
-        phase_shifts = [np.angle(tf) for tf in tf_complexes]
-
         # 创建直角坐标图（两个子图）
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
 
-        # 第一幅图：幅值比 vs 功率
-        ax1.plot(
-            powers,
-            amp_ratios,
-            marker="o",
-            markersize=8,
-            linewidth=2,
-            color="blue",
-            alpha=0.8,
-        )
-
-        # 标记原始传递函数的幅值比
+        # 标记原始传递函数的幅值比和相位差
         original_amp = np.abs(self._original_tf_complex)
+        original_phase = np.angle(self._original_tf_complex)
+
+        # --- 当前功率点数据 ---
+        if valid_results:
+            powers = [r[0] for r in valid_results]
+            tf_complexes = [r[1] for r in valid_results]
+            amp_ratios = [np.abs(tf) for tf in tf_complexes]
+            phase_shifts = [np.angle(tf) for tf in tf_complexes]
+
+            # 第一幅图：幅值比 vs 功率
+            ax1.plot(
+                powers,
+                amp_ratios,
+                marker="o",
+                markersize=8,
+                linewidth=2,
+                color="blue",
+                alpha=0.8,
+                label="当前功率点线性度",
+            )
+
+            # 第二幅图：相位差 vs 功率
+            ax2.plot(
+                powers,
+                phase_shifts,
+                marker="o",
+                markersize=8,
+                linewidth=2,
+                color="blue",
+                alpha=0.8,
+                label="当前功率点线性度",
+            )
+
+        # --- 近零功率点数据 ---
+        if valid_near_zero_results:
+            nz_powers = [r[0] for r in valid_near_zero_results]
+            nz_tf_complexes = [r[1] for r in valid_near_zero_results]
+            nz_amp_ratios = [np.abs(tf) for tf in nz_tf_complexes]
+            nz_phase_shifts = [np.angle(tf) for tf in nz_tf_complexes]
+
+            # 第一幅图：近零功率点幅值比 vs work功率
+            ax1.plot(
+                nz_powers,
+                nz_amp_ratios,
+                marker="D",
+                markersize=7,
+                linewidth=2,
+                color="purple",
+                alpha=0.8,
+                linestyle="--",
+                label=f"近零功率点线性度 ({self.NEAR_ZERO_POWER}V)",
+            )
+
+            # 第二幅图：近零功率点相位差 vs work功率
+            ax2.plot(
+                nz_powers,
+                nz_phase_shifts,
+                marker="D",
+                markersize=7,
+                linewidth=2,
+                color="purple",
+                alpha=0.8,
+                linestyle="--",
+                label=f"近零功率点线性度 ({self.NEAR_ZERO_POWER}V)",
+            )
+
+        # 标记原始传递函数参考线
         ax1.axhline(
             y=original_amp,
             color="orange",
-            linestyle="--",
+            linestyle="-.",
             linewidth=1.5,
             label=f"原始TF幅值比: {original_amp:.6f}",
         )
 
-        ax1.set_xlabel("功率 (V)", fontsize=12)
+        ax1.set_xlabel("work功率 (V)", fontsize=12)
         ax1.set_ylabel("幅值比", fontsize=12)
         ax1.set_title(
             f"幅值比随功率变化\nAI: {self._ai_channel}, AO: {self._ao_channel}",
@@ -3261,28 +3457,15 @@ class PowerTester:
         ax1.grid(True, alpha=0.3, linestyle="--", linewidth=0.8)
         ax1.legend(loc="best", fontsize=10)
 
-        # 第二幅图：相位差 vs 功率
-        ax2.plot(
-            powers,
-            phase_shifts,
-            marker="o",
-            markersize=8,
-            linewidth=2,
-            color="green",
-            alpha=0.8,
-        )
-
-        # 标记原始传递函数的相位差
-        original_phase = np.angle(self._original_tf_complex)
         ax2.axhline(
             y=original_phase,
             color="orange",
-            linestyle="--",
+            linestyle="-.",
             linewidth=1.5,
             label=f"原始TF相位差: {original_phase:.6f} rad",
         )
 
-        ax2.set_xlabel("功率 (V)", fontsize=12)
+        ax2.set_xlabel("work功率 (V)", fontsize=12)
         ax2.set_ylabel("相位差 (rad)", fontsize=12)
         ax2.set_title(
             f"相位差随功率变化\n频率: {self._sine_args['frequency']}Hz",

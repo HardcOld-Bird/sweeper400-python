@@ -130,7 +130,6 @@ class Evolver:
         ao_channels_feedback: tuple[str, ...],
         static_output_waveform: Waveform,
         gain_coefficients: tuple[complex, ...],
-        buffer_size_multiplier: PositiveInt = 5,
     ) -> None:
         """
         初始化反馈演化器
@@ -149,8 +148,6 @@ class Evolver:
                 决定每个 AI 通道的"总声场复振幅" / "入射声场复振幅"的目标比值。
                 - 长度必须与 `ao_channels_feedback`（及 `ai_channels`）相同。
                 - 模长 > 1 表示增益，< 1 表示衰减，相位角表示声场相移目标。
-            buffer_size_multiplier: AI 和 Feedback AO 缓冲区大小倍数，默认 5。
-                增大此值可减少缓冲区溢出风险，但会增加内存占用。
 
         Raises:
             ValueError: 当 gain_coefficients 长度与 ao_channels_feedback 不同时；
@@ -183,13 +180,12 @@ class Evolver:
         self._ai_channels = ai_channels
         self._ao_channels_static = ao_channels_static
         self._ao_channels_feedback = ao_channels_feedback
-        self._buffer_size_multiplier = buffer_size_multiplier
 
         # 保存增益系数（转为复数 ndarray，便于向量化运算）
         self._gain_coefficients = np.array(gain_coefficients, dtype=complex)
 
         # 保存静态输出波形的 SineArgs（频率、幅值、相位，反馈函数中反复使用）
-        self._static_sine_args: SineArgs = static_output_waveform.sine_args  # type: ignore[assignment]
+        self._static_sine_args: SineArgs = static_output_waveform.sine_args
         self._static_output_waveform = static_output_waveform
 
         # ---- 反馈函数状态 ----
@@ -222,7 +218,6 @@ class Evolver:
                 static_output_waveform=static_output_waveform,
                 export_function=self._data_export_callback,
                 feedback_function=self._feedback_method,
-                buffer_size_multiplier=buffer_size_multiplier,
             )
             self.logger.debug("SingleChasCSIO 初始化成功")
         except Exception as e:
@@ -283,7 +278,7 @@ class Evolver:
 
         if currently_playing_feedback_waveform is None:
             # 首次 callback 时队列可能还为空，返回全零波形
-            self.logger.debug("currently_playing_feedback_waveform 为 None，跳过本轮反馈")
+            self.logger.warning("currently_playing_feedback_waveform 为 None，跳过本轮反馈")
             return self._make_silence_waveform()
 
         # =====================================================================
@@ -303,13 +298,8 @@ class Evolver:
             fs=sampling_rate,
         )
 
-        # 去趋势
-        ai_detrended = detrend_waveform(ai_waveform)
-        fb_detrended = detrend_waveform(currently_playing_feedback_waveform)
-
         # 非连续滤波（zi=None，不传递状态）
-        ai_filtered: Waveform = filter_waveform(ai_detrended, sos)
-        fb_filtered: Waveform = filter_waveform(fb_detrended, sos)
+        ai_filtered: Waveform = filter_waveform(ai_waveform, sos)
 
         # =====================================================================
         # Step 2: 计算复振幅
@@ -319,12 +309,12 @@ class Evolver:
         total_ai_complex_amps = esti_vvi_multi_ch(
             ai_filtered,
             approx_freq=freq,
-            # use_curve_fit=True,
+            use_curve_fit=False,
         )  # shape: (n_ai,)
 
         # 旧电输出复振幅（当前反馈 AO 各通道）
         old_ao_complex_amps = esti_vvi_multi_ch(
-            fb_filtered,
+            currently_playing_feedback_waveform,
             approx_freq=freq,
             # use_curve_fit=True,
         )  # shape: (n_fb,)
@@ -347,7 +337,6 @@ class Evolver:
         tf_df = fishnet_tf_data["tf_dataframe"]
 
         n_fb = len(self._ao_channels_feedback)
-        n_ai = len(self._ai_channels)
 
         # 构建传递函数向量：每个 AO 对应的 AI 通道的传递函数
         # tf_vec[i] = TF(ao_channels_feedback[i] -> ai_channels[i])

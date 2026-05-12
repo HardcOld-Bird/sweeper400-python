@@ -436,9 +436,9 @@ class SingleChasCSIO:
         """设置数据导出启用状态"""
         self._enable_export = value
         if value:
-            logger.info("数据导出已启用")
+            logger.info("数据导出：ON ✅")
         else:
-            logger.info("数据导出已禁用")
+            logger.info("数据导出：OFF ❌")
 
     def update_static_output_waveform(self, new_waveform: Waveform):
         """
@@ -479,7 +479,6 @@ class SingleChasCSIO:
         if self._ao_task_static is not None:
             try:
                 self._write_ao_task_waveform_static()
-                logger.info("静态输出波形已更新")
             except Exception as e:
                 logger.error(f"更新静态波形失败: {e}", exc_info=True)
                 raise
@@ -495,8 +494,6 @@ class SingleChasCSIO:
 
         配置为麦克风模式，使用 IEPE 激励电流。
         """
-        logger.info("开始创建AI任务")
-
         # 创建任务
         task_name = "SingleChasCSIO_AI"
         self._ai_task = nidaqmx.Task(task_name)
@@ -577,8 +574,6 @@ class SingleChasCSIO:
                 f"没有{task_type.capitalize()} AO通道，跳过{task_type.capitalize()} AO任务创建"
             )
             return
-
-        logger.info(f"开始创建{task_type.capitalize()} AO任务")
 
         # 创建任务
         task = nidaqmx.Task(task_name)
@@ -1003,8 +998,6 @@ class SingleChasCSIO:
         if not self._is_running:
             logger.warning("任务未运行")
             return
-
-        logger.info("正在停止单机箱同步 AI/AO 任务...")
 
         # 立即标记停止状态，防止回调函数继续添加数据
         self._is_running = False

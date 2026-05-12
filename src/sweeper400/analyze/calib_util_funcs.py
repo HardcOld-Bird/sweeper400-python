@@ -319,7 +319,9 @@ def comp_multi_ch_wf(
     for ch_idx, channel_name in enumerate(channel_names):
         # 检查该通道是否在补偿数据中
         if channel_name not in comp_channels:
-            f_logger.warning(f"通道 {channel_name}: 不在补偿数据中，保持原样")
+            # 对非扫场麦克风通道输出debug日志（扫场麦克风不在补偿数据中是预期行为）
+            if channel_name != "PXI1Slot2/ao0":  # 扫场麦克风的通道名称
+                f_logger.debug(f"通道 {channel_name}: 不在补偿数据中，保持原样")
             continue
 
         # 提取补偿参数

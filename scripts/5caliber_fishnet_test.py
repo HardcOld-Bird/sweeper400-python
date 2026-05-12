@@ -22,17 +22,17 @@ ai_channels = (
     "PXI1Slot5/ai1",
     "PXI1Slot6/ai0",
     "PXI1Slot6/ai1",
-    "PXI1Slot2/ai0",
+    # "PXI1Slot2/ai0",
 )
 ao_channels = (
-    "PXI1Slot3/ao0",
-    "PXI1Slot3/ao1",
-    "PXI1Slot4/ao0",
-    "PXI1Slot4/ao1",
-    "PXI1Slot5/ao0",
-    "PXI1Slot5/ao1",
-    "PXI1Slot6/ao0",
-    "PXI1Slot6/ao1",
+    # "PXI1Slot3/ao0",
+    # "PXI1Slot3/ao1",
+    # "PXI1Slot4/ao0",
+    # "PXI1Slot4/ao1",
+    # "PXI1Slot5/ao0",
+    # "PXI1Slot5/ao1",
+    # "PXI1Slot6/ao0",
+    # "PXI1Slot6/ao1",
     "PXI1Slot2/ao0",
 )
 
@@ -46,9 +46,9 @@ caliber = CaliberFishNet(
 
 # %% 执行校准
 caliber.calibrate(
-    starts_num=1,
+    starts_num=3,
     chunks_per_start=3,
-    result_folder="D:\\EveryoneDownloaded\\fishnet_calib",
+    result_folder="D:\\EveryoneDownloaded\\R_INPUT",
 )
 
 # %% 执行最终校准，结果存储在项目storage目录下
