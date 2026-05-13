@@ -13,7 +13,6 @@ import numpy as np
 
 from .my_dtypes import (
     CompData,
-    SineArgs,
     Waveform,
 )
 from .filter import detrend_waveform
@@ -100,95 +99,7 @@ def load_data_with_fallback(
     return None
 
 
-def comp_ai_sine_args(
-    sine_args: SineArgs,
-    ai_comp_data: CompData | None,
-    ai_channel_name: str,
-) -> SineArgs:
-    """
-    应用AI通道补偿到正弦波参数
-
-    该函数根据AI通道补偿数据（通常由CaliberSardine生成）对正弦波参数进行补偿，
-    校正传声器之间的差异。如果未提供补偿数据或未找到指定通道的补偿数据，
-    则返回原始的正弦波参数。
-
-    补偿逻辑：
-    - 幅值补偿：补偿后幅值 = 原始幅值 × AI幅值补偿倍率
-    - 相位补偿：补偿后相位 = 原始相位 + AI时间延迟补偿对应的相位
-
-    Args:
-        sine_args: 原始正弦波参数，包含频率、幅值和相位信息
-        ai_comp_data: AI通道补偿数据（CompData格式），如果为None则不进行补偿
-        ai_channel_name: AI通道名称，用于查找对应的补偿参数
-
-    Returns:
-        SineArgs: 补偿后的正弦波参数。如果未找到补偿数据，返回原始参数的副本
-
-    Examples:
-        >>> from analyze import init_sine_args, load_compressed_data
-        >>> original_args = init_sine_args(frequency=1000.0, amplitude=1.0, phase=0.0)
-        >>> ai_comp = load_compressed_data("ai_comp_data.pkl")
-        >>> compensated_args = comp_ai_sine_args(original_args, ai_comp, "PXI1Slot2/ai0")
-        >>> # compensated_args 包含补偿后的幅值和相位
-
-        >>> # 未提供补偿数据
-        >>> result = comp_ai_sine_args(original_args, None, "PXI1Slot2/ai0")
-        >>> # result 等于 original_args
-    """
-    # 获取函数日志器
-    f_logger = get_logger(f"{__name__}.comp_ai_sine_args")
-
-    # 如果未提供补偿数据，返回原始参数的副本
-    if ai_comp_data is None:
-        f_logger.warning("未提供AI补偿数据，使用原始参数")
-        return SineArgs(
-            frequency=sine_args["frequency"],
-            amplitude=sine_args["amplitude"],
-            phase=sine_args["phase"],
-        )
-
-    # 检查AI通道是否在补偿数据中
-    comp_df = ai_comp_data["comp_dataframe"]
-    if ai_channel_name not in comp_df.index:
-        f_logger.warning(f"AI通道 {ai_channel_name} 未找到补偿数据，使用原始参数")
-        return SineArgs(
-            frequency=sine_args["frequency"],
-            amplitude=sine_args["amplitude"],
-            phase=sine_args["phase"],
-        )
-
-    # 获取该通道的补偿参数
-    amp_multiplier = comp_df.loc[ai_channel_name, "amp_multiplier"]
-    time_increment = comp_df.loc[ai_channel_name, "time_increment"]
-
-    # 应用AI通道补偿
-    # 幅值补偿：补偿后幅值 = 原始幅值 × AI幅值补偿倍率
-    compensated_amplitude = sine_args["amplitude"] * amp_multiplier
-
-    # 相位补偿：补偿后相位 = 原始相位 + AI时间延迟补偿对应的相位
-    time_delay_phase = time_increment * 2.0 * np.pi * sine_args["frequency"]
-    compensated_phase = sine_args["phase"] + time_delay_phase
-
-    # 归一化补偿后的相位到 [-π, π] 区间
-    compensated_phase = float(
-        np.arctan2(np.sin(compensated_phase), np.cos(compensated_phase))
-    )
-
-    f_logger.debug(
-        f"AI通道 {ai_channel_name} 应用补偿: "
-        f"amplitude {sine_args['amplitude']:.6f} -> {compensated_amplitude:.6f}, "
-        f"phase {sine_args['phase']:.6f}rad -> {compensated_phase:.6f}rad"
-    )
-
-    # 返回补偿后的正弦波参数
-    return SineArgs(
-        frequency=sine_args["frequency"],
-        amplitude=float(compensated_amplitude),  # noqa
-        phase=compensated_phase,
-    )
-
-
-def comp_multi_ch_wf(
+def comp_waveform(
     input_waveform: Waveform,
     comp_data: CompData | None,
 ) -> Waveform:
@@ -237,12 +148,12 @@ def comp_multi_ch_wf(
         >>> noise_waveform = Waveform(
         ...     noise_data,  # noqa
         ...     sampling_rate=171500.0,
-        ...     channel_names=ao_channels
+        ...     _channel_names=ao_channels
         ... )
         >>> # 加载补偿数据（假设只包含部分通道）
         >>> ao_comp_data = load_data_with_fallback(...)
         >>> # 应用补偿（支持部分补偿）
-        >>> calibrated_waveform = comp_multi_ch_wf(
+        >>> calibrated_waveform = comp_waveform(
         ...     noise_waveform,
         ...     ao_comp_data,
         ... )
@@ -253,10 +164,10 @@ def comp_multi_ch_wf(
         >>> single_ch_waveform = Waveform(
         ...     single_ch_data,  # noqa
         ...     sampling_rate=171500.0,
-        ...     channel_names=("PXI1Slot2/ao0",)
+        ...     _channel_names=("PXI1Slot2/ao0",)
         ... )
         >>> # 应用补偿
-        >>> calibrated_waveform = comp_multi_ch_wf(
+        >>> calibrated_waveform = comp_waveform(
         ...     single_ch_waveform,
         ...     ao_comp_data,
         ... )
@@ -264,7 +175,7 @@ def comp_multi_ch_wf(
         ```
     """
     # 获取函数日志器
-    f_logger = get_logger(f"{__name__}.comp_multi_ch_wf")
+    f_logger = get_logger(f"{__name__}.comp_waveform")
 
     # 1. 如果未提供补偿数据，直接返回原始波形的副本
     if comp_data is None:
@@ -274,27 +185,7 @@ def comp_multi_ch_wf(
     # 2. 获取波形数据（Waveform统一使用2D格式）
     channels_num = input_waveform.channels_num
     sampling_rate = input_waveform.sampling_rate
-
-    # 3. 验证channel_names已设置
     channel_names = input_waveform.channel_names
-    if channel_names is None:
-        f_logger.error(
-            "输入波形的channel_names属性为None，必须设置通道名称以匹配补偿数据",
-            exc_info=True,
-        )
-        raise ValueError(
-            "输入波形的channel_names属性为None，必须设置通道名称以匹配补偿数据"
-        )
-
-    # 4. 验证通道数一致性
-    if channels_num != len(channel_names):
-        f_logger.error(
-            f"输入波形通道数({channels_num})与channel_names长度({len(channel_names)})不匹配",
-            exc_info=True,
-        )
-        raise ValueError(
-            f"输入波形通道数({channels_num})与channel_names长度({len(channel_names)})不匹配"
-        )
 
     f_logger.debug(
         f"开始补偿: "
@@ -304,24 +195,32 @@ def comp_multi_ch_wf(
         f"channels={channel_names}"
     )
 
-    # 5. 获取补偿数据DataFrame
+    # 3. 获取补偿数据DataFrame
     comp_df = comp_data["comp_dataframe"]
     comp_channels = set(comp_df.index.tolist())
 
-    # 6. 对每个通道进行去趋势处理（避免循环移位时产生基线跳变）
+    # 4. 对每个通道进行去趋势处理（避免循环移位时产生基线跳变）
     detrended_waveform = detrend_waveform(input_waveform)
 
-    # 7. 创建输出数组（复制去趋势后的数据）
+    # 5. 创建输出数组（复制去趋势后的数据）
     output_data = detrended_waveform.copy()
 
-    # 8. 对每个通道进行补偿（仅对CompData中存在的通道）
+    # 6. 对每个通道进行补偿（仅对CompData中存在的通道）
+    # 并计算补偿后的channel_complex_amplitude
+    input_cca = input_waveform.channel_complex_amplitudes
+    input_freq = input_waveform.frequency
+    if input_cca is not None and input_freq is not None:
+        new_cca = input_cca.copy()
+    else:
+        new_cca = None
+
     compensated_count = 0
     for ch_idx, channel_name in enumerate(channel_names):
         # 检查该通道是否在补偿数据中
         if channel_name not in comp_channels:
-            # 对非扫场麦克风通道输出debug日志（扫场麦克风不在补偿数据中是预期行为）
+            # 对缺失的非扫场麦克风通道输出警告（扫场麦克风缺失是预期行为）
             if channel_name != "PXI1Slot2/ao0":  # 扫场麦克风的通道名称
-                f_logger.debug(f"通道 {channel_name}: 不在补偿数据中，保持原样")
+                f_logger.warning(f"通道 {channel_name}: 不在补偿数据中，保持原样")
             continue
 
         # 提取补偿参数
@@ -333,39 +232,49 @@ def comp_multi_ch_wf(
             f"时间增量={time_increment * 1e6:.3f}μs"
         )
 
-        # 8.1 幅值补偿
+        # 6.1 幅值补偿
         # 输出幅值 = 输入幅值 × 幅值补偿倍率
         compensated_amplitude = detrended_waveform[ch_idx, :] * amp_multiplier
 
-        # 8.2 时间补偿（通过循环移位）
+        # 6.2 时间补偿（通过循环移位）
         # time_increment 的物理含义：需要施加的相位变化 = time_increment × 2πf
         # （与 comp_ai_sine_args 中 phase += time_increment * 2πf 保持一致）
         # 由于 np.roll(signal, +n) 使相位减少 2πf*n/fs（正移位=延迟=相位减少），
         # 而我们需要相位增加 time_increment*2πf，因此使用 -sample_delay
         sample_delay = int(np.round(time_increment * sampling_rate))
 
+        # 使用np.roll进行循环移位（取反以匹配相位增加方向）
+        compensated_signal = np.roll(compensated_amplitude, -sample_delay)
+
         f_logger.debug(
             f"通道 {channel_name}: 时间增量={time_increment * 1e6:.3f}μs, "
             f"采样点偏移={-sample_delay}（负号修正roll方向）"
         )
 
-        # 使用np.roll进行循环移位（取反以匹配相位增加方向）
-        compensated_signal = np.roll(compensated_amplitude, -sample_delay)
-
         # 存储到输出数组
         output_data[ch_idx, :] = compensated_signal
         compensated_count += 1
 
+        # 记录补偿后的复振幅
+        if new_cca is not None:
+            assert input_freq is not None
+            # 新复振幅 = 原复振幅 × amp_multiplier × exp(1j × time_increment × 2πf)
+            phase_shift = time_increment * 2 * np.pi * input_freq
+            new_cca[ch_idx] = (
+                    new_cca[ch_idx] * amp_multiplier * np.exp(1j * phase_shift)
+            )
+
     f_logger.debug(f"补偿完成: {compensated_count}/{channels_num} 个通道已补偿")
 
-    # 8. 创建输出Waveform对象（2D格式）
+    # 7. 创建输出Waveform对象（2D格式）
     output_waveform = Waveform(
         input_array=output_data,
         sampling_rate=sampling_rate,
         channel_names=channel_names,
         timestamp=input_waveform.timestamp,
         waveform_id=input_waveform.waveform_id,
-        sine_args=input_waveform.sine_args,
+        frequency=input_freq,
+        channel_complex_amplitude=new_cca,
     )
 
     f_logger.debug(

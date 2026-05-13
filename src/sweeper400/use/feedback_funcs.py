@@ -9,7 +9,8 @@
 - 输出：8 通道 Waveform（AO 反馈数据）
 """
 
-from ..analyze import Waveform, init_sine_args, get_sine_multi_ch, TFData
+from ..analyze import Waveform, get_sine, TFData
+import numpy as np
 
 # 8 个 AO 反馈通道名称
 _FEEDBACK_AO_CHANNELS = (
@@ -54,17 +55,18 @@ def static_uniform_feedback(
     sampling_info = currently_playing_feedback_waveform.sampling_info
 
     # 硬编码的正弦波参数（可根据需要手动修改）
-    sine_args = init_sine_args(
-        frequency=3430.0,  # 频率：3430 Hz
-        amplitude=0.02,  # 幅值：0.02 V
-        phase=0.0,  # 初始相位：0 rad
-    )
+    frequency = 3430.0  # 频率：3430 Hz
+    amplitude = 0.02  # 幅值：0.02 V
+
+    # 所有通道使用相同的复振幅
+    cca = np.full(len(_FEEDBACK_AO_CHANNELS), amplitude + 0j, dtype=np.complex128)
 
     # 创建 8 通道正弦波形
-    feedback_waveform = get_sine_multi_ch(
+    feedback_waveform = get_sine(
         sampling_info=sampling_info,
-        sine_args=sine_args,
+        frequency=frequency,
         channel_names=_FEEDBACK_AO_CHANNELS,
+        channel_complex_amplitudes=cca,
     )
 
     return feedback_waveform
@@ -101,14 +103,8 @@ def static_diff_feedback(
     # 从输入波形获取采样信息（保持与 AI 相同的采样率）
     sampling_info = currently_playing_feedback_waveform.sampling_info
 
-    # 硬编码的正弦波参数（可根据需要手动修改）
-    sine_args = init_sine_args(
-        frequency=3430.0,  # 频率：3430 Hz
-        amplitude=1000,  # 幅值：0.5 V
-        phase=0.0,  # 初始相位：0 rad
-    )
-
-    complex_amps = (
+    # 硬编码的各通道复振幅
+    complex_amps = np.array([
         -0.00000113165112806406773342531198-0.00000084717153092779020638261730j,
         0.00000178134465245466333314743306+0.00000224401729438072466407336214j,
         -0.00000227427826317513719677821694-0.00000353809190738851625347509942j,
@@ -117,14 +113,14 @@ def static_diff_feedback(
         0.00000169603179406841873904613228+0.00000327339273846739827687193566j,
         -0.00000085864382475058233050029281-0.00000223051571880521929408937136j,
         0.00000021192711737005039409534443+0.00000120688998049475036592576797j,
-    )
+    ], dtype=np.complex128)
 
     # 创建 8 通道正弦波形
-    feedback_waveform = get_sine_multi_ch(
+    feedback_waveform = get_sine(
         sampling_info=sampling_info,
-        sine_args=sine_args,
+        frequency=3430.0,
         channel_names=_FEEDBACK_AO_CHANNELS,
-        complex_amps=complex_amps,
+        channel_complex_amplitudes=complex_amps,
     )
 
     return feedback_waveform

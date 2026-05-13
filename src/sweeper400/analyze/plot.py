@@ -7,7 +7,7 @@
 包含对采集数据进行可视化处理的函数和类。
 """
 
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,7 +19,7 @@ from scipy.interpolate import griddata
 from ..logger import get_logger
 from .basic_sine import extract_single_tone_information_vvi
 from .filter import filter_sweep_data
-from .my_dtypes import Point2D, SineArgs, Waveform, SweepData
+from .my_dtypes import Point2D, Waveform, SweepData
 from .post_process import average_sweep_data
 
 
@@ -39,9 +39,8 @@ class PointTFData(TypedDict):
     phase_shift: float
 
 
-def sweep_data_to_point_tf_data(
+def sweep_data_to_point_tf_data_list(
     sweep_data: SweepData,
-    ref_sine_args: SineArgs | None = None,
     lowcut: float = 100.0,
     highcut: float = 20000.0,
     filter_order: int = 4,
@@ -58,10 +57,11 @@ def sweep_data_to_point_tf_data(
     3. 对每个点的平均波形使用extract_single_tone_information_vvi提取单频信息
     4. 计算相对于参考信号的幅值比和相位差
 
+    参考信号信息直接从 sweep_data["ao_data"] 的 frequency 和
+    channel_complex_amplitudes 属性获取。
+
     Args:
         sweep_data: 扫场测量数据，包含单通道AI波形
-        ref_sine_args: 参考正弦波参数（即输出信号的参数），用于计算传递函数。
-            如果为None，则尝试从sweep_data["ao_data"]中获取sine_args。
         lowcut: 带通滤波器低截止频率（Hz），默认100.0
         highcut: 带通滤波器高截止频率（Hz），默认20000.0
         filter_order: 滤波器阶数，默认4
@@ -71,20 +71,20 @@ def sweep_data_to_point_tf_data(
         list[PointTFData]: 每个测量点的传递函数数据列表
 
     Raises:
-        ValueError: 当输入数据为空或无法获取参考正弦波参数时
+        ValueError: 当输入数据为空或无法获取参考信号参数时
 
     Examples:
         ```python
         >>> # 假设已有SweepData
-        >>> from analyze import load_sweep_data
-        >>> test_sweep_data = load_sweep_data("measurement.pkl")
-        >>> plot_tf_results = sweep_data_to_point_tf_data(sweep_data)
+        >>> from analyze import load_compressed_data
+        >>> test_sweep_data = load_compressed_data("measurement.pkl")
+        >>> plot_tf_results = sweep_data_to_point_tf_data_list(test_sweep_data)
         >>> # 现在可以使用绘图函数
-        >>> fig, axes = plot_transfer_function_discrete_distribution(plot_tf_results)
+        >>> fig, axes = plot_point_tf_data_list(plot_tf_results, mode="discrete")
         ```
     """
     # 获取函数日志器
-    f_logger = get_logger(f"{__name__}.sweep_data_to_point_tf_data")
+    f_logger = get_logger(f"{__name__}.sweep_data_to_point_tf_data_list")
 
     f_logger.info("开始将SweepData转换为PointTFData列表")
 
@@ -92,23 +92,30 @@ def sweep_data_to_point_tf_data(
     if not sweep_data["ai_data_list"]:
         raise ValueError("SweepData的ai_data_list为空")
 
-    # 获取参考正弦波参数
-    if ref_sine_args is None:
-        ao_waveform = sweep_data["ao_data"]
-        if hasattr(ao_waveform, "sine_args") and ao_waveform.sine_args is not None:
-            ref_sine_args = ao_waveform.sine_args
-        else:
-            raise ValueError("无法从ao_data获取sine_args，请手动提供ref_sine_args")
+    # 从ao_data获取参考信号参数
+    ao_waveform = sweep_data["ao_data"]
+
+    # 获取参考频率
+    ref_frequency = getattr(ao_waveform, "frequency", None)
+    if ref_frequency is None:
+        raise ValueError("无法从ao_data获取frequency属性，请确保ao_data已设置frequency")
+
+    # 获取参考复振幅（取第一个通道）
+    cca = getattr(ao_waveform, "channel_complex_amplitudes", None)
+    if cca is not None:
+        ref_complex_amp = cca[0]  # 取第一个通道的复振幅
+        ref_amplitude = float(np.abs(ref_complex_amp))
+        ref_phase = float(np.angle(ref_complex_amp))
+    else:
+        # 如果没有复振幅信息，默认幅值为1、相位为0
+        ref_amplitude = 1.0
+        ref_phase = 0.0
+        f_logger.warning("ao_data未设置channel_complex_amplitudes，使用默认幅值=1, 相位=0")
 
     # 避免幅值为0，影响传递函数计算
-    if ref_sine_args["amplitude"] == 0.0:
+    if ref_amplitude == 0.0:
         ref_amplitude = 1.0
-        f_logger.warning("ref_sine_args幅值为0，已替换为1")
-    else:
-        ref_amplitude = ref_sine_args["amplitude"]
-
-    ref_frequency = ref_sine_args["frequency"]
-    ref_phase = ref_sine_args["phase"]
+        f_logger.warning("参考信号幅值为0，已替换为1")
 
     f_logger.info(f"参考信号参数: 频率={ref_frequency}Hz, 幅值={ref_amplitude}, 相位={ref_phase}rad")
 
@@ -135,14 +142,15 @@ def sweep_data_to_point_tf_data(
         # 每个点只有一个波形（已经平均过了）
         waveform = point_data["ai_data"][0]
 
-        # 提取单频信息
-        detected_sine_args = extract_single_tone_information_vvi(
+        # 提取单频信息（返回 tuple[float, np.ndarray]）
+        estimated_freq, channel_cca = extract_single_tone_information_vvi(
             waveform,
             approx_freq=ref_frequency,
         )
 
-        detected_amplitude = detected_sine_args["amplitude"]
-        detected_phase = detected_sine_args["phase"]
+        # 取第一个通道的复振幅
+        detected_amplitude = float(np.abs(channel_cca[0]))
+        detected_phase = float(np.angle(channel_cca[0]))
 
         # 计算幅值比和相位差（相对于参考信号）
         amp_ratio = detected_amplitude / ref_amplitude
@@ -178,56 +186,60 @@ plt.rcParams["font.sans-serif"] = [
 plt.rcParams["axes.unicode_minus"] = False
 
 
-def plot_transfer_function_discrete_distribution(
+def plot_point_tf_data_list(
     plot_tf_results: list[PointTFData],
-    figsize: tuple[float, float] = (14, 6),
-    amp_cmap: str = "viridis",
-    phase_cmap: str = "twilight",
+    mode: Literal["discrete", "interpolated", "instantaneous"] = "interpolated",
     save_path: str | None = None,
-) -> tuple[Figure, tuple[Axes, Axes]]:
+) -> tuple[Figure, Axes | tuple[Axes, Axes]]:
     """
-    绘制传递函数的空间分布图（方形色块版本）
+    绘制传递函数的空间分布图（统一接口）
 
-    该函数接收已计算好的传递函数结果，绘制幅值比和相位差的二维空间分布图。
-    两张子图并排显示，使用方形色块表示幅值比/相位差的大小，形成"像素画"效果。
-    适用于等距网格数据的可视化。
+    该函数接收已计算好的传递函数结果，根据mode参数选择不同的绘图模式：
+    - "discrete": 方形色块版本，使用等距网格色块表示，适用于等距网格数据
+    - "interpolated": 插值版本，使用连续彩色区域（contourf）展现空间分布
+    - "instantaneous": 瞬时声压场，计算 A·sin(φ) 模拟某一瞬间的声压场分布
 
     Args:
-        plot_tf_results: 传递函数计算结果列表
-        figsize: 图形尺寸 (宽, 高)，单位为英寸，默认为 (14, 6)
-        amp_cmap: 幅值比图的colormap名称，默认为 "viridis"
-        phase_cmap: 相位差图的colormap名称，默认为 "twilight"
+        plot_tf_results: 传递函数计算结果列表（PointTFData格式）
+        mode: 绘图模式，可选 "discrete"、"interpolated"、"instantaneous"，
+            默认为 "interpolated"
         save_path: 保存图片的路径，如果为None则不保存，默认为None
 
     Returns:
         fig: matplotlib Figure对象
-        (ax1, ax2): 包含两个Axes对象的元组，分别对应幅值比图和相位差图
+        axes: 对于 "discrete" 和 "interpolated" 模式返回 (ax1, ax2) 元组；
+              对于 "instantaneous" 模式返回单个 Axes 对象
 
     Raises:
-        ValueError: 当输入数据为空时
+        ValueError: 当输入数据为空或mode不合法时
 
     Examples:
         ```python
         >>> # 假设已有传递函数计算结果
-        >>> test_plot_tf_results = sweep_data_to_point_tf_data(test_sweep_data)  # noqa
-        >>> test_fig, (ax1, ax2) = plot_transfer_function_discrete_distribution(test_plot_tf_results)
+        >>> test_plot_tf_results = sweep_data_to_point_tf_data_list(test_sweep_data)  # noqa
+        >>> # 使用离散色块模式
+        >>> fig, (ax1, ax2) = plot_point_tf_data_list(test_plot_tf_results, mode="discrete")
+        >>> # 使用插值模式
+        >>> fig, (ax1, ax2) = plot_point_tf_data_list(test_plot_tf_results, mode="interpolated")
+        >>> # 使用瞬时声压场模式
+        >>> fig, ax = plot_point_tf_data_list(test_plot_tf_results, mode="instantaneous")
         >>> plt.show()
-        >>> # 或者保存图片
-        >>> test_fig, axes = plot_transfer_function_discrete_distribution(  # noqa
-        ...     plot_tf_results, save_path="transfer_function.png"
-        ... )
         ```
     """
     # 获取函数日志器
-    f_logger = get_logger(f"{__name__}.plot_transfer_function_discrete_distribution")
+    f_logger = get_logger(f"{__name__}.plot_point_tf_data_list")
 
     if not plot_tf_results:
         f_logger.error("传递函数结果为空，无法绘图")
         raise ValueError("传递函数结果不能为空")
 
-    f_logger.info(f"绘制 {len(plot_tf_results)} 个点的传递函数分布（方形色块版本）")
+    valid_modes = ("discrete", "interpolated", "instantaneous")
+    if mode not in valid_modes:
+        raise ValueError(f"mode必须为 {valid_modes} 之一，当前值: {mode!r}")
 
-    # 2. 提取数据
+    f_logger.info(f"绘制 {len(plot_tf_results)} 个点的传递函数分布（模式: {mode}）")
+
+    # 提取公共数据
     x_coords = np.array([result["position"].x for result in plot_tf_results])
     y_coords = np.array([result["position"].y for result in plot_tf_results])
     amp_ratios = np.array([result["amp_ratio"] for result in plot_tf_results])
@@ -240,37 +252,54 @@ def plot_transfer_function_discrete_distribution(
         f"相位差=[{phase_shifts.min():.4f}, {phase_shifts.max():.4f}]"
     )
 
-    # 3. 计算网格参数（假设数据为等距网格）
+    # 根据模式分派绘图
+    if mode == "discrete":
+        fig, axes_pair = _plot_discrete(
+            x_coords, y_coords, amp_ratios, phase_shifts, f_logger
+        )
+        result: tuple[Figure, Axes | tuple[Axes, Axes]] = (fig, axes_pair)
+    elif mode == "interpolated":
+        fig, axes_pair = _plot_interpolated(
+            x_coords, y_coords, amp_ratios, phase_shifts, f_logger
+        )
+        result = (fig, axes_pair)
+    else:  # instantaneous
+        fig, ax = _plot_instantaneous(
+            x_coords, y_coords, amp_ratios, phase_shifts, f_logger
+        )
+        result = (fig, ax)
+
+    # 保存图片（如果指定了路径）
+    if save_path is not None:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        f_logger.info(f"图片已保存至: {save_path}")
+
+    return result
+
+
+def _plot_discrete(
+    x_coords: np.ndarray,
+    y_coords: np.ndarray,
+    amp_ratios: np.ndarray,
+    phase_shifts: np.ndarray,
+    f_logger,
+) -> tuple[Figure, tuple[Axes, Axes]]:
+    """绘制方形色块版本的传递函数空间分布图（内部函数）"""
+    # 计算网格间距
     unique_x = np.unique(x_coords)
     unique_y = np.unique(y_coords)
+    dx = float(np.min(np.diff(unique_x))) if len(unique_x) > 1 else 1.0
+    dy = float(np.min(np.diff(unique_y))) if len(unique_y) > 1 else 1.0
 
-    # 计算网格间距
-    if len(unique_x) > 1:
-        dx = np.min(np.diff(unique_x))
-    else:
-        dx = 1.0  # 默认间距
-
-    if len(unique_y) > 1:
-        dy = np.min(np.diff(unique_y))
-    else:
-        dy = 1.0  # 默认间距
-
-    # 方形色块的尺寸（稍微小于网格间距以避免重叠）
     block_width = dx * 0.9
     block_height = dy * 0.9
 
-    f_logger.debug(
-        f"网格间距: dx={dx:.2f}, dy={dy:.2f}, "
-        f"色块尺寸: {block_width:.2f}x{block_height:.2f}"
-    )
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-    # 4. 创建图形和子图
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
-
-    # 5. 绘制幅值比分布图（方形色块）
-    for _i, (x, y, amp) in enumerate(zip(x_coords, y_coords, amp_ratios, strict=False)):
-        # 创建方形色块
-        rect1 = Rectangle(
+    # 幅值比分布图
+    amp_cmap = "viridis"
+    for x, y, amp in zip(x_coords, y_coords, amp_ratios, strict=False):
+        rect = Rectangle(
             (x - block_width / 2, y - block_height / 2),
             block_width,
             block_height,
@@ -280,9 +309,8 @@ def plot_transfer_function_discrete_distribution(
             edgecolor="black",
             linewidth=0.5,
         )
-        ax1.add_patch(rect1)
+        ax1.add_patch(rect)
 
-    # 设置坐标轴范围
     ax1.set_xlim(x_coords.min() - dx, x_coords.max() + dx)
     ax1.set_ylim(y_coords.min() - dy, y_coords.max() + dy)
     ax1.set_xlabel("X 坐标 (mm)", fontsize=12)
@@ -291,21 +319,16 @@ def plot_transfer_function_discrete_distribution(
     ax1.grid(True, alpha=0.3, linestyle="--")
     ax1.set_aspect("equal", adjustable="box")
 
-    # 添加颜色条（使用虚拟的scatter来创建colorbar）
     scatter1 = ax1.scatter(
         [], [], c=[], cmap=amp_cmap, vmin=amp_ratios.min(), vmax=amp_ratios.max()
     )
     cbar1 = fig.colorbar(scatter1, ax=ax1, label="幅值比")
     cbar1.ax.tick_params(labelsize=10)
 
-    f_logger.debug("幅值比分布图绘制完成")
-
-    # 6. 绘制相位差分布图（方形色块）
-    for _i, (x, y, phase) in enumerate(
-        zip(x_coords, y_coords, phase_shifts, strict=False)
-    ):
-        # 创建方形色块
-        rect2 = Rectangle(
+    # 相位差分布图
+    phase_cmap = "twilight"
+    for x, y, phase in zip(x_coords, y_coords, phase_shifts, strict=False):
+        rect = Rectangle(
             (x - block_width / 2, y - block_height / 2),
             block_width,
             block_height,
@@ -315,9 +338,8 @@ def plot_transfer_function_discrete_distribution(
             edgecolor="black",
             linewidth=0.5,
         )
-        ax2.add_patch(rect2)
+        ax2.add_patch(rect)
 
-    # 设置坐标轴范围
     ax2.set_xlim(x_coords.min() - dx, x_coords.max() + dx)
     ax2.set_ylim(y_coords.min() - dy, y_coords.max() + dy)
     ax2.set_xlabel("X 坐标 (mm)", fontsize=12)
@@ -326,429 +348,148 @@ def plot_transfer_function_discrete_distribution(
     ax2.grid(True, alpha=0.3, linestyle="--")
     ax2.set_aspect("equal", adjustable="box")
 
-    # 添加颜色条（使用虚拟的scatter来创建colorbar）
     scatter2 = ax2.scatter(
         [], [], c=[], cmap=phase_cmap, vmin=phase_shifts.min(), vmax=phase_shifts.max()
     )
     cbar2 = fig.colorbar(scatter2, ax=ax2, label="相位差 (rad)")
     cbar2.ax.tick_params(labelsize=10)
 
-    f_logger.debug("相位差分布图绘制完成")
-
-    # 6. 调整布局
     plt.tight_layout()
-
-    # 7. 保存图片（如果指定了路径）
-    if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
-        f_logger.info(f"离散分布图已保存至: {save_path}")
-
+    f_logger.debug("方形色块分布图绘制完成")
     return fig, (ax1, ax2)
 
 
-def plot_transfer_function_interpolated_distribution(
-    plot_tf_results: list[PointTFData],
-    figsize: tuple[float, float] = (14, 6),
-    amp_cmap: str = "viridis",
-    phase_cmap: str = "twilight",
-    interpolation_method: str = "cubic",
-    grid_resolution: int = 100,
-    save_path: str | None = None,
-    show_measurement_points: bool = False,
+def _plot_interpolated(
+    x_coords: np.ndarray,
+    y_coords: np.ndarray,
+    amp_ratios: np.ndarray,
+    phase_shifts: np.ndarray,
+    f_logger,
 ) -> tuple[Figure, tuple[Axes, Axes]]:
-    """
-    绘制传递函数的插值空间分布图（解决相位周期性问题）
+    """绘制插值版本的传递函数空间分布图（内部函数）"""
+    grid_resolution = 100
+    interpolation_method = "cubic"
 
-    该函数接收已计算好的传递函数结果，使用插值方法创建连续的彩色区域图像，
-    更好地展现声场的空间分布特性。特别处理了相位的周期性问题，避免-π到π的跳跃影响插值效果。
-
-    Args:
-        plot_tf_results: 传递函数计算结果列表
-        figsize: 图形尺寸 (宽, 高)，单位为英寸，默认为 (14, 6)
-        amp_cmap: 幅值比图的colormap名称，默认为 "viridis"
-        phase_cmap: 相位差图的colormap名称，默认为 "twilight"
-        interpolation_method: 插值方法，可选 "linear", "nearest", "cubic"，
-            默认为 "cubic"
-        grid_resolution: 插值网格分辨率，默认为 100
-        save_path: 保存图片的路径，如果为None则不保存，默认为None
-        show_measurement_points: 是否在插值图上显示原始测量点，默认为True
-
-    Returns:
-        fig: matplotlib Figure对象
-        (ax1, ax2): 包含两个Axes对象的元组，分别对应幅值比图和相位差图
-
-    Raises:
-        ValueError: 当输入数据为空时
-
-    Examples:
-        ```python
-        >>> # 假设已有传递函数计算结果
-        >>> from analyze import sweep_data_to_point_tf_data
-        >>> test_plot_tf_results = sweep_data_to_point_tf_data(test_sweep_data)  # noqa
-        >>> test_fig, (test_ax1, test_ax2) = plot_transfer_function_interpolated_distribution(
-        ...     plot_tf_results
-        ... )
-        >>> plt.show()
-        >>> # 或者保存图片并使用线性插值
-        >>> test_fig, axes = plot_transfer_function_interpolated_distribution(  # noqa
-        ...     plot_tf_results,
-        ...     interpolation_method="linear",
-        ...     save_path="transfer_function_interpolated.png"
-        ... )
-        ```
-    """
-    # 获取函数日志器
-    f_logger = get_logger(f"{__name__}.plot_transfer_function_interpolated_distribution")
-
-    if not plot_tf_results:
-        f_logger.error("传递函数结果为空，无法绘图")
-        raise ValueError("传递函数结果不能为空")
-
-    f_logger.info(f"绘制 {len(plot_tf_results)} 个点的传递函数插值分布")
-
-    # 2. 提取数据
-    x_coords = np.array([result["position"].x for result in plot_tf_results])
-    y_coords = np.array([result["position"].y for result in plot_tf_results])
-    amp_ratios = np.array([result["amp_ratio"] for result in plot_tf_results])
-    phase_shifts = np.array([result["phase_shift"] for result in plot_tf_results])
-
-    f_logger.debug(
-        f"数据范围: X=[{x_coords.min():.2f}, {x_coords.max():.2f}], "
-        f"Y=[{y_coords.min():.2f}, {y_coords.max():.2f}], "
-        f"幅值比=[{amp_ratios.min():.4f}, {amp_ratios.max():.4f}], "
-        f"相位差=[{phase_shifts.min():.4f}, {phase_shifts.max():.4f}]"
-    )
-
-    # 3. 创建插值网格
+    # 创建插值网格
     x_min, x_max = x_coords.min(), x_coords.max()
     y_min, y_max = y_coords.min(), y_coords.max()
-
-    # 扩展边界以获得更好的插值效果
-    x_range = x_max - x_min
-    y_range = y_max - y_min
-    x_margin = x_range * 0.1  # 10%的边界扩展
-    y_margin = y_range * 0.1
+    x_margin = (x_max - x_min) * 0.1
+    y_margin = (y_max - y_min) * 0.1
 
     xi = np.linspace(x_min - x_margin, x_max + x_margin, grid_resolution)
     yi = np.linspace(y_min - y_margin, y_max + y_margin, grid_resolution)
     Xi, Yi = np.meshgrid(xi, yi)
 
-    f_logger.debug(
-        f"创建插值网格: {grid_resolution}x{grid_resolution}, "
-        f"方法: {interpolation_method}"
-    )
-
-    # 4. 处理相位的周期性问题
-    # 将相位转换为复数形式进行插值，避免-π到π的跳跃
-    phase_complex = np.exp(1j * phase_shifts)  # 转换为单位圆上的复数
-
-    f_logger.debug("处理相位周期性，转换为复数形式进行插值")
-
-    # 5. 执行插值
+    # 处理相位周期性：转换为复数形式进行插值
+    phase_complex = np.exp(1j * phase_shifts)
     points = np.column_stack((x_coords, y_coords))
 
     try:
-        # 插值幅值比
         amp_interpolated = griddata(
             points, amp_ratios, (Xi, Yi), method=interpolation_method, fill_value=np.nan
         )
-
-        # 插值相位的实部和虚部
-        phase_real_interpolated = griddata(
-            points,
-            phase_complex.real,
-            (Xi, Yi),
-            method=interpolation_method,
-            fill_value=np.nan,
+        phase_real_interp = griddata(
+            points, phase_complex.real, (Xi, Yi), method=interpolation_method, fill_value=np.nan
         )
-
-        phase_imag_interpolated = griddata(
-            points,
-            phase_complex.imag,
-            (Xi, Yi),
-            method=interpolation_method,
-            fill_value=np.nan,
+        phase_imag_interp = griddata(
+            points, phase_complex.imag, (Xi, Yi), method=interpolation_method, fill_value=np.nan
         )
-
-        # 从插值后的实部和虚部重构相位
-        phase_interpolated_complex = (
-            phase_real_interpolated + 1j * phase_imag_interpolated
-        )
-        phase_interpolated = np.angle(phase_interpolated_complex)  # 转换回相位角度
-
-        f_logger.debug("插值计算完成（包含相位周期性处理）")
-
+        phase_interpolated = np.angle(phase_real_interp + 1j * phase_imag_interp)
     except Exception as e:
-        f_logger.error(f"插值计算失败: {e}")
-        # 如果cubic插值失败，回退到linear插值
-        if interpolation_method == "cubic":
-            f_logger.warning("cubic插值失败，回退到linear插值")
-            amp_interpolated = griddata(
-                points, amp_ratios, (Xi, Yi), method="linear", fill_value=np.nan
-            )
+        f_logger.warning(f"cubic插值失败({e})，回退到linear插值")
+        amp_interpolated = griddata(
+            points, amp_ratios, (Xi, Yi), method="linear", fill_value=np.nan
+        )
+        phase_real_interp = griddata(
+            points, phase_complex.real, (Xi, Yi), method="linear", fill_value=np.nan
+        )
+        phase_imag_interp = griddata(
+            points, phase_complex.imag, (Xi, Yi), method="linear", fill_value=np.nan
+        )
+        phase_interpolated = np.angle(phase_real_interp + 1j * phase_imag_interp)
 
-            # 对相位也使用linear插值的复数方法
-            phase_real_interpolated = griddata(
-                points, phase_complex.real, (Xi, Yi), method="linear", fill_value=np.nan
-            )
-            phase_imag_interpolated = griddata(
-                points, phase_complex.imag, (Xi, Yi), method="linear", fill_value=np.nan
-            )
-            phase_interpolated_complex = (
-                phase_real_interpolated + 1j * phase_imag_interpolated
-            )
-            phase_interpolated = np.angle(phase_interpolated_complex)
-        else:
-            raise
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-    # 5. 创建图形和子图
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
-
-    # 6. 绘制幅值比插值分布图
-    im1 = ax1.contourf(
-        Xi, Yi, amp_interpolated, levels=50, cmap=amp_cmap, extend="both"
-    )
+    # 幅值比插值图
+    im1 = ax1.contourf(Xi, Yi, amp_interpolated, levels=50, cmap="viridis", extend="both")
     ax1.set_xlabel("X 坐标 (mm)", fontsize=12)
     ax1.set_ylabel("Y 坐标 (mm)", fontsize=12)
     ax1.set_title("传递函数 - 幅值比插值分布", fontsize=14, fontweight="bold")
     ax1.set_aspect("equal", adjustable="box")
-
-    # 添加颜色条
     cbar1 = fig.colorbar(im1, ax=ax1, label="幅值比")
     cbar1.ax.tick_params(labelsize=10)
 
-    # 可选：显示原始测量点
-    if show_measurement_points:
-        ax1.scatter(
-            x_coords,
-            y_coords,
-            c="white",
-            s=30,
-            edgecolors="black",
-            linewidths=1,
-            alpha=0.8,
-            zorder=10,
-        )
-
-    f_logger.debug("幅值比插值分布图绘制完成")
-
-    # 7. 绘制相位差插值分布图
-    im2 = ax2.contourf(
-        Xi, Yi, phase_interpolated, levels=50, cmap=phase_cmap, extend="both"
-    )
+    # 相位差插值图
+    im2 = ax2.contourf(Xi, Yi, phase_interpolated, levels=50, cmap="twilight", extend="both")
     ax2.set_xlabel("X 坐标 (mm)", fontsize=12)
     ax2.set_ylabel("Y 坐标 (mm)", fontsize=12)
     ax2.set_title("传递函数 - 相位差插值分布", fontsize=14, fontweight="bold")
     ax2.set_aspect("equal", adjustable="box")
-
-    # 添加颜色条
     cbar2 = fig.colorbar(im2, ax=ax2, label="相位差 (rad)")
     cbar2.ax.tick_params(labelsize=10)
 
-    # 可选：显示原始测量点
-    if show_measurement_points:
-        ax2.scatter(
-            x_coords,
-            y_coords,
-            c="white",
-            s=30,
-            edgecolors="black",
-            linewidths=1,
-            alpha=0.8,
-            zorder=10,
-        )
-
-    f_logger.debug("相位差插值分布图绘制完成")
-
-    # 8. 调整布局
     plt.tight_layout()
-
-    # 9. 保存图片（如果指定了路径）
-    if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
-        f_logger.info(f"插值分布图已保存至: {save_path}")
-
+    f_logger.debug("插值分布图绘制完成")
     return fig, (ax1, ax2)
 
 
-def plot_transfer_function_instantaneous_field(
-    plot_tf_results: list[PointTFData],
-    figsize: tuple[float, float] = (10, 8),
-    field_cmap: str = "RdBu_r",
-    interpolation_method: str = "cubic",
-    grid_resolution: int = 100,
-    save_path: str | None = None,
-    show_measurement_points: bool = False,
+def _plot_instantaneous(
+    x_coords: np.ndarray,
+    y_coords: np.ndarray,
+    amp_ratios: np.ndarray,
+    phase_shifts: np.ndarray,
+    f_logger,
 ) -> tuple[Figure, Axes]:
-    """
-    绘制瞬时声压场分布图
+    """绘制瞬时声压场分布图（内部函数）"""
+    grid_resolution = 100
+    interpolation_method = "cubic"
 
-    该函数接收已计算好的传递函数结果，计算 A·sin(φ) 来模拟某一瞬间的声压场分布。
-    使用插值方法创建连续的彩色区域图像，展现瞬时声场的空间分布特性。
-
-    Args:
-        plot_tf_results: 传递函数计算结果列表
-        figsize: 图形尺寸 (宽, 高)，单位为英寸，默认为 (10, 8)
-        field_cmap: 声压场图的colormap名称，默认为 "RdBu_r"（红蓝色图，适合表示正负值）
-        interpolation_method: 插值方法，可选 "linear", "nearest", "cubic"，
-            默认为 "cubic"
-        grid_resolution: 插值网格分辨率，默认为 100
-        save_path: 保存图片的路径，如果为None则不保存，默认为None
-        show_measurement_points: 是否在插值图上显示原始测量点，默认为True
-
-    Returns:
-        fig: matplotlib Figure对象
-        ax: Axes对象
-
-    Raises:
-        ValueError: 当输入数据为空时
-
-    Examples:
-        ```python
-        >>> # 假设已有传递函数计算结果
-        >>> from analyze import sweep_data_to_point_tf_data
-        >>> test_plot_tf_results = sweep_data_to_point_tf_data(test_sweep_data)  # noqa
-        >>> test_fig, test_ax = plot_transfer_function_instantaneous_field(plot_tf_results)
-        >>> plt.show()
-        >>> # 或者保存图片并使用线性插值
-        >>> test_fig, test_ax = plot_transfer_function_instantaneous_field(  # noqa
-        ...     plot_tf_results,
-        ...     interpolation_method="linear",
-        ...     save_path="instantaneous_field.png"
-        ... )
-        ```
-    """
-    # 获取函数日志器
-    f_logger = get_logger(f"{__name__}.plot_transfer_function_instantaneous_field")
-
-    if not plot_tf_results:
-        f_logger.error("传递函数结果为空，无法绘图")
-        raise ValueError("传递函数结果不能为空")
-
-    f_logger.info(f"绘制 {len(plot_tf_results)} 个点的瞬时声压场分布")
-
-    # 1. 提取数据
-    x_coords = np.array([result["position"].x for result in plot_tf_results])
-    y_coords = np.array([result["position"].y for result in plot_tf_results])
-    amp_ratios = np.array([result["amp_ratio"] for result in plot_tf_results])
-    phase_shifts = np.array([result["phase_shift"] for result in plot_tf_results])
-
-    # 2. 计算瞬时声压场值 A·sin(φ)
+    # 计算瞬时声压场值 A·sin(φ)
     instantaneous_field = amp_ratios * np.sin(phase_shifts)
 
-    f_logger.debug(
-        f"数据范围: X=[{x_coords.min():.2f}, {x_coords.max():.2f}], "
-        f"Y=[{y_coords.min():.2f}, {y_coords.max():.2f}], "
-        f"瞬时声压场=[{instantaneous_field.min():.4f}, {instantaneous_field.max():.4f}]"
-    )
-
-    # 3. 创建插值网格
+    # 创建插值网格
     x_min, x_max = x_coords.min(), x_coords.max()
     y_min, y_max = y_coords.min(), y_coords.max()
-
-    # 扩展边界以获得更好的插值效果
-    x_range = x_max - x_min
-    y_range = y_max - y_min
-    x_margin = x_range * 0.1  # 10%的边界扩展
-    y_margin = y_range * 0.1
+    x_margin = (x_max - x_min) * 0.1
+    y_margin = (y_max - y_min) * 0.1
 
     xi = np.linspace(x_min - x_margin, x_max + x_margin, grid_resolution)
     yi = np.linspace(y_min - y_margin, y_max + y_margin, grid_resolution)
     Xi, Yi = np.meshgrid(xi, yi)
 
-    f_logger.debug(
-        f"创建插值网格: {grid_resolution}x{grid_resolution}, "
-        f"方法: {interpolation_method}"
-    )
-
-    # 4. 执行插值
     points = np.column_stack((x_coords, y_coords))
 
     try:
-        # 插值瞬时声压场值（由于sin函数本身具有周期性，无需特殊处理）
         field_interpolated = griddata(
-            points,
-            instantaneous_field,
-            (Xi, Yi),
-            method=interpolation_method,
-            fill_value=np.nan,
+            points, instantaneous_field, (Xi, Yi),
+            method=interpolation_method, fill_value=np.nan,
+        )
+    except Exception as e:
+        f_logger.warning(f"cubic插值失败({e})，回退到linear插值")
+        field_interpolated = griddata(
+            points, instantaneous_field, (Xi, Yi),
+            method="linear", fill_value=np.nan,
         )
 
-        f_logger.debug("瞬时声压场插值计算完成")
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
 
-    except Exception as e:
-        f_logger.error(f"插值计算失败: {e}")
-        # 如果cubic插值失败，回退到linear插值
-        if interpolation_method == "cubic":
-            f_logger.warning("cubic插值失败，回退到linear插值")
-            field_interpolated = griddata(
-                points,
-                instantaneous_field,
-                (Xi, Yi),
-                method="linear",
-                fill_value=np.nan,
-            )
-        else:
-            raise
-
-    # 5. 创建图形
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-
-    # 6. 绘制瞬时声压场分布图
-    # 使用对称的颜色范围，确保零值在颜色图中央
-    # 首先基于原始数据计算对称范围，然后考虑插值数据的范围
-    original_field_max = np.max(np.abs(instantaneous_field))
-    interpolated_field_max = np.nanmax(np.abs(field_interpolated))
-
-    # 取两者中的较大值，确保所有数据都在颜色范围内
-    vmax = max(original_field_max, interpolated_field_max)
+    # 对称颜色范围，确保零值在中央
+    vmax = max(np.max(np.abs(instantaneous_field)), np.nanmax(np.abs(field_interpolated)))
     vmin = -vmax
 
-    f_logger.debug(f"颜色范围: [{vmin:.4f}, {vmax:.4f}]")
-
-    # 使用 contourf 但不使用 extend 参数，避免颜色突变
     im = ax.contourf(
-        Xi,
-        Yi,
-        field_interpolated,
-        levels=50,
-        cmap=field_cmap,
-        vmin=vmin,
-        vmax=vmax,
+        Xi, Yi, field_interpolated,
+        levels=50, cmap="RdBu_r", vmin=vmin, vmax=vmax,
     )
-
     ax.set_xlabel("X 坐标 (mm)", fontsize=12)
     ax.set_ylabel("Y 坐标 (mm)", fontsize=12)
     ax.set_title("瞬时声压场分布 (A·sin(φ))", fontsize=14, fontweight="bold")
     ax.set_aspect("equal", adjustable="box")
-
-    # 添加颜色条
     cbar = fig.colorbar(im, ax=ax, label="瞬时声压场强度")
     cbar.ax.tick_params(labelsize=10)
 
-    # 可选：显示原始测量点
-    if show_measurement_points:
-        ax.scatter(
-            x_coords,
-            y_coords,
-            c="white",
-            s=30,
-            edgecolors="black",
-            linewidths=1,
-            alpha=0.8,
-            zorder=10,
-        )
-
-    f_logger.debug("瞬时声压场分布图绘制完成")
-
-    # 7. 调整布局
     plt.tight_layout()
-
-    # 8. 保存图片（如果指定了路径）
-    if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
-        f_logger.info(f"瞬时声压场分布图已保存至: {save_path}")
-
+    f_logger.debug("瞬时声压场分布图绘制完成")
     return fig, ax
 
 
@@ -968,23 +709,23 @@ def plot_sweep_waveforms(
         ```
     """
     # 获取函数日志器
-    logger = get_logger(f"{__name__}.plot_sweep_waveforms")
+    f_logger = get_logger(f"{__name__}.plot_sweep_waveforms")
 
     from datetime import datetime
     from pathlib import Path
 
-    logger.info("开始批量绘制SweepData波形图")
+    f_logger.info("开始批量绘制SweepData波形图")
 
     # 验证输入
     ai_data_list = sweep_data["ai_data_list"]
     if not ai_data_list:
-        logger.error("输入的SweepData对象为空，无法绘图")
+        f_logger.error("输入的SweepData对象为空，无法绘图")
         raise ValueError("SweepData对象不能为空")
 
     # 创建输出目录
     output_dir_path = Path(output_dir)
     if not output_dir_path.exists():
-        logger.info(f"输出目录不存在，创建目录: {output_dir_path}")
+        f_logger.info(f"输出目录不存在，创建目录: {output_dir_path}")
         output_dir_path.mkdir(parents=True, exist_ok=True)
 
     # 创建带时间戳的子文件夹
@@ -994,14 +735,14 @@ def plot_sweep_waveforms(
 
     try:
         output_folder.mkdir(parents=True, exist_ok=True)
-        logger.info(f"创建输出文件夹: {output_folder}")
+        f_logger.info(f"创建输出文件夹: {output_folder}")
     except OSError as e:
-        logger.error(f"无法创建输出文件夹: {e}", exc_info=True)
+        f_logger.error(f"无法创建输出文件夹: {e}", exc_info=True)
         raise
 
     # 统计总波形数
     total_waveforms = sum(len(point_data["ai_data"]) for point_data in ai_data_list)
-    logger.info(f"开始绘制 {len(ai_data_list)} 个数据点的共 {total_waveforms} 个波形")
+    f_logger.info(f"开始绘制 {len(ai_data_list)} 个数据点的共 {total_waveforms} 个波形")
 
     # 遍历每个数据点
     waveform_count = 0
@@ -1009,7 +750,7 @@ def plot_sweep_waveforms(
         position = point_data["position"]
         ai_waveforms = point_data["ai_data"]
 
-        logger.debug(
+        f_logger.debug(
             f"处理数据点 {point_idx} (位置: {position}), 共 {len(ai_waveforms)} 个波形"
         )
 
@@ -1038,26 +779,26 @@ def plot_sweep_waveforms(
 
                 # 每10个波形输出一次进度
                 if waveform_count % 10 == 0 or waveform_count == total_waveforms:
-                    logger.info(
+                    f_logger.info(
                         f"进度: {waveform_count}/{total_waveforms} "
                         f"({waveform_count / total_waveforms * 100:.1f}%)"
                     )
 
             except Exception as e:
-                logger.error(
+                f_logger.error(
                     f"绘制数据点 {point_idx} 的波形 {waveform_idx} 时发生错误: {e}",
                     exc_info=True,
                 )
                 # 继续处理下一个波形
                 continue
 
-    logger.info(f"批量绘制完成，成功绘制 {waveform_count}/{total_waveforms} 个波形图")
-    logger.info(f"所有波形图已保存至: {output_folder}")
+    f_logger.info(f"批量绘制完成，成功绘制 {waveform_count}/{total_waveforms} 个波形图")
+    f_logger.info(f"所有波形图已保存至: {output_folder}")
 
     return str(output_folder)
 
 
-def plot_sweepdata_as_single_waveform(
+def plot_sweep_data_as_single_waveform(
     sweep_data: SweepData,
     figsize: tuple[float, float] = (12, 6),
     title: str | None = None,
@@ -1097,10 +838,10 @@ def plot_sweepdata_as_single_waveform(
         ```python
         # 假设已有一个SweepData对象
         >>> sweep_data = load_sweep_data("measurement.pkl")  # noqa
-        >>> fig, ax = plot_sweepdata_as_single_waveform(sweep_data)
+        >>> fig, ax = plot_sweep_data_as_single_waveform(sweep_data)
         >>> plt.show()
         # 或者保存图片并放大10倍
-        >>> fig, ax = plot_sweepdata_as_single_waveform(
+        >>> fig, ax = plot_sweep_data_as_single_waveform(
         ...     sweep_data,
         ...     save_path="fusion_waveform.png",
         ...     zoom_factor=10
@@ -1108,7 +849,7 @@ def plot_sweepdata_as_single_waveform(
         ```
     """
     # 获取函数日志器
-    f_logger = get_logger(f"{__name__}.plot_sweepdata_as_single_waveform")
+    f_logger = get_logger(f"{__name__}.plot_sweep_data_as_single_waveform")
 
     f_logger.info("开始绘制SweepData的融合波形图")
 

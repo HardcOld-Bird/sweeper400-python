@@ -94,7 +94,8 @@ def detrend_waveform(
         channel_names=input_waveform.channel_names,
         timestamp=input_waveform.timestamp,
         waveform_id=input_waveform.waveform_id,
-        sine_args=input_waveform.sine_args,
+        frequency=input_waveform.frequency,
+        channel_complex_amplitudes=input_waveform.channel_complex_amplitudes,
     )
 
     f_logger.debug(
@@ -180,7 +181,8 @@ def filter_waveform(
         channel_names=input_waveform.channel_names,
         timestamp=input_waveform.timestamp,
         waveform_id=input_waveform.waveform_id,
-        sine_args=input_waveform.sine_args,
+        frequency=input_waveform.frequency,
+        channel_complex_amplitudes=input_waveform.channel_complex_amplitudes,
     )
 
     f_logger.debug(

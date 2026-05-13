@@ -28,9 +28,8 @@ from ..analyze import (
     PositiveInt,
     TFData,
     Waveform,
-    get_sine_multi_ch,
     load_data_with_fallback,
-    comp_multi_ch_wf,
+    comp_waveform,
 )
 from ..logger import get_logger
 
@@ -67,28 +66,27 @@ class SingleChasCSIO:
 
     ## 使用示例：
     ```python
-    from sweeper400.analyze import init_sampling_info, init_sine_args, get_sine_cycles
+    from sweeper400.analyze import init_sampling_info, get_sine
     from sweeper400.measure.cont_sync_io import SingleChasCSIO
     import numpy as np
 
     # 创建采样信息和静态输出波形
     sampling_info = init_sampling_info(48000, 4800)
-    sine_args = init_sine_args(1000.0, 0.02, 0.0)
-    static_output_waveform = get_sine_cycles(sampling_info, sine_args)
+    cca = np.array([0.02 + 0j])  # 单通道，幅值0.02，相位0
+    static_output_waveform = get_sine(
+        sampling_info, 1000.0, ("PXI1Slot2/ao0",), cca, full_cycle=True
+    )
 
-    # 定义反馈函数（根据补偿后的AI SineArgs生成AO输出）
-    # 注意：feedback_function现在接收一个字典，键是AI通道名，值是SineArgs
-    def feedback_function(compensated_sine_args_dict):
-        # 示例：根据第一个AI通道的幅值生成反馈波形
-        first_channel = list(compensated_sine_args_dict.keys())[0]
-        sine_args = compensated_sine_args_dict[first_channel]
-
-        # 生成简单的反馈波形（这里示例使用正弦波）
-        from sweeper400.analyze import get_sine_multi_ch
-        feedback_waveform = get_sine_multi_ch(
+    # 定义反馈函数（根据补偿后的AI波形生成AO输出）
+    # 注意：feedback_function现在接收AI波形、静态输出波形、当前播放的feedback波形和TFData
+    def feedback_function(ai_waveform, static_wf, currently_playing, tf_data):
+        # 示例：根据AI波形生成反馈波形
+        feedback_cca = np.array([0.01 + 0j])  # feedback通道复振幅
+        feedback_waveform = get_sine(
             sampling_info=sampling_info,
-            sine_args=sine_args,  # 可以使用补偿后的参数
-            channel_names=("PXI1Slot3/ao1",),  # feedback通道
+            frequency=1000.0,
+            channel_names=("PXI1Slot3/ao1",),
+            channel_complex_amplitudes=feedback_cca,
         )
         return feedback_waveform
 
@@ -129,7 +127,11 @@ class SingleChasCSIO:
     sync_io.enable_export = True
 
     # 动态更换静态输出波形
-    new_waveform = get_sine_cycles(sampling_info, init_sine_args(2000.0, 0.02, 0.0))
+    new_cca = np.array([0.02 + 0j, 0.02 + 0j])  # 示例：2通道
+    new_waveform = get_sine(
+        sampling_info, 2000.0,
+        ("PXI1Slot2/ao0", "PXI1Slot3/ao0"), new_cca, full_cycle=True
+    )
     sync_io.update_static_output_waveform(new_waveform)
 
     # 停止任务
@@ -138,7 +140,8 @@ class SingleChasCSIO:
 
     ## 注意事项：
         - 所有通道必须位于同一机箱
-        - feedback_function接收一个字典参数，键为AI通道名称，值为补偿后的SineArgs
+        - feedback_function接收四个参数：ai_waveform, static_output_waveform,
+          currently_playing_feedback_waveform, fishnet_tf_data
         - feedback_function必须返回与feedback_ao_channels数量匹配的Waveform对象
         - 如果提供了ao_comp_data或ai_comp_data，将自动应用补偿
         - Static AO和Feedback AO通道至少要有一个非空
@@ -353,11 +356,11 @@ class SingleChasCSIO:
         channel_names: tuple[str, ...],
     ) -> Waveform:
         """
-        处理波形以匹配通道要求（单通道扩展/补充通道信息/检查匹配）
+        处理波形以匹配通道要求（单通道复制扩展/更新通道信息/检查匹配）
 
         该方法处理波形以匹配目标通道数量：
-        1. 如果输入是单通道波形且需要多通道输出，使用get_sine_multi_ch重新生成多通道波形
-        2. 如果波形已有正确通道数，直接添加channel_names
+        1. 如果输入是单通道波形且需要多通道输出，将单通道数据复制到所有通道
+        2. 如果波形已有正确通道数，更新channel_names
 
         Args:
             waveform: 输入波形对象
@@ -371,30 +374,37 @@ class SingleChasCSIO:
         """
         channels_num = len(channel_names)
 
-        # 情况1：单通道输入，需要多通道输出
+        # 情况1：单通道输入，需要多通道输出（直接复制单通道数据到所有通道）
         if waveform.is_single_channel and channels_num > 1:
-            logger.info(f"静态输出波形为单通道，使用get_sine_multi_ch扩展为 {channels_num} 通道")
+            logger.info(f"静态输出波形为单通道，复制扩展为 {channels_num} 通道")
 
-            # 检查是否有sine_args，用于重新生成多通道波形
-            if waveform.sine_args is None:
-                raise ValueError(
-                    "单通道波形扩展为多通道时，波形必须包含sine_args属性"
-                )
+            # 将单通道数据复制到所有通道
+            single_ch_data = np.asarray(waveform)[0, :]  # (n_samples,)
+            multi_ch_data = np.tile(single_ch_data, (channels_num, 1))  # (channels_num, n_samples)
 
-            # 使用get_sine_multi_ch生成多通道波形
-            multi_ch_waveform = get_sine_multi_ch(
-                sampling_info=waveform.sampling_info,
-                sine_args=waveform.sine_args,
+            # 扩展channel_complex_amplitude（如果存在）
+            if waveform.channel_complex_amplitudes is not None:
+                single_cca = waveform.channel_complex_amplitudes[0]
+                multi_ch_cca = np.full(channels_num, single_cca, dtype=np.complex128)
+            else:
+                multi_ch_cca = None
+
+            # 创建多通道Waveform对象
+            multi_ch_waveform = Waveform(
+                input_array=multi_ch_data,
+                sampling_rate=waveform.sampling_rate,
                 channel_names=channel_names,
                 timestamp=waveform.timestamp,
                 waveform_id=waveform.waveform_id,
+                frequency=waveform.frequency,
+                channel_complex_amplitude=multi_ch_cca,
             )
 
         # 情况2：多通道输入，检查通道数匹配
         elif waveform.channels_num == channels_num:
             multi_ch_waveform = waveform
-            # 确保波形有channel_names
-            if multi_ch_waveform.channel_names is None:
+            # 更新channel_names以匹配目标通道
+            if waveform.channel_names != channel_names:
                 multi_ch_waveform.channel_names = channel_names
 
         # 情况3：通道数不匹配
@@ -634,23 +644,19 @@ class SingleChasCSIO:
             # 写入之前，对静态输出波形应用AO补偿
             if self._ao_comp_data is not None:
                 logger.debug("对静态输出波形应用AO补偿")
-                comped_static_waveform: Waveform = comp_multi_ch_wf(
+                comped_static_waveform: Waveform = comp_waveform(
                     self._static_output_waveform,
                     self._ao_comp_data,
                 )
             else:
                 comped_static_waveform = self._static_output_waveform
 
-            # 提取波形数据
-            # Waveform统一使用2D格式 (n_channels, n_samples)
-            waveform_data = np.asarray(comped_static_waveform)
-
             # 根据通道数处理数据格式
-            # nidaqmx要求：单通道任务使用1D数组，多通道任务使用2D数组
-            channels_num = len(self._ao_channels_static)
+            # nidaqmx要求：单通道任务使用1D数组，多通道任务使用2D数组，与项目约定有出入
+            channels_num = self.ao_channels_num_static
             if channels_num == 1:
                 # 单通道任务：将2D数组squeeze成1D数组
-                waveform_data = waveform_data.squeeze(axis=0)
+                waveform_data = comped_static_waveform.squeeze(axis=0)
                 logger.debug(f"单通道任务，将波形数据squeeze为1D: {waveform_data.shape}")
 
             # 从缓冲区起始位置（position 0）覆盖写入新波形。
@@ -662,8 +668,8 @@ class SingleChasCSIO:
             self._ao_task_static.out_stream.offset = 0
 
             # 写入数据
-            self._ao_task_static.write(waveform_data, auto_start=False)
-            logger.debug(f"成功写入静态波形数据，shape: {waveform_data.shape}")
+            self._ao_task_static.write(comped_static_waveform, auto_start=False)
+            logger.debug(f"成功写入静态波形数据，shape: {comped_static_waveform.shape}")
 
         except Exception as e:
             logger.error(f"静态波形写入失败: {e}", exc_info=True)
@@ -735,7 +741,7 @@ class SingleChasCSIO:
             # 写入之前，对feedback波形应用AO补偿
             if self._ao_comp_data is not None:
                 logger.debug("对反馈波形应用AO补偿")
-                comped_feedback_waveform: Waveform = comp_multi_ch_wf(
+                comped_feedback_waveform: Waveform = comp_waveform(
                     raw_feedback_waveform,
                     self._ao_comp_data,
                 )
@@ -848,7 +854,7 @@ class SingleChasCSIO:
                     # 首先，对AI波形应用AI补偿
                     if self._ai_comp_data is not None:
                         logger.debug("对AI波形应用AI补偿")
-                        ai_waveform = comp_multi_ch_wf(
+                        ai_waveform = comp_waveform(
                             ai_waveform,
                             self._ai_comp_data,
                         )

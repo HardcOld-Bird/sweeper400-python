@@ -22,19 +22,15 @@ from ..analyze import (
     Point2D,
     PositiveFloat,
     PositiveInt,
-    SineArgs,
     SweepData,
     Waveform,
     TFData,
-    get_sine_cycles,
+    get_sine,
     init_sampling_info,
-    init_sine_args,
-    load_sweep_data,
-    save_sweep_data,
-    plot_transfer_function_discrete_distribution,
-    plot_transfer_function_instantaneous_field,
-    plot_transfer_function_interpolated_distribution,
-    sweep_data_to_point_tf_data,
+    load_compressed_data,
+    save_compressed_data,
+    plot_point_tf_data_list,
+    sweep_data_to_point_tf_data_list,
 )
 from ..measure import SingleChasCSIO
 from ..move import MotorController
@@ -267,10 +263,11 @@ class SweeperCore:
     ## 使用方式：
     ```python
     # 创建输出波形
-    from sweeper400.analyze import init_sampling_info, init_sine_args, get_sine_cycles
+    from sweeper400.analyze import init_sampling_info, get_sine
+    import numpy as np
     sampling_info = init_sampling_info(48000, 4800)
-    sine_args = init_sine_args(1000.0, 1.0, 0.0)
-    output_waveform = get_sine_cycles(sampling_info, sine_args, cycles=100)
+    cca = np.array([1.0 + 0j])  # 单通道，幅值1.0V
+    output_waveform = get_sine(sampling_info, 1000.0, ("PXI1Slot2/ao0",), cca, full_cycle=True)
 
     # 创建扫场测量器（自动管理硬件控制器）
     sweeper = SweeperCore(
@@ -348,8 +345,13 @@ class SweeperCore:
         if static_output_waveform is None:
             # 创建默认波形
             sampling_info = init_sampling_info(10000.0, 5000)
-            sine_args = init_sine_args(frequency=1000.0, amplitude=0.0, phase=0.0)
-            static_output_waveform = get_sine_cycles(sampling_info, sine_args)
+            static_output_waveform = get_sine(
+                sampling_info=sampling_info,
+                frequency=1000.0,
+                channel_names=("default_ao",),
+                channel_complex_amplitudes=np.array([0.0 + 0j]),
+                full_cycle=True,
+            )
             logger.debug(
                 "未提供输出波形，创建默认波形：1000Hz正弦波，幅值0.0，采样率10kHz"
             )
@@ -497,7 +499,12 @@ class SweeperCore:
             channel_names=(self._sweep_ai_channel,),
             timestamp=ai_waveform.timestamp,
             waveform_id=ai_waveform.waveform_id,
-            sine_args=ai_waveform.sine_args,
+            frequency=ai_waveform.frequency,
+            channel_complex_amplitudes=(
+                ai_waveform.channel_complex_amplitudes[channel_idx:channel_idx+1]
+                if ai_waveform.channel_complex_amplitudes is not None
+                else None
+            ),
         )
 
         # 存储单通道AI数据
@@ -639,8 +646,8 @@ class SweeperCore:
             >>> sweeper = SweeperCore(...)
             >>> # 创建新的输出波形
             >>> sampling_info = init_sampling_info(48000.0, 4800)
-            >>> sine_args = init_sine_args(2000.0, 0.02, 0.0)
-            >>> new_waveform = get_sine_cycles(sampling_info, sine_args)
+            >>> cca = np.array([0.02 + 0j])
+            >>> new_waveform = get_sine(sampling_info, 2000.0, ("PXI1Slot2/ao1",), cca, full_cycle=True)
             >>> # 更新配置
             >>> sweeper.new_csio(
             ...     ("PXI1Slot2/ai1", "PXI1Slot3/ai1"),
@@ -666,8 +673,13 @@ class SweeperCore:
         if static_output_waveform is None:
             # 创建默认波形
             sampling_info = init_sampling_info(10000.0, 5000)
-            sine_args = init_sine_args(frequency=1000.0, amplitude=0.01, phase=0.0)
-            static_output_waveform = get_sine_cycles(sampling_info, sine_args)
+            static_output_waveform = get_sine(
+                sampling_info=sampling_info,
+                frequency=1000.0,
+                channel_names=("default_ao",),
+                channel_complex_amplitudes=np.array([0.01 + 0j]),
+                full_cycle=True,
+            )
             logger.debug(
                 "未提供输出波形，创建默认波形：1000Hz正弦波，幅值0.01，采样率10kHz"
             )
@@ -1161,7 +1173,7 @@ class SweeperCore:
 
         try:
             # 使用load_sweep_data函数加载数据
-            loaded_data = load_sweep_data(file_path)
+            loaded_data = load_compressed_data(file_path, "SweepData")
 
             # 替换当前数据
             self._sweep_data = loaded_data
@@ -1222,12 +1234,11 @@ class SweeperCore:
             raise ValueError("没有可保存的数据，请先执行扫场测量")
 
         # 使用统一的save_sweep_data函数保存数据
-        save_sweep_data(self._sweep_data, save_path, compresslevel=compress_level)
+        save_compressed_data(self._sweep_data, save_path, compress_level, "SweepData")
 
     def plot_data(
         self,
         save_path: str | Path,
-        ref_sine_args: SineArgs | None = None,
         lowcut: float = 100.0,
         highcut: float = 20000.0,
         filter_order: int = 4,
@@ -1246,7 +1257,6 @@ class SweeperCore:
                 - {save_path}_discrete.png
                 - {save_path}_interpolated.png
                 - {save_path}_instantaneous.png
-            ref_sine_args: 参考正弦波参数，如果为None则尝试从ao_data获取
             lowcut: 带通滤波器低截止频率（Hz），默认100.0
             highcut: 带通滤波器高截止频率（Hz），默认20000.0
             filter_order: 滤波器阶数，默认4
@@ -1277,9 +1287,8 @@ class SweeperCore:
 
         # 将SweepData转换为PointTFData列表
         try:
-            plot_tf_results = sweep_data_to_point_tf_data(
+            plot_tf_results = sweep_data_to_point_tf_data_list(
                 self._sweep_data,
-                ref_sine_args=ref_sine_args,
                 lowcut=lowcut,
                 highcut=highcut,
                 filter_order=filter_order,
@@ -1290,19 +1299,13 @@ class SweeperCore:
             logger.error(f"转换SweepData到PointTFData失败: {e}", exc_info=True)
             raise ValueError(f"数据转换失败: {e}") from e
 
-        # 定义三种模式的绘图配置
-        plot_configs = [
-            ("discrete", plot_transfer_function_discrete_distribution),
-            ("interpolated", plot_transfer_function_interpolated_distribution),
-            ("instantaneous", plot_transfer_function_instantaneous_field),
-        ]
-
         # 依次绘制三种模式的图像
-        for mode_name, plot_func in plot_configs:
+        for mode_name in ("discrete", "interpolated", "instantaneous"):
             try:
                 save_path_with_mode = save_path_base.parent / f"{save_path_base.name}_{mode_name}.png"
-                fig, _ = plot_func(
+                fig, _ = plot_point_tf_data_list(
                     plot_tf_results,
+                    mode=mode_name,
                     save_path=str(save_path_with_mode),
                 )
                 plt.close(fig)

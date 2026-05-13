@@ -8,17 +8,12 @@
 
 # 将模块功能提升至包级别，可缩短外部import语句
 from .basic_sine import (
-    estimate_sine_args,
-    esti_vvi_multi_ch,
-    extract_single_tone_information_vvi,
     get_sine,
-    get_sine_cycles,
-    get_sine_multi_ch,
+    extract_single_tone_information_vvi,
 )
 from .calib_util_funcs import (
     load_data_with_fallback,
-    comp_ai_sine_args,
-    comp_multi_ch_wf,
+    comp_waveform,
 )
 from .filter import (
     detrend_waveform,
@@ -41,13 +36,11 @@ from .my_dtypes import (
     init_comp_data,
 )
 from .plot import (
-    plot_sweep_waveforms,
-    plot_sweepdata_as_single_waveform,
-    plot_transfer_function_discrete_distribution,
-    plot_transfer_function_instantaneous_field,
-    plot_transfer_function_interpolated_distribution,
+    sweep_data_to_point_tf_data_list,
+    plot_point_tf_data_list,
     plot_waveform,
-    sweep_data_to_point_tf_data,
+    plot_sweep_waveforms,
+    plot_sweep_data_as_single_waveform,
 )
 from .post_process import (
     average_comp_data_list,
@@ -55,9 +48,7 @@ from .post_process import (
     average_sweep_data,
     average_tf_data_list,
     comp_to_tf,
-    load_sweep_data,
     load_compressed_data,
-    save_sweep_data,
     save_compressed_data,
     tf_to_comp,
 )
@@ -81,28 +72,19 @@ __all__ = [
     "SweepData",
     "TFData",
     "get_sine",
-    "get_sine_cycles",
-    "get_sine_multi_ch",
-    "estimate_sine_args",
-    "esti_vvi_multi_ch",
     "extract_single_tone_information_vvi",
     "tf_to_comp",
     "comp_to_tf",
-    "load_sweep_data",
-    "save_sweep_data",
     "filter_sweep_data",
-    "plot_transfer_function_discrete_distribution",
-    "plot_transfer_function_interpolated_distribution",
-    "plot_transfer_function_instantaneous_field",
+    "plot_point_tf_data_list",
     "plot_waveform",
     "plot_sweep_waveforms",
-    "plot_sweepdata_as_single_waveform",
+    "plot_sweep_data_as_single_waveform",
     "filter_waveform",
     "detrend_waveform",
-    "sweep_data_to_point_tf_data",
+    "sweep_data_to_point_tf_data_list",
     "load_compressed_data",
     "save_compressed_data",
-    "comp_ai_sine_args",
-    "comp_multi_ch_wf",
+    "comp_waveform",
     "load_data_with_fallback",
 ]

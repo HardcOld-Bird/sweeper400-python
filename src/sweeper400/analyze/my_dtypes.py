@@ -201,10 +201,11 @@ def init_sine_args(
 def _rebuild_waveform_from_pickle(
     array_data: np.ndarray,
     sampling_rate: PositiveFloat,
-    channel_names: tuple[str, ...] | None,
+    channel_names: tuple[str, ...],
     timestamp: np.datetime64,
     waveform_id: int | None,
-    sine_args: SineArgs | None,
+    frequency: PositiveFloat | None,
+    channel_complex_amplitudes: np.ndarray | None,
 ) -> Waveform:
     """
     从pickle数据重建Waveform对象
@@ -215,7 +216,8 @@ def _rebuild_waveform_from_pickle(
         channel_names: 通道名称元组
         timestamp: 时间戳
         waveform_id: 波形ID（整数）
-        sine_args: 正弦波参数
+        frequency: 正弦波频率（Hz）
+        channel_complex_amplitudes: 各通道复振幅数组
 
     Returns:
         重建的Waveform对象
@@ -228,7 +230,8 @@ def _rebuild_waveform_from_pickle(
     waveform_obj._channel_names = channel_names
     waveform_obj.timestamp = timestamp
     waveform_obj.waveform_id = waveform_id
-    waveform_obj.sine_args = sine_args
+    waveform_obj.frequency = frequency
+    waveform_obj._channel_complex_amplitudes = channel_complex_amplitudes
 
     return waveform_obj
 
@@ -248,23 +251,25 @@ class Waveform(np.ndarray):
 
     ## 新增属性：
         - **sampling_rate**: 波形数据的**采样率**（Hz），只读属性
-        - **channel_names**: 波形的**通道名称元组**，只读属性，可选属性
+        - **channel_names**: 波形的**通道名称元组**，可修改属性
         - **timestamp**: 波形采样开始**时间戳**，可修改属性
         - **waveform_id**: 波形的**唯一标识符**，可修改属性，可选属性
-        - **sine_args**: 波形的**正弦波参数**，可修改属性，可选属性
+        - **frequency**: 波形的**正弦波频率**（Hz），可修改属性，可选属性
+        - **channel_complex_amplitudes**: 各通道的**复振幅**（模长为幅值，相角为相位），
+          可修改属性，可选属性，长度必须等于通道数
 
     ## 使用示例：
         创建单通道波形（自动转换为 2D）：
         ```python
         >>> data = np.array([1.0, 2.0, 3.0, 4.0])  # 1D 输入
-        >>> waveform = Waveform(data, sampling_rate=1000, channel_names=None)
+        >>> waveform = Waveform(data, sampling_rate=1000, _channel_names=("ch1",))
         >>> # 内部存储为 shape=(1, 4) 的 2D 数组
         ```
 
         创建多通道波形：
         ```python
         >>> data = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])  # (2, 3) 形状
-        >>> waveform = Waveform(data, sampling_rate=1000, channel_names=("ch1", "ch2"))
+        >>> waveform = Waveform(data, sampling_rate=1000, _channel_names=("ch1", "ch2"))
         >>> # 内部存储为 shape=(2, 3) 的 2D 数组
         ```
 
@@ -278,10 +283,11 @@ class Waveform(np.ndarray):
     # "__new__"方法中不支持属性的类型注解（而"__init__"中可以），
     # 因此需要首先显式声明类型
     _sampling_rate: PositiveFloat
-    _channel_names: tuple[str, ...] | None
+    _channel_names: tuple[str, ...]
     timestamp: np.datetime64
     waveform_id: int | None
-    sine_args: SineArgs | None
+    frequency: PositiveFloat | None
+    _channel_complex_amplitudes: np.ndarray | None  # complex128, shape=(n_channels,)
 
     # 获取类日志器（类属性，所有实例共享）
     logger = get_logger(f"{__name__}.Waveform")
@@ -290,10 +296,11 @@ class Waveform(np.ndarray):
         cls,
         input_array: np.ndarray | list[float | int],  # python原生float也即numpy.float64
         sampling_rate: PositiveFloat,
-        channel_names: tuple[str, ...] | None = None,
+        channel_names: tuple[str, ...],
         timestamp: np.datetime64 | None = None,
         waveform_id: int | None = None,
-        sine_args: SineArgs | None = None,
+        frequency: PositiveFloat | None = None,
+        channel_complex_amplitudes: np.ndarray | None = None,
         **kwargs: Any,
     ) -> Waveform:
         """
@@ -306,10 +313,12 @@ class Waveform(np.ndarray):
         Args:
             input_array: 输入的波形数据数组（1D 或 2D）
             sampling_rate: 采样率（Hz），必须为正实数
-            channel_names: 通道名称元组，长度必须等于通道数，可选
+            channel_names: 通道名称元组，长度必须等于通道数
             timestamp: 采样开始时间戳，可选，默认为当前时间
             waveform_id: 波形的唯一标识符，可选，默认为None
-            sine_args: 正弦波参数，可选，默认为None
+            frequency: 正弦波频率（Hz），可选，默认为None
+            channel_complex_amplitudes: 各通道复振幅数组（complex128），
+                长度必须等于通道数，模长为幅值，相角为相位，可选，默认为None
             **kwargs: 传递给numpy.ndarray的其他参数
 
         Returns:
@@ -319,6 +328,7 @@ class Waveform(np.ndarray):
             TypeError: 当输入数据无法转换为numpy数组时
             ValueError: 当输入数组维度不是1D或2D时
             ValueError: 当channel_names长度与通道数不匹配时
+            ValueError: 当channel_complex_amplitudes长度与通道数不匹配时
         """
         # 转换输入数组为numpy数组
         try:
@@ -343,20 +353,33 @@ class Waveform(np.ndarray):
         obj: Waveform = arr.view(cls)  # noqa
 
         # 验证channel_names长度（现在 obj 始终为 2D）
-        if channel_names is not None:
+        n_channels = obj.shape[0]
+        if len(channel_names) != n_channels:
+            logger.error(
+                f"channel_names长度({len(channel_names)})与通道数({n_channels})不匹配",
+                exc_info=True,
+            )
+            raise ValueError(
+                f"channel_names长度({len(channel_names)})与通道数({n_channels})不匹配"
+            )
+
+        # 验证channel_complex_amplitudes长度
+        if channel_complex_amplitudes is not None:
             n_channels = obj.shape[0]
-            if len(channel_names) != n_channels:
+            cca = np.asarray(channel_complex_amplitudes, dtype=np.complex128)
+            if cca.ndim != 1 or len(cca) != n_channels:
                 logger.error(
-                    f"channel_names长度({len(channel_names)})与通道数({n_channels})不匹配",
+                    f"channel_complex_amplitude长度({len(cca)})与通道数({n_channels})不匹配",
                     exc_info=True,
                 )
                 raise ValueError(
-                    f"channel_names长度({len(channel_names)})与通道数({n_channels})不匹配"
+                    f"channel_complex_amplitude长度({len(cca)})与通道数({n_channels})不匹配"
                 )
+            channel_complex_amplitudes = cca
 
-        # 设置只读属性
+        # 设置必要属性
         obj._sampling_rate = sampling_rate
-        obj._channel_names = channel_names
+        obj._channel_names = channel_names  # 存储为只读属性，方便设置setter
 
         # 设置时间戳
         if timestamp is None:
@@ -368,7 +391,8 @@ class Waveform(np.ndarray):
 
         # 设置其他可选的元数据
         obj.waveform_id = waveform_id
-        obj.sine_args = sine_args
+        obj.frequency = frequency
+        obj._channel_complex_amplitudes = channel_complex_amplitudes  # 存储为只读属性，方便设置setter
 
         logger.debug(
             f"创建Waveform对象: shape={obj.shape}, sampling_rate={sampling_rate}Hz"
@@ -406,8 +430,13 @@ class Waveform(np.ndarray):
         else:
             pass  # 同理
 
-        if hasattr(obj, "sine_args"):
-            self.sine_args = obj.sine_args
+        if hasattr(obj, "frequency"):
+            self.frequency = obj.frequency
+        else:
+            pass  # 同理
+
+        if hasattr(obj, "_channel_complex_amplitudes"):
+            self.channel_complex_amplitudes = obj._channel_complex_amplitudes  # noqa
         else:
             pass  # 同理
 
@@ -424,10 +453,11 @@ class Waveform(np.ndarray):
             (
                 np.asarray(self),  # 数组数据
                 self._sampling_rate,  # 不应为None
-                getattr(self, "_channel_names", None),
+                self._channel_names,  # 不应为None
                 self.timestamp,  # 不应为None
                 getattr(self, "waveform_id", None),
-                getattr(self, "sine_args", None),
+                getattr(self, "frequency", None),
+                getattr(self, "channel_complex_amplitudes", None),
             ),
         )
 
@@ -481,15 +511,12 @@ class Waveform(np.ndarray):
         return self._sampling_rate
 
     @property
-    def channel_names(self) -> tuple[str, ...] | None:
+    def channel_names(self) -> tuple[str, ...]:
         """
         通道名称元组
 
-        只读属性，只能在对象创建时指定
-        （tuple是不可变对象，直接传出是安全的）
-
         Returns:
-            通道名称元组，如果未设置则返回None
+            通道名称元组，长度等于通道数
         """
         return self._channel_names
 
@@ -519,6 +546,37 @@ class Waveform(np.ndarray):
         """
         sampling_info = init_sampling_info(self.sampling_rate, self.samples_num)
         return sampling_info
+
+    @property
+    def channel_complex_amplitudes(self) -> np.ndarray | None:
+        """
+        各通道的复振幅数组
+
+        Returns:
+            复振幅数组（complex128），长度等于通道数，或None
+        """
+        return self._channel_complex_amplitudes
+
+    @channel_complex_amplitudes.setter
+    def channel_complex_amplitudes(self, new_value: np.ndarray | None) -> None:
+        """
+        设置各通道的复振幅数组
+
+        Args:
+            new_value: 新的复振幅数组（complex128），长度必须等于通道数，或None
+
+        Raises:
+            ValueError: 当数组长度与通道数不匹配时
+        """
+        if new_value is not None:
+            cca = np.asarray(new_value, dtype=np.complex128)
+            if cca.ndim != 1 or len(cca) != self.channels_num:
+                raise ValueError(
+                    f"channel_complex_amplitude长度({len(cca)})与通道数({self.channels_num})不匹配"
+                )
+            self.channel_complex_amplitudes = cca
+        else:
+            self.channel_complex_amplitudes = None
 
     @property
     def duration(self) -> PositiveFloat:
@@ -605,7 +663,7 @@ class TFData(TypedDict):
             - columns: AI通道名称（列索引）
             - 内容: 复数形式的传递函数值（幅值比 * e^(j*相位差)）
         **sampling_info**: 采样信息（必选）
-        **sine_args**: 正弦波参数（包含频率、幅值和相位信息）
+        **frequency**: 正弦波频率（Hz）
         **mean_amp_ratio**: 所有通道对的平均幅值比
         **mean_phase_shift**: 所有通道对的平均相位差（弧度制）
 
@@ -617,7 +675,7 @@ class TFData(TypedDict):
 
     tf_dataframe: pd.DataFrame  # 复数类型DataFrame
     sampling_info: SamplingInfo
-    sine_args: SineArgs
+    frequency: float
     mean_amp_ratio: float
     mean_phase_shift: float
 
@@ -640,7 +698,7 @@ class CompData(TypedDict):
                 - time_increment: 时间延迟补偿值（补偿到平均值需要加上的时间差，单位：秒）
             - 内容: 浮点数
         **sampling_info**: 采样信息（必选）
-        **sine_args**: 正弦波参数（包含频率、幅值和相位信息）
+        **frequency**: 正弦波频率（Hz）
         **mean_amp_ratio**: 所有通道对的平均幅值比
         **mean_phase_shift**: 所有通道对的平均相位差（弧度制）
 
@@ -652,7 +710,7 @@ class CompData(TypedDict):
 
     comp_dataframe: pd.DataFrame  # 浮点数类型DataFrame
     sampling_info: SamplingInfo
-    sine_args: SineArgs
+    frequency: float
     mean_amp_ratio: float
     mean_phase_shift: float
 
@@ -660,7 +718,7 @@ class CompData(TypedDict):
 def init_comp_data(
     comp_dataframe: pd.DataFrame,
     sampling_info: SamplingInfo,
-    sine_args: SineArgs,
+    frequency: float,
     mean_amp_ratio: float,
     mean_phase_shift: float,
 ) -> CompData:
@@ -670,7 +728,7 @@ def init_comp_data(
     Args:
         comp_dataframe: 补偿参数DataFrame
         sampling_info: 采样信息（必选）
-        sine_args: 正弦波参数（包含频率、幅值和相位信息）
+        frequency: 正弦波频率（Hz）
         mean_amp_ratio: 所有通道对的平均幅值比
         mean_phase_shift: 所有通道对的平均相位差（弧度制）
 
@@ -680,7 +738,7 @@ def init_comp_data(
     logger.debug(
         f"手动创建CompData: comp_dataframe={comp_dataframe}, "
         f"sampling_info={sampling_info}, "
-        f"sine_args={sine_args}, "
+        f"frequency={frequency}, "
         f"mean_amp_ratio={mean_amp_ratio}, "
         f"mean_phase_shift={mean_phase_shift}"
     )
@@ -688,7 +746,7 @@ def init_comp_data(
     comp_data = CompData(
         comp_dataframe=comp_dataframe,
         sampling_info=sampling_info,
-        sine_args=sine_args,
+        frequency=frequency,
         mean_amp_ratio=mean_amp_ratio,
         mean_phase_shift=mean_phase_shift,
     )

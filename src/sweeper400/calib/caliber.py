@@ -17,13 +17,11 @@ import pandas as pd
 from ..analyze import (
     CompData,
     init_comp_data,
-    init_sine_args,
     Point2D,
     PointSweepData,
     PositiveInt,
     PositiveFloat,
     SamplingInfo,
-    SineArgs,
     SweepData,
     TFData,
     Waveform,
@@ -31,15 +29,12 @@ from ..analyze import (
     average_sweep_data,
     average_tf_data_list,
     comp_to_tf,
-    esti_vvi_multi_ch,
     extract_single_tone_information_vvi,
     filter_sweep_data,
-    get_sine_multi_ch,
-    save_sweep_data,
+    get_sine,
+    save_compressed_data,
     tf_to_comp,
     load_data_with_fallback,
-    comp_ai_sine_args,
-    comp_multi_ch_wf,
 )
 from ..measure import SingleChasCSIO
 from ..logger import get_logger
@@ -61,7 +56,7 @@ class CaliberAnemone:
         - 外部声源提供稳定的1000Hz正弦信号（无需Python生成测试信号）
         - 同时采集所有AI通道的多通道波形
         - 自动应用滤波和平均处理以提高准确度
-        - 使用esti_vvi_multi_ch函数提取各通道单频信息
+        - 使用extract_single_tone_information_vvi函数提取各通道单频信息
         - 以所有通道复振幅的平均值作为理想真值
         - 生成AI通道补偿数据（CompData）用于后续测量中补偿通道差异
         - 将校准结果序列化保存到本地磁盘
@@ -74,7 +69,7 @@ class CaliberAnemone:
            - 数据存储为SweepData格式（单个测量点）
         2. 第二阶段：数据处理
            - 对多个chunk进行平均和滤波
-           - 使用esti_vvi_multi_ch提取每个通道的复振幅
+           - 使用extract_single_tone_information_vvi提取每个通道的复振幅
         3. 第三阶段：补偿计算
            - 计算所有AI通道复振幅的平均值（理想真值）
            - 构造TFData（每个通道相对于平均值的传递函数）
@@ -182,13 +177,6 @@ class CaliberAnemone:
             timestamp=np.datetime64("now", "ns"),
         )
 
-        # 构造虚拟sine_args（用于数据类型兼容性）
-        self._sine_args = init_sine_args(
-            frequency=frequency,
-            amplitude=1.0,
-            phase=0.0,
-        )
-
         # 计算默认的稳定等待时间（chunk时长 + 0.1秒）
         chunk_duration = self._silence_waveform.duration
         self._default_settle_time = chunk_duration + 0.1
@@ -278,7 +266,7 @@ class CaliberAnemone:
            - 保存原始SweepData到raw_sweep_data.pkl
         2. 第二阶段：数据处理
            - 对多个chunk进行平均和滤波
-           - 使用esti_vvi_multi_ch提取每个通道的复振幅
+           - 使用extract_single_tone_information_vvi提取每个通道的复振幅
         3. 第三阶段：补偿计算
            - 计算所有AI通道复振幅的平均值（理想真值）
            - 构造TFData并转换为CompData
@@ -409,7 +397,7 @@ class CaliberAnemone:
         # 保存原始SweepData
         raw_sweep_data_path = result_path / "raw_sweep_data.pkl"
         try:
-            save_sweep_data(sweep_data, raw_sweep_data_path)
+            save_compressed_data(sweep_data, raw_sweep_data_path, 6, "SweepData")
             logger.info(f"原始SweepData已保存到: {raw_sweep_data_path}")
         except Exception as e:
             logger.error(f"保存原始SweepData失败: {e}", exc_info=True)
@@ -439,9 +427,9 @@ class CaliberAnemone:
         logger.info("绘制融合波形图")
         fusion_plot_path = result_path / "fusion_waveform.png"
         try:
-            from ..analyze.plot import plot_sweepdata_as_single_waveform
+            from ..analyze.plot import plot_sweep_data_as_single_waveform
 
-            fig, _ = plot_sweepdata_as_single_waveform(
+            fig, _ = plot_sweep_data_as_single_waveform(
                 sweep_data=filtered_sweep_data,
                 save_path=str(fusion_plot_path),
                 zoom_factor=200,
@@ -454,10 +442,10 @@ class CaliberAnemone:
         # 4. 提取多通道复振幅
         logger.info("提取多通道单频信息")
         ai_waveform = filtered_sweep_data["ai_data_list"][0]["ai_data"][0]
-        complex_amplitudes = esti_vvi_multi_ch(
+        _, complex_amplitudes = extract_single_tone_information_vvi(
             ai_waveform,
             approx_freq=self._frequency,
-            use_curve_fit=True,
+            precise_mode=True,
         )
 
         # 记录各通道复振幅
@@ -499,7 +487,7 @@ class CaliberAnemone:
         tf_data: TFData = {
             "tf_dataframe": tf_df,
             "sampling_info": self._sampling_info,
-            "sine_args": self._sine_args,
+            "frequency": self._frequency,
             "mean_amp_ratio": mean_amp_ratio,
             "mean_phase_shift": mean_phase_shift,
         }
@@ -544,8 +532,6 @@ class CaliberAnemone:
         # 保存最终的CompData
         final_comp_data_path = result_path / "ai_comp_data.pkl"
         try:
-            from ..analyze.post_process import save_compressed_data
-
             save_compressed_data(comp_data, final_comp_data_path, 6, "CompData")
             logger.info(f"最终CompData已保存到: {final_comp_data_path}")
         except Exception as e:
@@ -871,11 +857,10 @@ class CaliberOctopus:
     ## 使用示例：
     ```python
     from sweeper400.use.caliber import CaliberOctopus
-    from sweeper400.analyze import init_sampling_info, init_sine_args
+    from sweeper400.analyze import init_sampling_info
 
-    # 创建采样信息和正弦波参数
+    # 创建采样信息
     sampling_info = init_sampling_info(171500.0, 85750)  # 采样率171.5kHz, 0.5秒
-    sine_args = init_sine_args(frequency=3430.0, amplitude=0.01, phase=0.0)
 
     # 创建校准对象
     caliber = CaliberOctopus(
@@ -887,7 +872,8 @@ class CaliberOctopus:
             "PXI3Slot3/ao0", "PXI3Slot3/ao1"
         ),
         sampling_info=sampling_info,
-        sine_args=sine_args
+        frequency=3430.0,
+        amplitude=0.01,
     )
 
     # 执行校准（10次独立校准，每次4个chunk）
@@ -906,7 +892,8 @@ class CaliberOctopus:
         ai_channels=("PXI1Slot2/ai0",),
         ao_channels=(...),  # 与上面相同
         sampling_info=sampling_info,
-        sine_args=sine_args,
+        frequency=3430.0,
+        amplitude=0.01,
         ao_comp_data="calibration_results.pkl"  # 使用之前的校准结果
     )
     caliber_verify.calibrate(starts_num=10, chunks_per_start=4)
@@ -929,7 +916,9 @@ class CaliberOctopus:
         ai_channels: tuple[str, ...],
         ao_channels: tuple[str, ...],
         sampling_info: SamplingInfo,
-        sine_args: SineArgs,
+        frequency: PositiveFloat,
+        amplitude: PositiveFloat,
+        phase: float = 0.0,
         ai_comp_data: str | Path | None = None,
         ao_comp_data: str | Path | None = None,
     ) -> None:
@@ -941,7 +930,9 @@ class CaliberOctopus:
                          章鱼模式下通常只使用第一个元素，其余元素将被忽略。
             ao_channels: AO 通道名称元组（例如 ("PXI2Slot2/ao0", "PXI2Slot2/ao1", ...)）
             sampling_info: 采样信息，包含采样率和采样点数
-            sine_args: 正弦波参数，包含频率、幅值和相位信息
+            frequency: 正弦波频率（Hz）
+            amplitude: 正弦波幅值（V）
+            phase: 正弦波相位（rad），默认为0.0
             ai_comp_data: 可选，AI补偿数据文件路径，将传递给CSIO。
             ao_comp_data: 可选，AO补偿数据文件路径，将传递给CSIO。
 
@@ -960,15 +951,24 @@ class CaliberOctopus:
         self._ai_channels = ai_channels  # 章鱼模式下默认使用第一个元素
         self._ao_channels = ao_channels
         self._sampling_info = sampling_info
-        self._sine_args = sine_args
+        self._frequency = frequency
+        self._amplitude = amplitude
+        self._phase = phase
         self._ai_comp_data_path = ai_comp_data
         self._ao_comp_data_path = ao_comp_data
 
-        # 生成同步多通道波形（所有通道相同）
-        self._output_waveform = get_sine_multi_ch(
+        # 生成同步多通道波形（所有通道相同的复振幅）
+        cca = np.full(
+            len(ao_channels),
+            amplitude * np.exp(1j * phase),
+            dtype=np.complex128,
+        )
+        self._output_waveform = get_sine(
             sampling_info=sampling_info,
-            sine_args=sine_args,
+            frequency=frequency,
             channel_names=ao_channels,
+            channel_complex_amplitudes=cca,
+            full_cycle=True,
         )
 
         # 计算默认的稳定等待时间（chunk时长 + 0.1秒）
@@ -1000,8 +1000,8 @@ class CaliberOctopus:
             f"Caliber 实例已创建 - "
             f"AI通道数: {len(ai_channels)}, "
             f"AO通道数: {len(ao_channels)}, "
-            f"频率: {sine_args['frequency']}Hz, "
-            f"幅值: {sine_args['amplitude']}V, "
+            f"频率: {frequency}Hz, "
+            f"幅值: {amplitude}V, "
             f"采样率: {sampling_info['sampling_rate']}Hz, "
             f"默认稳定时间: {self._default_settle_time:.3f}s"
         )
@@ -1046,7 +1046,8 @@ class CaliberOctopus:
             sampling_rate=self._sampling_info["sampling_rate"],
             timestamp=self._output_waveform.timestamp,
             waveform_id=self._output_waveform.waveform_id,
-            sine_args=self._sine_args,
+            frequency=self._frequency,
+            channel_complex_amplitudes=self._output_waveform.channel_complex_amplitudes,
         )
 
         return waveform
@@ -1116,14 +1117,12 @@ class CaliberOctopus:
             CompData: 包含所有通道对补偿参数的数据容器
 
         Raises:
-            RuntimeError: 当 AO 波形没有 sine_args 属性时
+            RuntimeError: 当 self._frequency 为 None 时
             ValueError: 当测量点数量与 AO 通道数不一致时
         """
-        ao_waveform = filtered_sweep_data["ao_data"]
-        if ao_waveform.sine_args is None:
-            raise RuntimeError("AO波形没有sine_args属性，无法计算传递函数")
-
-        ao_sine_args = ao_waveform.sine_args
+        ao_frequency = self._frequency
+        ao_amplitude = self._amplitude
+        ao_phase = self._phase
         num_ao_channels = len(self._ao_channels)
 
         if len(filtered_sweep_data["ai_data_list"]) != num_ao_channels:
@@ -1142,15 +1141,17 @@ class CaliberOctopus:
             ao_channel_name = self._ao_channels[channel_idx]
             ai_waveform = point_data["ai_data"][0]  # 已平均的单通道 AI 波形
 
-            # 提取 AI 信号的正弦波参数
-            ai_sine_args = extract_single_tone_information_vvi(
+            # 提取 AI 信号的正弦波参数（单通道波形，返回频率和复振幅数组）
+            _, ai_complex_amps = extract_single_tone_information_vvi(
                 ai_waveform,
-                approx_freq=ao_sine_args["frequency"],
+                approx_freq=ao_frequency,
             )
 
-            # 计算传递函数
-            amp_ratio = ai_sine_args["amplitude"] / ao_sine_args["amplitude"]
-            phase_shift = ai_sine_args["phase"] - ao_sine_args["phase"]
+            # 计算传递函数（使用复振幅的模长和相角）
+            ai_amplitude = float(np.abs(ai_complex_amps[0]))
+            ai_phase = float(np.angle(ai_complex_amps[0]))
+            amp_ratio = ai_amplitude / ao_amplitude
+            phase_shift = ai_phase - ao_phase
             # 将相位差归一化到 [-π, π] 区间
             phase_shift = float(np.arctan2(np.sin(phase_shift), np.cos(phase_shift)))
 
@@ -1191,7 +1192,7 @@ class CaliberOctopus:
         tf_data: TFData = {
             "tf_dataframe": tf_df,
             "sampling_info": self._sampling_info,
-            "sine_args": ao_sine_args,
+            "frequency": ao_frequency,
             "mean_amp_ratio": mean_amp_ratio,
             "mean_phase_shift": mean_phase_shift,
         }
@@ -1215,7 +1216,7 @@ class CaliberOctopus:
 
         logger.info(
             f"补偿数据计算完成，共 {len(ao_channel_names_list)} 个通道对，"
-            f"频率={ao_sine_args['frequency']:.2f}Hz, "
+            f"频率={ao_frequency:.2f}Hz, "
             f"平均幅值比={mean_amp_ratio:.6f}"
         )
         return comp_data
@@ -1459,7 +1460,7 @@ class CaliberOctopus:
             # 保存这次校准的原始SweepData
             sweep_data_path = result_path / f"raw_sweep_data_{calib_idx + 1}.pkl"
             try:
-                save_sweep_data(sweep_data, sweep_data_path)
+                save_compressed_data(sweep_data, sweep_data_path, 6, "SweepData")
                 logger.info(
                     f"第 {calib_idx + 1} 次SweepData已保存到: {sweep_data_path}"
                 )
@@ -1502,9 +1503,9 @@ class CaliberOctopus:
             fusion_plot_path = result_path / fusion_plot_filename
 
             try:
-                from ..analyze.plot import plot_sweepdata_as_single_waveform
+                from ..analyze.plot import plot_sweep_data_as_single_waveform
 
-                fig, _ = plot_sweepdata_as_single_waveform(
+                fig, _ = plot_sweep_data_as_single_waveform(
                     sweep_data=filtered_data,
                     save_path=str(fusion_plot_path),
                     zoom_factor=200,
@@ -1528,7 +1529,7 @@ class CaliberOctopus:
 
             logger.info(
                 f"第 {calib_idx + 1} 次校准数据处理完成，"
-                f"频率={comp_data['sine_args']['frequency']:.2f}Hz, "
+                f"频率={comp_data['frequency']:.2f}Hz, "
                 f"平均幅值比={comp_data['mean_amp_ratio']:.6f}"
             )
 
@@ -1545,7 +1546,7 @@ class CaliberOctopus:
         self._result_raw_comp_data: CompData = init_comp_data(
             comp_dataframe=all_raw_comp_df,
             sampling_info=all_comp_data_list[0]["sampling_info"],
-            sine_args=all_comp_data_list[0]["sine_args"],
+            frequency=all_comp_data_list[0]["frequency"],
             mean_amp_ratio=all_comp_data_list[0]["mean_amp_ratio"],
             mean_phase_shift=all_comp_data_list[0]["mean_phase_shift"],
         )
@@ -1590,7 +1591,7 @@ class CaliberOctopus:
 
         # 输出平均元数据日志
         logger.info(
-            f"平均元数据: 频率={averaged_comp_data['sine_args']['frequency']:.2f}Hz, "
+            f"平均元数据: 频率={averaged_comp_data['frequency']:.2f}Hz, "
             f"平均幅值比={averaged_comp_data['mean_amp_ratio']:.6f}, "
             f"平均相位差={averaged_comp_data['mean_phase_shift']:.6f}rad"
         )
@@ -1617,7 +1618,7 @@ class CaliberOctopus:
         final_comp_data: CompData = {
             "comp_dataframe": averaged_comp_data["comp_dataframe"],
             "sampling_info": self._sampling_info,
-            "sine_args": self._sine_args,
+            "frequency": averaged_comp_data["frequency"],
             "mean_amp_ratio": averaged_comp_data["mean_amp_ratio"],
             "mean_phase_shift": averaged_comp_data["mean_phase_shift"],
         }
@@ -1669,7 +1670,7 @@ class CaliberOctopus:
         comp_data: CompData = {
             "comp_dataframe": self._result_averaged_comp_data["comp_dataframe"],
             "sampling_info": self._sampling_info,
-            "sine_args": self._sine_args,
+            "frequency": self._frequency,
             "mean_amp_ratio": self._result_averaged_comp_data["mean_amp_ratio"],
             "mean_phase_shift": self._result_averaged_comp_data["mean_phase_shift"],
         }
@@ -1809,8 +1810,8 @@ class CaliberOctopus:
             # 设置标题
             ax.set_title(
                 f"传递函数极坐标分布（平均后）\n"
-                f"频率: {self._sine_args['frequency']}Hz, "
-                f"幅值: {self._sine_args['amplitude']}V",
+                f"频率: {self._frequency}Hz, "
+                f"幅值: {self._amplitude}V",
                 fontsize=14,
                 pad=20,
             )
@@ -1888,8 +1889,8 @@ class CaliberOctopus:
             # 设置标题
             ax.set_title(
                 f"补偿数据直角坐标分布（细节图）\n"
-                f"频率: {self._sine_args['frequency']}Hz, "
-                f"幅值: {self._sine_args['amplitude']}V",
+                f"频率: {self._frequency}Hz, "
+                f"幅值: {self._amplitude}V",
                 fontsize=14,
                 pad=20,
             )
@@ -2051,11 +2052,10 @@ class CaliberFishNet(CaliberOctopus):
     ## 使用示例：
     ```python
     from sweeper400.use.caliber import CaliberFishNet
-    from sweeper400.analyze import init_sampling_info, init_sine_args
+    from sweeper400.analyze import init_sampling_info
 
-    # 创建采样信息和正弦波参数
+    # 创建采样信息
     sampling_info = init_sampling_info(171500.0, 85750)  # 采样率171.5kHz, 0.5秒
-    sine_args = init_sine_args(frequency=3430.0, amplitude=0.01, phase=0.0)
 
     # 创建校准对象
     caliber = CaliberFishNet(
@@ -2071,7 +2071,8 @@ class CaliberFishNet(CaliberOctopus):
             "PXI3Slot3/ao0", "PXI3Slot3/ao1"
         ),
         sampling_info=sampling_info,
-        sine_args=sine_args
+        frequency=3430.0,
+        amplitude=0.01,
     )
 
     # 执行校准（10次独立校准，每次4个chunk）
@@ -2104,7 +2105,9 @@ class CaliberFishNet(CaliberOctopus):
         ai_channels: tuple[str, ...],
         ao_channels: tuple[str, ...],
         sampling_info: SamplingInfo,
-        sine_args: SineArgs,
+        frequency: PositiveFloat,
+        amplitude: PositiveFloat,
+        phase: float = 0.0,
         ao_comp_data: str | Path | None = None,
         ai_comp_data: str | Path | None = None,
     ) -> None:
@@ -2119,7 +2122,9 @@ class CaliberFishNet(CaliberOctopus):
                          渔网模式下通常包含多个 AI 通道，以测量完整的传递函数矩阵。
             ao_channels: AO 通道名称元组（例如 ("PXI2Slot2/ao0", "PXI2Slot2/ao1", ...)）
             sampling_info: 采样信息，包含采样率和采样点数
-            sine_args: 正弦波参数，包含频率、幅值和相位信息
+            frequency: 正弦波频率（Hz）
+            amplitude: 正弦波幅值（V）
+            phase: 正弦波相位（rad），默认为0.0
             ao_comp_data: 可选，AO通道补偿数据文件路径（通常由CaliberOctopus生成）。
                        支持三级优先级（由父类CaliberOctopus处理）：
                        1. 用户显式提供的路径（如果提供）
@@ -2149,7 +2154,9 @@ class CaliberFishNet(CaliberOctopus):
             ai_channels=ai_channels,
             ao_channels=ao_channels,
             sampling_info=sampling_info,
-            sine_args=sine_args,
+            frequency=frequency,
+            amplitude=amplitude,
+            phase=phase,
             ai_comp_data=ai_comp_data,
             ao_comp_data=ao_comp_data,
         )
@@ -2190,16 +2197,19 @@ class CaliberFishNet(CaliberOctopus):
             如果提供了 ai_comp_data，返回的传递函数已应用 AI 补偿。
 
         Raises:
-            RuntimeError: 当 AO 波形没有 sine_args 属性时
+            RuntimeError: 当 AO 波形没有 frequency 或 channel_complex_amplitudes 属性时
             ValueError: 当 AI 波形维度或通道数不符合预期时
         """
         logger.info("开始计算多通道AI数据的传递函数")
 
         # 1. 提取AO波形的正弦波参数
         ao_waveform = filtered_sweep_data["ao_data"]
-        if ao_waveform.sine_args is None:
-            raise RuntimeError("AO波形没有sine_args属性")
-        ao_sine_args = ao_waveform.sine_args
+        if ao_waveform.frequency is None:
+            raise RuntimeError("AO波形没有frequency属性")
+        if ao_waveform.channel_complex_amplitudes is None:
+            raise RuntimeError("AO波形没有channel_complex_amplitudes属性")
+        ao_frequency = ao_waveform.frequency
+        ao_cca = ao_waveform.channel_complex_amplitudes
 
         # 2. 初始化DataFrame（方形矩阵：行索引为AO通道，列索引为AI通道）
         # 直接创建DataFrame并在循环中填充，避免中间字典的开销
@@ -2234,16 +2244,23 @@ class CaliberFishNet(CaliberOctopus):
                 )
 
                 # 使用extract_single_tone_information_vvi提取AI信号的正弦波参数
-                ai_sine_args = extract_single_tone_information_vvi(
+                ai_freq_and_amps = extract_single_tone_information_vvi(
                     single_ai_waveform,
-                    approx_freq=ao_sine_args["frequency"],
+                    approx_freq=ao_frequency,
                 )
 
                 # 计算传递函数（使用补偿后的AI正弦波参数）
-                amp_ratio = (
-                    ai_sine_args["amplitude"] / ao_sine_args["amplitude"]
-                )
-                phase_shift = ai_sine_args["phase"] - ao_sine_args["phase"]
+                # extract_single_tone_information_vvi返回(frequency, complex_amps)
+                _, ai_complex_amps = ai_freq_and_amps
+                ai_amplitude = float(np.abs(ai_complex_amps[0]))
+                ai_phase = float(np.angle(ai_complex_amps[0]))
+
+                # 获取当前AO通道的复振幅
+                ao_amplitude = float(np.abs(ao_cca[ao_channel_idx]))
+                ao_phase = float(np.angle(ao_cca[ao_channel_idx]))
+
+                amp_ratio = ai_amplitude / ao_amplitude
+                phase_shift = ai_phase - ao_phase
 
                 # 将相位差归一化到 [-π, π] 区间
                 phase_shift = float(
@@ -2270,7 +2287,7 @@ class CaliberFishNet(CaliberOctopus):
         tf_data: TFData = {
             "tf_dataframe": tf_df,
             "sampling_info": self._sampling_info,
-            "sine_args": ao_sine_args,
+            "frequency": ao_frequency,
             "mean_amp_ratio": mean_amp_ratio,
             "mean_phase_shift": mean_phase_shift,
         }
@@ -2368,7 +2385,7 @@ class CaliberFishNet(CaliberOctopus):
             # 保存这次校准的原始SweepData
             sweep_data_path = result_path / f"raw_sweep_data_{calib_idx + 1}.pkl"
             try:
-                save_sweep_data(sweep_data, sweep_data_path)
+                save_compressed_data(sweep_data, sweep_data_path, 6, "SweepData")
                 logger.info(
                     f"第 {calib_idx + 1} 次SweepData已保存到: {sweep_data_path}"
                 )
@@ -2411,7 +2428,7 @@ class CaliberFishNet(CaliberOctopus):
 
             logger.info(
                 f"第 {calib_idx + 1} 次校准数据处理完成，"
-                f"频率={tf_data['sine_args']['frequency']:.2f}Hz, "
+                f"频率={tf_data['frequency']:.2f}Hz, "
                 f"平均幅值比={tf_data['mean_amp_ratio']:.6f}, "
                 f"平均相位差={tf_data['mean_phase_shift']:.6f}rad"
             )
@@ -2427,7 +2444,7 @@ class CaliberFishNet(CaliberOctopus):
 
         # 输出平均元数据日志
         logger.info(
-            f"平均元数据: 频率={averaged_tf_data['sine_args']['frequency']:.2f}Hz, "
+            f"平均元数据: 频率={averaged_tf_data['frequency']:.2f}Hz, "
             f"平均幅值比={averaged_tf_data['mean_amp_ratio']:.6f}, "
             f"平均相位差={averaged_tf_data['mean_phase_shift']:.6f}rad"
         )
@@ -2647,7 +2664,7 @@ class CaliberFishNet(CaliberOctopus):
         ax1.set_xlabel("通道序数差 (AI索引 - AO索引)", fontsize=12)
         ax1.set_ylabel("幅值比", fontsize=12)
         ax1.set_title(
-            f"传递函数幅值比分布\n频率: {self._sine_args['frequency']}Hz",
+            f"传递函数幅值比分布\n频率: {self._frequency}Hz",
             fontsize=14,
             pad=15,
         )
@@ -2694,7 +2711,7 @@ class CaliberFishNet(CaliberOctopus):
         ax2.set_xlabel("通道序数差 (AI索引 - AO索引)", fontsize=12)
         ax2.set_ylabel("相位差 (rad)", fontsize=12)
         ax2.set_title(
-            f"传递函数相位差分布\n频率: {self._sine_args['frequency']}Hz",
+            f"传递函数相位差分布\n频率: {self._frequency}Hz",
             fontsize=14,
             pad=15,
         )
@@ -2751,7 +2768,7 @@ class PowerTester:
            - 加载ao_comp_data文件（必须成功，否则报错）
            - 从comp_dataframe中获取指定AO通道的补偿信息
            - 还原原始传递函数复数值
-           - 读取sampling_info和sine_args
+           - 读取sampling_info和frequency
         2. start方法执行阶段：
            - 根据min_power、max_power、step_num生成功率序列
            - 对每个功率值创建CaliberOctopus对象进行测试
@@ -2858,7 +2875,7 @@ class PowerTester:
 
         mean_amp_ratio = loaded_ao_comp_data["mean_amp_ratio"]
         mean_phase_shift = loaded_ao_comp_data["mean_phase_shift"]
-        frequency = loaded_ao_comp_data["sine_args"]["frequency"]
+        frequency = loaded_ao_comp_data["frequency"]
 
         # 还原原始传递函数的幅值比和相位差
         original_amp_ratio = mean_amp_ratio / amp_multiplier
@@ -2883,16 +2900,16 @@ class PowerTester:
             f"复数值: {self._original_tf_complex}"
         )
 
-        # 读取并保存sampling_info和sine_args
+        # 读取并保存sampling_info和频率/相位信息（用于后续测试流程）
         self._sampling_info = loaded_ao_comp_data["sampling_info"]
-        self._sine_args = loaded_ao_comp_data["sine_args"]
+        self._frequency = frequency
+        self._phase = 0.0  # 默认相位，test()中可覆盖
 
         self.logger.info(
             f"PowerTester 实例已创建 - "
             f"AI通道: {ai_channel}, "
             f"AO通道: {ao_channel}, "
-            f"频率: {self._sine_args['frequency']}Hz, "
-            f"原始幅值: {self._sine_args['amplitude']}V"
+            f"频率: {self._frequency}Hz"
         )
 
     @property
@@ -2916,14 +2933,14 @@ class PowerTester:
         return self._sampling_info
 
     @property
-    def sine_args(self) -> SineArgs:
+    def frequency(self) -> float:
         """
-        获取正弦波参数
+        获取正弦波频率
 
         Returns:
-            SineArgs对象
+            频率（Hz）
         """
-        return self._sine_args
+        return self._frequency
 
     # 近零功率点幅值常量，用于线性度验证
     NEAR_ZERO_POWER: float = 0.01
@@ -3006,20 +3023,15 @@ class PowerTester:
                 + "\n" + "=" * 60
             )
 
-            # 创建当前功率点的SineArgs（替换amplitude）
-            current_sine_args: SineArgs = {
-                "frequency": self._sine_args["frequency"],
-                "amplitude": float(power),
-                "phase": self._sine_args["phase"],
-            }
-
             # 创建CaliberOctopus对象
             # 使用单个AI通道和单个AO通道
             caliber = CaliberOctopus(
                 ai_channels=(self._ai_channel,),
                 ao_channels=(self._ao_channel,),
                 sampling_info=self._sampling_info,
-                sine_args=current_sine_args,
+                frequency=self._frequency,
+                amplitude=float(power),
+                phase=self._phase,
                 ao_comp_data=self._ao_comp_data_path,
             )
 
@@ -3101,19 +3113,14 @@ class PowerTester:
                 f"amplitude={self.NEAR_ZERO_POWER}V）"
             )
 
-            # 创建近零功率点的SineArgs
-            near_zero_sine_args: SineArgs = {
-                "frequency": self._sine_args["frequency"],
-                "amplitude": self.NEAR_ZERO_POWER,
-                "phase": self._sine_args["phase"],
-            }
-
             # 创建近零功率点的CaliberOctopus对象
             caliber_near_zero = CaliberOctopus(
                 ai_channels=(self._ai_channel,),
                 ao_channels=(self._ao_channel,),
                 sampling_info=self._sampling_info,
-                sine_args=near_zero_sine_args,
+                frequency=self._frequency,
+                amplitude=self.NEAR_ZERO_POWER,
+                phase=self._phase,
                 ao_comp_data=self._ao_comp_data_path,
             )
 
@@ -3328,7 +3335,7 @@ class PowerTester:
         ax.set_title(
             f"PowerTest 传递函数极坐标分布\n"
             f"AI: {self._ai_channel}, AO: {self._ao_channel}\n"
-            f"频率: {self._sine_args['frequency']}Hz",
+            f"频率: {self._frequency}Hz",
             fontsize=14,
             pad=20,
         )
@@ -3468,7 +3475,7 @@ class PowerTester:
         ax2.set_xlabel("work功率 (V)", fontsize=12)
         ax2.set_ylabel("相位差 (rad)", fontsize=12)
         ax2.set_title(
-            f"相位差随功率变化\n频率: {self._sine_args['frequency']}Hz",
+            f"相位差随功率变化\n频率: {self._frequency}Hz",
             fontsize=14,
             pad=15,
         )

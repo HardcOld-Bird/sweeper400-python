@@ -31,10 +31,10 @@ from ..analyze import (
     Waveform,
     TFData,
     average_single_waveform,
-    detrend_waveform,
-    esti_vvi_multi_ch,
+    extract_single_tone_information_vvi,
     filter_waveform,
-    get_sine_multi_ch,
+    get_sine,
+    init_sine_args,
     save_compressed_data,
     load_compressed_data,
 )
@@ -57,7 +57,7 @@ class Evolver:
     用户指定一组"增益系数"（每个反馈 AO 通道对应一个复数），Evolver 每一演化周期都会：
 
     1. 对当前 AI 波形和正在播放的反馈 AO 波形进行去趋势和带通滤波；
-    2. 用 `esti_vvi_multi_ch` 计算 AI 各通道的"总声场复振幅"和各 AO 通道
+    2. 用 `extract_single_tone_information_vvi` 计算 AI 各通道的"总声场复振幅"和各 AO 通道
        的"旧电输出复振幅"；
     3. 利用 fishnet_tf_data 中的传递函数，从"总声场复振幅"中扣除各 AO 通道的
        贡献，得到"入射声场复振幅"；
@@ -70,13 +70,13 @@ class Evolver:
     ## 使用方式：
 
     ```python
-    from sweeper400.analyze import init_sampling_info, init_sine_args, get_sine_cycles
+    from sweeper400.analyze import init_sampling_info, get_sine, init_sine_args
     from sweeper400.use import Evolver, load_evolved_waveform
 
     # 创建采样信息和静态输出波形（建议时长较长，以给反馈处理留出充足时间）
     sampling_info = init_sampling_info(171500, 85750)  # 约 0.5s 每 chunk
-    sine_args = init_sine_args(3430.0, 0.05, 0.0)
-    static_waveform = get_sine_cycles(sampling_info, sine_args, cycles=25)
+    cca = np.array([0.05 + 0j])  # 单通道，幅值0.05V，相位0
+    static_waveform = get_sine(sampling_info, 3430.0, ("PXI1Slot2/ao0",), cca, full_cycle=True)
 
     # 增益系数（每个反馈 AO 通道一个复数）
     # 复数模长 > 1 表示放大，< 1 表示衰减，相位表示相移
@@ -100,7 +100,7 @@ class Evolver:
     evolved_wf = load_evolved_waveform("output/evolution_result/evolved_waveform.pkl")
     # sweeper = SweeperCore(
     #     ai_channels=(...),
-    #     ao_channels_static=evolved_wf.channel_names,
+    #     ao_channels_static=evolved_wf._channel_names,
     #     static_output_waveform=evolved_wf,
     #     point_list=grid,
     # )
@@ -152,7 +152,7 @@ class Evolver:
         Raises:
             ValueError: 当 gain_coefficients 长度与 ao_channels_feedback 不同时；
                         或 gain_coefficients 长度与 ai_channels 不同时；
-                        或 static_output_waveform 没有 sine_args 属性时。
+                        或 static_output_waveform 没有 frequency 属性时。
             RuntimeError: 当 SingleChasCSIO 初始化失败时。
         """
         # 参数验证
@@ -170,10 +170,10 @@ class Evolver:
                 f"gain_coefficients 长度 ({n_gain}) 必须与 "
                 f"ai_channels 长度 ({n_ai}) 相同"
             )
-        if static_output_waveform.sine_args is None:
+        if static_output_waveform.frequency is None:
             raise ValueError(
-                "static_output_waveform 必须包含 sine_args 属性，"
-                "请使用 get_sine_cycles 或 get_sine_multi_ch 生成波形。"
+                "static_output_waveform 必须包含 frequency 属性，"
+                "请使用 get_sine 生成波形。"
             )
 
         # 保存通道配置
@@ -184,8 +184,18 @@ class Evolver:
         # 保存增益系数（转为复数 ndarray，便于向量化运算）
         self._gain_coefficients = np.array(gain_coefficients, dtype=complex)
 
-        # 保存静态输出波形的 SineArgs（频率、幅值、相位，反馈函数中反复使用）
-        self._static_sine_args: SineArgs = static_output_waveform.sine_args
+        # 保存静态输出波形的频率（反馈函数中反复使用）
+        self._frequency: PositiveFloat = static_output_waveform.frequency
+        # 构建兼容的 SineArgs（用于 TFData 等数据类型）
+        self._static_sine_args: SineArgs = init_sine_args(
+            frequency=self._frequency,
+            amplitude=float(np.abs(static_output_waveform.channel_complex_amplitudes[0]))
+            if static_output_waveform.channel_complex_amplitudes is not None
+            else 1.0,
+            phase=float(np.angle(static_output_waveform.channel_complex_amplitudes[0]))
+            if static_output_waveform.channel_complex_amplitudes is not None
+            else 0.0,
+        )
         self._static_output_waveform = static_output_waveform
 
         # ---- 反馈函数状态 ----
@@ -249,7 +259,7 @@ class Evolver:
 
         该方法执行每个演化周期的核心反馈控制逻辑：
         1. 对 AI 波形和当前反馈 AO 波形进行去趋势和带通滤波，获得纯净信号；
-        2. 用 esti_vvi_multi_ch 计算各通道的复振幅（总声场、旧电输出）；
+        2. 用 extract_single_tone_information_vvi 计算各通道的复振幅（总声场、旧电输出）；
         3. 利用 fishnet_tf_data，从总声场中扣除各 AO 通道的贡献，得到入射声场复振幅；
         4. 依据增益系数，计算所需 AO 输出增量，更新下一轮反馈波形；
         5. 幅值安全检查：若任意通道超限，设置 _stop_flag 并抛出异常。
@@ -284,7 +294,7 @@ class Evolver:
         # =====================================================================
         # Step 1: 去趋势 + 带通滤波
         # =====================================================================
-        freq = self._static_sine_args["frequency"]
+        freq = self._frequency
         lowcut = freq * 0.5
         highcut = freq * 2.0
         sampling_rate = ai_waveform.sampling_rate
@@ -306,17 +316,15 @@ class Evolver:
         # =====================================================================
         logger.warning("开始单频检测")
         # 总声场复振幅（AI 各通道）
-        total_ai_complex_amps = esti_vvi_multi_ch(
+        _, total_ai_complex_amps = extract_single_tone_information_vvi(
             ai_filtered,
             approx_freq=freq,
-            use_curve_fit=False,
         )  # shape: (n_ai,)
 
         # 旧电输出复振幅（当前反馈 AO 各通道）
-        old_ao_complex_amps = esti_vvi_multi_ch(
+        _, old_ao_complex_amps = extract_single_tone_information_vvi(
             currently_playing_feedback_waveform,
             approx_freq=freq,
-            # use_curve_fit=True,
         )  # shape: (n_fb,)
         logger.warning("结束单频检测")
 
@@ -409,11 +417,11 @@ class Evolver:
         # =====================================================================
         # Step 6: 基于新复振幅生成新的反馈 AO 波形
         # =====================================================================
-        new_feedback_waveform = get_sine_multi_ch(
+        new_feedback_waveform = get_sine(
             sampling_info=self._static_output_waveform.sampling_info,
-            sine_args=self._static_sine_args,
+            frequency=self._frequency,
             channel_names=self._ao_channels_feedback,
-            complex_amps=tuple(new_ao_complex_amps.tolist()),
+            channel_complex_amplitudes=new_ao_complex_amps,
         )
 
         # 通知 evolve 方法一个周期已完成
@@ -447,7 +455,7 @@ class Evolver:
         使得该波形可以直接作为 SweeperCore 的 `static_output_waveform` 使用，
         从而无需反馈逻辑即可重放出与 evolve 最终状态一致的声场。
 
-        合并波形的 `sine_args` 属性将设置为原始主激励的 SineArgs。
+        合并波形的 `frequency` 属性将设置为原始主激励的频率。
 
         Returns:
             多通道合并 Waveform，通道顺序为：
@@ -458,18 +466,34 @@ class Evolver:
         """
         # ---- 处理 static 部分 ----
         # 如果原始波形是单通道但 ao_channels_static 有多个通道，
-        # 需要像 SingleChasCSIO 一样扩展为多通道
+        # 需要像 SingleChasCSIO 一样扩展为多通道（直接复制）
         if (
             self._static_output_waveform.is_single_channel
             and len(self._ao_channels_static) > 1
         ):
             self.logger.debug(
-                f"静态波形为单通道，扩展为 {len(self._ao_channels_static)} 通道"
+                f"静态波形为单通道，复制扩展为 {len(self._ao_channels_static)} 通道"
             )
-            static_wf = get_sine_multi_ch(
-                sampling_info=self._static_output_waveform.sampling_info,
-                sine_args=self._static_sine_args,
+            single_ch_data = np.asarray(self._static_output_waveform)[0, :]
+            multi_ch_data = np.tile(single_ch_data, (len(self._ao_channels_static), 1))
+
+            # 扩展 CCA
+            if self._static_output_waveform.channel_complex_amplitudes is not None:
+                single_cca = self._static_output_waveform.channel_complex_amplitudes[0]
+                static_cca = np.full(
+                    len(self._ao_channels_static), single_cca, dtype=np.complex128
+                )
+            else:
+                static_cca = None
+
+            static_wf = Waveform(
+                input_array=multi_ch_data,
+                sampling_rate=self._static_output_waveform.sampling_rate,
                 channel_names=self._ao_channels_static,
+                timestamp=self._static_output_waveform.timestamp,
+                waveform_id=self._static_output_waveform.waveform_id,
+                frequency=self._frequency,
+                channel_complex_amplitudes=static_cca,
             )
         elif self._static_output_waveform.channels_num != len(
             self._ao_channels_static
@@ -482,25 +506,16 @@ class Evolver:
             static_wf = self._static_output_waveform.copy()
 
         # 确保 static 波形具有正确的 channel_names
-        if static_wf.channel_names is None:
+        if static_wf.channel_names != self._ao_channels_static:
             static_wf.channel_names = self._ao_channels_static
-        elif static_wf.channel_names != self._ao_channels_static:
-            static_wf = Waveform(
-                input_array=static_wf.copy(),
-                sampling_rate=static_wf.sampling_rate,
-                channel_names=self._ao_channels_static,
-                timestamp=static_wf.timestamp,
-                waveform_id=static_wf.waveform_id,
-                sine_args=static_wf.sine_args,
-            )
 
         # ---- 生成 feedback 部分的波形 ----
         if len(self._ao_channels_feedback) > 0:
-            feedback_wf = get_sine_multi_ch(
+            feedback_wf = get_sine(
                 sampling_info=self._static_output_waveform.sampling_info,
-                sine_args=self._static_sine_args,
+                frequency=self._frequency,
                 channel_names=self._ao_channels_feedback,
-                complex_amps=tuple(self._current_ao_complex_amps.tolist()),
+                channel_complex_amplitudes=self._current_ao_complex_amps,
             )
 
             # 拼接 static 和 feedback 波形
@@ -508,17 +523,27 @@ class Evolver:
             combined_channel_names = (
                 self._ao_channels_static + self._ao_channels_feedback
             )
+
+            # 合并 CCA
+            static_cca_val = static_wf.channel_complex_amplitudes
+            feedback_cca = feedback_wf.channel_complex_amplitudes
+            if static_cca_val is not None and feedback_cca is not None:
+                combined_cca = np.concatenate([static_cca_val, feedback_cca])
+            else:
+                combined_cca = None
         else:
             # 没有 feedback 通道，直接使用 static 波形
             combined_data = static_wf.copy()
             combined_channel_names = self._ao_channels_static
+            combined_cca = static_wf.channel_complex_amplitudes
 
-        # 创建合并波形，sine_args 使用主激励的 SineArgs
+        # 创建合并波形
         final_waveform = Waveform(
             input_array=combined_data,
             sampling_rate=static_wf.sampling_rate,
             channel_names=combined_channel_names,
-            sine_args=self._static_sine_args,
+            frequency=self._frequency,
+            channel_complex_amplitudes=combined_cca,
         )
 
         self.logger.debug(
@@ -873,7 +898,7 @@ class Evolver:
         ax.set_title(
             f"反馈演化 - AI 声场复振幅在复平面上的演化轨迹\n"
             f"（演化周期数: {num_cycles}，"
-            f"频率: {self._static_sine_args['frequency']:.1f} Hz）",
+            f"频率: {self._frequency:.1f} Hz）",
             fontsize=14,
             fontweight="bold",
         )
@@ -975,7 +1000,7 @@ def load_evolved_waveform(
         # 直接用于 SweeperCore 进行扫场测量（无需反馈）
         sweeper = SweeperCore(
             ai_channels=("PXI1Slot2/ai0", ...),
-            ao_channels_static=evolved_wf_fast.channel_names,
+            ao_channels_static=evolved_wf_fast._channel_names,
             static_output_waveform=evolved_wf_fast,
             point_list=grid,
         )
@@ -1000,7 +1025,7 @@ def load_evolved_waveform(
     f_logger.info(
         f"演化波形加载成功: {loaded_data.shape}, "
         f"channels={loaded_data.channel_names}, "
-        f"sine_args={loaded_data.sine_args}"
+        f"frequency={loaded_data.frequency}"
     )
 
     # ---- 可选：应用分段平均压缩时长 ----

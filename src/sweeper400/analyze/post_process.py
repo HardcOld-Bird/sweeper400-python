@@ -36,7 +36,7 @@ def save_compressed_data(
     data_type_name: str = "数据",
 ) -> None:
     """
-    通用压缩数据保存函数（内部使用）
+    通用压缩数据保存函数
 
     将任意Python对象序列化并使用gzip压缩保存到磁盘。
 
@@ -75,7 +75,7 @@ def save_compressed_data(
 
 def load_compressed_data(file_path: str | Path, data_type_name: str = "数据") -> Any:
     """
-    通用压缩数据加载函数（内部使用）
+    通用压缩数据加载函数
 
     从文件加载使用gzip压缩保存的数据。自动检测文件是否为gzip压缩格式。
 
@@ -114,101 +114,6 @@ def load_compressed_data(file_path: str | Path, data_type_name: str = "数据") 
     except Exception as e:
         f_logger.error(f"{data_type_name}加载失败: {e}", exc_info=True)
         raise OSError(f"无法从 {file_path} 加载{data_type_name}: {e}") from e
-
-
-def save_sweep_data(
-    sweep_data: SweepData,
-    save_path: str | Path,
-    compresslevel: int = 6,
-) -> None:
-    """
-    保存SweepData到文件（支持gzip压缩）
-
-    将SweepData序列化并保存到磁盘，使用gzip压缩以减小文件体积。
-    压缩级别可调，默认为6（平衡压缩率和速度）。
-
-    Args:
-        sweep_data: 要保存的SweepData字典，包含：
-            - "ai_data_list": List[PointSweepData]
-            - "ao_data": Waveform
-        save_path: 保存文件的路径（建议使用.pkl或.pkl.gz扩展名）
-        compresslevel: gzip压缩级别（0-9），默认6。
-                      0表示不压缩，9表示最大压缩。
-                      级别越高压缩率越高但速度越慢。
-
-    Raises:
-        ValueError: 当sweep_data格式不正确时
-        IOError: 当文件保存失败时
-
-    Examples:
-        >>> save_sweep_data(sweep_data, "sweep_data.pkl.gz")
-        >>> save_sweep_data(sweep_data, "sweep_data.pkl", compress_level=6)
-    """
-    # 获取函数日志器
-    f_logger = get_logger(f"{__name__}.save_sweep_data")
-
-    # 验证数据格式
-    if (
-        not isinstance(sweep_data, dict)
-        or "ai_data_list" not in sweep_data
-        or "ao_data" not in sweep_data
-    ):
-        raise ValueError(
-            "sweep_data格式不正确，期望包含'ai_data_list'和'ao_data'键的字典"
-        )
-
-    save_compressed_data(
-        sweep_data, save_path, compresslevel, "SweepData"
-    )
-    f_logger.info(f"包含 {len(sweep_data['ai_data_list'])} 个点的数据")
-
-
-def load_sweep_data(file_path: str | Path) -> SweepData:
-    """
-    从文件加载测量数据（支持gzip压缩和非压缩文件）
-
-    加载由save_sweep_data()保存的测量数据。自动检测文件是否为gzip压缩格式。
-
-    Args:
-        file_path: 数据文件的路径（.pkl或.pkl.gz文件）
-
-    Returns:
-        SweepData: 包含以下键的字典：
-            - "ai_data_list": List[PointSweepData]，每个PointRawData包含：
-                - "position": Point2D对象，表示该点的坐标
-                - "ai_data": List[Waveform]，该点采集的所有AI波形
-            - "ao_data": Waveform，扫场过程中使用的输出波形
-
-    Raises:
-        FileNotFoundError: 当文件不存在时
-        IOError: 当文件读取失败时
-        ValueError: 当数据格式不正确时
-
-    Examples:
-        >>> sweep_data = load_sweep_data("sweep_data.pkl.gz")
-        >>> test_ai_data_list = sweep_data["ai_data_list"]
-        >>> ao_data = sweep_data["ao_data"]
-        >>> print(f"加载了 {len(ai_data_list)} 个点的数据")
-        >>> print(f"输出波形采样率: {ao_data.sampling_rate}Hz")
-    """
-    # 获取函数日志器
-    f_logger = get_logger(f"{__name__}.load_sweep_data")
-
-    loaded_data = load_compressed_data(file_path, "SweepData")
-
-    # 检查数据格式
-    if (
-        isinstance(loaded_data, dict)
-        and "ai_data_list" in loaded_data
-        and "ao_data" in loaded_data
-    ):
-        ai_data_list = loaded_data["ai_data_list"]
-        f_logger.info(f"SweepData加载成功，共 {len(ai_data_list)} 个点")
-        return loaded_data  # type: ignore
-    else:
-        raise ValueError(
-            "数据格式不正确，期望包含'ai_data_list'和'ao_data'键的字典"
-        )
 
 
 def average_single_waveform(
@@ -275,7 +180,8 @@ def average_single_waveform(
         channel_names=waveform.channel_names,
         timestamp=waveform.timestamp,
         waveform_id=waveform.waveform_id,
-        sine_args=waveform.sine_args,
+        frequency=waveform.frequency,
+        channel_complex_amplitudes=waveform.channel_complex_amplitudes,
     )
 
     f_logger.debug(
@@ -347,6 +253,9 @@ def average_sweep_data(
             sampling_rate=sampling_rate,
             channel_names=ai_waveforms[0].channel_names,
             timestamp=ai_waveforms[0].timestamp,
+            waveform_id=ai_waveforms[0].waveform_id,
+            frequency=ai_waveforms[0].frequency,
+            channel_complex_amplitudes=ai_waveforms[0].channel_complex_amplitudes,
         )
 
         # 创建平均后的点数据
@@ -394,11 +303,9 @@ def tf_to_comp(tf_data: TFData) -> CompData:
     f_logger = get_logger(f"{__name__}.tf_to_comp")
 
     # 从tf_data中提取参数
-    sine_args = tf_data["sine_args"]
+    frequency = tf_data["frequency"]
     mean_amp_ratio = tf_data["mean_amp_ratio"]
     mean_phase_shift = tf_data["mean_phase_shift"]
-
-    frequency = sine_args["frequency"]
 
     # 验证TFData的形状：必须为行矩阵（1行N列）或列矩阵（N行1列）
     tf_df = tf_data["tf_dataframe"]
@@ -452,7 +359,7 @@ def tf_to_comp(tf_data: TFData) -> CompData:
     comp_data: CompData = {
         "comp_dataframe": comp_df,
         "sampling_info": tf_data["sampling_info"],
-        "sine_args": sine_args,
+        "frequency": frequency,
         "mean_amp_ratio": mean_amp_ratio,
         "mean_phase_shift": mean_phase_shift,
     }
@@ -487,11 +394,9 @@ def comp_to_tf(comp_data: CompData) -> TFData:
     f_logger = get_logger(f"{__name__}.comp_to_tf")
 
     # 从comp_data中提取参数
-    sine_args = comp_data["sine_args"]
+    frequency = comp_data["frequency"]
     mean_amp_ratio = comp_data["mean_amp_ratio"]
     mean_phase_shift = comp_data["mean_phase_shift"]
-
-    frequency = sine_args["frequency"]
 
     # 验证CompData的形状（DataFrame应该只有2列：amp_multiplier和time_increment）
     comp_df = comp_data["comp_dataframe"]
@@ -574,7 +479,7 @@ def comp_to_tf(comp_data: CompData) -> TFData:
     tf_data: TFData = {
         "tf_dataframe": tf_df,
         "sampling_info": comp_data["sampling_info"],
-        "sine_args": sine_args,
+        "frequency": frequency,
         "mean_amp_ratio": mean_amp_ratio,
         "mean_phase_shift": mean_phase_shift,
     }
@@ -603,7 +508,7 @@ def average_comp_data_list(comp_data_list: list[CompData]) -> CompData:
     Returns:
         CompData: 平均后的补偿数据,包含:
             - comp_dataframe: 每个通道位置的平均补偿参数
-            - sine_args: 使用第一个CompData的正弦波参数
+            - frequency: 使用第一个CompData的频率参数
             - mean_amp_ratio: 所有CompData的mean_amp_ratio的平均值
             - mean_phase_shift: 所有CompData的mean_phase_shift的平均值
 
@@ -686,10 +591,10 @@ def average_comp_data_list(comp_data_list: list[CompData]) -> CompData:
         raise ValueError(error_msg)
 
     avg_sampling_info = comp_data_list[0]["sampling_info"]
-    avg_sine_args = comp_data_list[0]["sine_args"]
+    avg_frequency = comp_data_list[0]["frequency"]
 
     f_logger.info(
-        f"平均完成: 频率={avg_sine_args['frequency']:.2f}Hz, "
+        f"平均完成: 频率={avg_frequency:.2f}Hz, "
         f"平均mean_amp_ratio={avg_mean_amp_ratio:.6f}, "
         f"平均mean_phase_shift={avg_mean_phase_shift:.6f}rad"
     )
@@ -698,7 +603,7 @@ def average_comp_data_list(comp_data_list: list[CompData]) -> CompData:
     averaged_comp_data: CompData = {
         "comp_dataframe": averaged_df,
         "sampling_info": avg_sampling_info,
-        "sine_args": avg_sine_args,
+        "frequency": avg_frequency,
         "mean_amp_ratio": avg_mean_amp_ratio,
         "mean_phase_shift": avg_mean_phase_shift,
     }
@@ -722,7 +627,7 @@ def average_tf_data_list(tf_data_list: list[TFData]) -> TFData:
     Returns:
         TFData: 平均后的传递函数数据,包含:
             - tf_dataframe: 每个通道位置的平均传递函数(复数形式)
-            - sine_args: 使用第一个TFData的正弦波参数
+            - frequency: 使用第一个TFData的频率参数
             - mean_amp_ratio: 所有TFData的mean_amp_ratio的平均值
             - mean_phase_shift: 所有TFData的mean_phase_shift的平均值
 
@@ -822,10 +727,10 @@ def average_tf_data_list(tf_data_list: list[TFData]) -> TFData:
         raise ValueError(error_msg)
 
     avg_sampling_info = tf_data_list[0]["sampling_info"]
-    avg_sine_args = tf_data_list[0]["sine_args"]
+    avg_frequency = tf_data_list[0]["frequency"]
 
     f_logger.info(
-        f"平均完成: 频率={avg_sine_args['frequency']:.2f}Hz, "
+        f"平均完成: 频率={avg_frequency:.2f}Hz, "
         f"平均mean_amp_ratio={avg_mean_amp_ratio:.6f}, "
         f"平均mean_phase_shift={avg_mean_phase_shift:.6f}rad"
     )
@@ -834,7 +739,7 @@ def average_tf_data_list(tf_data_list: list[TFData]) -> TFData:
     averaged_tf_data: TFData = {
         "tf_dataframe": averaged_df,
         "sampling_info": avg_sampling_info,
-        "sine_args": avg_sine_args,
+        "frequency": avg_frequency,
         "mean_amp_ratio": avg_mean_amp_ratio,
         "mean_phase_shift": avg_mean_phase_shift,
     }

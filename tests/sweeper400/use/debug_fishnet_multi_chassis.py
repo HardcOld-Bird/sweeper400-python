@@ -241,9 +241,9 @@ class TestMultiChassisAIDataCollection:
             print(f"  [回调 #{export_call_count}] 导出函数被调用:")
             print(f"    AI波形shape={ai_waveform.shape}")
             print(f"    AI波形ndim={ai_waveform.ndim}")
-            if hasattr(ai_waveform, 'channel_names'):
-                print(f"    通道名称数量={len(ai_waveform.channel_names)}")
-                print(f"    通道名称={ai_waveform.channel_names}")
+            if hasattr(ai_waveform, '_channel_names'):
+                print(f"    通道名称数量={len(ai_waveform._channel_names)}")
+                print(f"    通道名称={ai_waveform._channel_names}")
             print(f"    已收集 {len(collected_data)}/{target_chunks} 个chunk")
 
             if len(collected_data) >= target_chunks:
