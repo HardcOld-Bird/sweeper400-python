@@ -26,7 +26,6 @@ from ..analyze import (
     Point2D,
     PositiveFloat,
     PositiveInt,
-    SineArgs,
     SweepData,
     Waveform,
     TFData,
@@ -34,7 +33,6 @@ from ..analyze import (
     extract_single_tone_information_vvi,
     filter_waveform,
     get_sine,
-    init_sine_args,
     save_compressed_data,
     load_compressed_data,
 )

@@ -442,11 +442,12 @@ class CaliberAnemone:
         # 4. 提取多通道复振幅
         logger.info("提取多通道单频信息")
         ai_waveform = filtered_sweep_data["ai_data_list"][0]["ai_data"][0]
-        _, complex_amplitudes = extract_single_tone_information_vvi(
+        result_wf = extract_single_tone_information_vvi(
             ai_waveform,
             approx_freq=self._frequency,
             precise_mode=True,
         )
+        complex_amplitudes = result_wf.channel_complex_amplitudes
 
         # 记录各通道复振幅
         for idx, ai_channel in enumerate(self._ai_channels):
@@ -1141,13 +1142,14 @@ class CaliberOctopus:
             ao_channel_name = self._ao_channels[channel_idx]
             ai_waveform = point_data["ai_data"][0]  # 已平均的单通道 AI 波形
 
-            # 提取 AI 信号的正弦波参数（单通道波形，返回频率和复振幅数组）
-            _, ai_complex_amps = extract_single_tone_information_vvi(
+            # 提取 AI 信号的正弦波参数（单通道波形，返回记录了结果的Waveform）
+            result_wf = extract_single_tone_information_vvi(
                 ai_waveform,
                 approx_freq=ao_frequency,
             )
 
             # 计算传递函数（使用复振幅的模长和相角）
+            ai_complex_amps = result_wf.channel_complex_amplitudes
             ai_amplitude = float(np.abs(ai_complex_amps[0]))
             ai_phase = float(np.angle(ai_complex_amps[0]))
             amp_ratio = ai_amplitude / ao_amplitude
@@ -1626,8 +1628,6 @@ class CaliberOctopus:
         # 保存最终的CompData
         final_comp_data_path = result_path / "ao_comp_data.pkl"
         try:
-            from ..analyze.post_process import save_compressed_data
-
             save_compressed_data(
                 final_comp_data, final_comp_data_path, 6, "CompData"
             )
@@ -2240,18 +2240,18 @@ class CaliberFishNet(CaliberOctopus):
                 single_ai_waveform = Waveform(
                     input_array=ai_waveform[ai_channel_idx, :],
                     sampling_rate=ai_waveform.sampling_rate,
+                    channel_names=(ai_channel_name,),
                     timestamp=ai_waveform.timestamp,
                 )
 
                 # 使用extract_single_tone_information_vvi提取AI信号的正弦波参数
-                ai_freq_and_amps = extract_single_tone_information_vvi(
+                result_wf = extract_single_tone_information_vvi(
                     single_ai_waveform,
                     approx_freq=ao_frequency,
                 )
 
                 # 计算传递函数（使用补偿后的AI正弦波参数）
-                # extract_single_tone_information_vvi返回(frequency, complex_amps)
-                _, ai_complex_amps = ai_freq_and_amps
+                ai_complex_amps = result_wf.channel_complex_amplitudes
                 ai_amplitude = float(np.abs(ai_complex_amps[0]))
                 ai_phase = float(np.angle(ai_complex_amps[0]))
 

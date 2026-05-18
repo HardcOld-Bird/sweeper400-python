@@ -574,9 +574,9 @@ class Waveform(np.ndarray):
                 raise ValueError(
                     f"channel_complex_amplitude长度({len(cca)})与通道数({self.channels_num})不匹配"
                 )
-            self.channel_complex_amplitudes = cca
+            self._channel_complex_amplitudes = cca
         else:
-            self.channel_complex_amplitudes = None
+            self._channel_complex_amplitudes = None
 
     @property
     def duration(self) -> PositiveFloat:

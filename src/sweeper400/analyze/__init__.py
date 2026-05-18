@@ -8,12 +8,12 @@
 
 # 将模块功能提升至包级别，可缩短外部import语句
 from .basic_sine import (
-    get_sine,
     extract_single_tone_information_vvi,
+    get_sine,
 )
 from .calib_util_funcs import (
-    load_data_with_fallback,
     comp_waveform,
+    load_data_with_fallback,
 )
 from .filter import (
     detrend_waveform,
@@ -27,20 +27,20 @@ from .my_dtypes import (
     PositiveFloat,
     PositiveInt,
     SamplingInfo,
-    SineArgs,
     SweepData,
     TFData,
     Waveform,
-    init_sampling_info,
-    init_sine_args,
     init_comp_data,
+    init_sampling_info,
 )
 from .plot import (
-    sweep_data_to_point_tf_data_list,
+    PointTFData,
     plot_point_tf_data_list,
-    plot_waveform,
-    plot_sweep_waveforms,
     plot_sweep_data_as_single_waveform,
+    plot_sweep_waveforms,
+    plot_waveform,
+    subtract_point_tf_data_list,
+    sweep_data_to_point_tf_data_list,
 )
 from .post_process import (
     average_comp_data_list,
@@ -52,6 +52,7 @@ from .post_process import (
     save_compressed_data,
     tf_to_comp,
 )
+
 # 控制 import * 的行为
 __all__ = [
     "average_sweep_data",
@@ -64,8 +65,6 @@ __all__ = [
     "PositiveFloat",
     "SamplingInfo",
     "init_sampling_info",
-    "SineArgs",
-    "init_sine_args",
     "Waveform",
     "Point2D",
     "PointSweepData",
@@ -83,6 +82,8 @@ __all__ = [
     "filter_waveform",
     "detrend_waveform",
     "sweep_data_to_point_tf_data_list",
+    "subtract_point_tf_data_list",
+    "PointTFData",
     "load_compressed_data",
     "save_compressed_data",
     "comp_waveform",

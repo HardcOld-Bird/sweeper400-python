@@ -656,8 +656,11 @@ class SingleChasCSIO:
             channels_num = self.ao_channels_num_static
             if channels_num == 1:
                 # 单通道任务：将2D数组squeeze成1D数组
-                waveform_data = comped_static_waveform.squeeze(axis=0)
-                logger.debug(f"单通道任务，将波形数据squeeze为1D: {waveform_data.shape}")
+                write_data = comped_static_waveform.squeeze(axis=0)
+                logger.debug(f"单通道任务，将波形数据squeeze为1D: {write_data.shape}")
+            else:
+                # 多通道任务：保持2D数组
+                write_data = comped_static_waveform
 
             # 从缓冲区起始位置（position 0）覆盖写入新波形。
             # 这是在 ALLOW_REGENERATION 模式下更新波形的标准做法：
@@ -668,8 +671,8 @@ class SingleChasCSIO:
             self._ao_task_static.out_stream.offset = 0
 
             # 写入数据
-            self._ao_task_static.write(comped_static_waveform, auto_start=False)
-            logger.debug(f"成功写入静态波形数据，shape: {comped_static_waveform.shape}")
+            self._ao_task_static.write(write_data, auto_start=False)
+            logger.debug(f"成功写入静态波形数据，shape: {write_data.shape}")
 
         except Exception as e:
             logger.error(f"静态波形写入失败: {e}", exc_info=True)

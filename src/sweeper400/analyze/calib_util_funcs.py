@@ -219,7 +219,7 @@ def comp_waveform(
         # 检查该通道是否在补偿数据中
         if channel_name not in comp_channels:
             # 对缺失的非扫场麦克风通道输出警告（扫场麦克风缺失是预期行为）
-            if channel_name != "PXI1Slot2/ao0":  # 扫场麦克风的通道名称
+            if channel_name != "PXI1Slot2/ai0":  # 扫场麦克风的通道名称
                 f_logger.warning(f"通道 {channel_name}: 不在补偿数据中，保持原样")
             continue
 

@@ -19,8 +19,22 @@ from scipy.interpolate import griddata
 from ..logger import get_logger
 from .basic_sine import extract_single_tone_information_vvi
 from .filter import filter_sweep_data
-from .my_dtypes import Point2D, Waveform, SweepData
+from .my_dtypes import Point2D, SweepData, Waveform
 from .post_process import average_sweep_data
+
+
+# 获取模块日志器
+logger = get_logger(__name__)
+
+# 配置matplotlib中文字体支持
+plt.rcParams["font.sans-serif"] = [
+    "Microsoft YaHei",
+    "SimHei",
+    "SimSun",
+    "Microsoft JhengHei",
+    "DejaVu Sans",
+]
+plt.rcParams["axes.unicode_minus"] = False
 
 
 # 本地定义的空间点传递函数数据类型，专用于空间扫场绘图函数。
@@ -30,13 +44,11 @@ class PointTFData(TypedDict):
 
     ## 内部组成:
         **position**: 测量点的二维空间坐标（mm）
-        **amp_ratio**: 幅值比
-        **phase_shift**: 相位差（弧度制）
+        **complex_amplitude**: 复数传递函数，幅值代表幅值比，相位代表相位差（弧度制）
     """
 
     position: Point2D
-    amp_ratio: float
-    phase_shift: float
+    complex_amplitude: complex
 
 
 def sweep_data_to_point_tf_data_list(
@@ -55,7 +67,7 @@ def sweep_data_to_point_tf_data_list(
     1. 使用average_sweep_data对每个点的多个波形进行平均
     2. 使用filter_sweep_data对平均后的数据进行滤波
     3. 对每个点的平均波形使用extract_single_tone_information_vvi提取单频信息
-    4. 计算相对于参考信号的幅值比和相位差
+    4. 计算相对于参考信号的复数传递函数
 
     参考信号信息直接从 sweep_data["ao_data"] 的 frequency 和
     channel_complex_amplitudes 属性获取。
@@ -100,24 +112,23 @@ def sweep_data_to_point_tf_data_list(
     if ref_frequency is None:
         raise ValueError("无法从ao_data获取frequency属性，请确保ao_data已设置frequency")
 
-    # 获取参考复振幅（取第一个通道）
+    # 获取参考复振幅（取第一个通道），用于计算传递函数 H = detected / ref
     cca = getattr(ao_waveform, "channel_complex_amplitudes", None)
     if cca is not None:
-        ref_complex_amp = cca[0]  # 取第一个通道的复振幅
-        ref_amplitude = float(np.abs(ref_complex_amp))
-        ref_phase = float(np.angle(ref_complex_amp))
+        ref_complex_amp: complex = complex(cca[0])
     else:
-        # 如果没有复振幅信息，默认幅值为1、相位为0
-        ref_amplitude = 1.0
-        ref_phase = 0.0
-        f_logger.warning("ao_data未设置channel_complex_amplitudes，使用默认幅值=1, 相位=0")
+        ref_complex_amp = 1.0 + 0j
+        f_logger.warning("ao_data未设置channel_complex_amplitudes，使用默认参考复振幅=1+0j")
 
-    # 避免幅值为0，影响传递函数计算
-    if ref_amplitude == 0.0:
-        ref_amplitude = 1.0
-        f_logger.warning("参考信号幅值为0，已替换为1")
+    # 避免参考复振幅为零
+    if ref_complex_amp == 0:
+        ref_complex_amp = 1.0 + 0j
+        f_logger.warning("参考信号复振幅为0，已替换为1+0j")
 
-    f_logger.info(f"参考信号参数: 频率={ref_frequency}Hz, 幅值={ref_amplitude}, 相位={ref_phase}rad")
+    f_logger.info(
+        f"参考信号参数: 频率={ref_frequency}Hz, "
+        f"复振幅={ref_complex_amp} (幅值={abs(ref_complex_amp):.4f})"
+    )
 
     # 1. 对SweepData进行平均
     f_logger.debug("步骤1: 对SweepData进行平均")
@@ -142,48 +153,83 @@ def sweep_data_to_point_tf_data_list(
         # 每个点只有一个波形（已经平均过了）
         waveform = point_data["ai_data"][0]
 
-        # 提取单频信息（返回 tuple[float, np.ndarray]）
-        estimated_freq, channel_cca = extract_single_tone_information_vvi(
+        # 提取单频信息（返回记录了结果的Waveform对象）
+        result_wf = extract_single_tone_information_vvi(
             waveform,
             approx_freq=ref_frequency,
         )
 
-        # 取第一个通道的复振幅
-        detected_amplitude = float(np.abs(channel_cca[0]))
-        detected_phase = float(np.angle(channel_cca[0]))
+        # 复数传递函数 = 检测复振幅 / 参考复振幅
+        complex_amplitude = complex(
+            result_wf.channel_complex_amplitudes[0] / ref_complex_amp
+        )
 
-        # 计算幅值比和相位差（相对于参考信号）
-        amp_ratio = detected_amplitude / ref_amplitude
-        phase_shift = detected_phase - ref_phase
-
-        # 归一化相位差到 [-π, π] 区间
-        phase_shift = (phase_shift + np.pi) % (2 * np.pi) - np.pi
-
-        # 创建PointTFData
-        point_tf_data: PointTFData = {
+        tf_results.append({
             "position": position,
-            "amp_ratio": amp_ratio,
-            "phase_shift": phase_shift,
-        }
-        tf_results.append(point_tf_data)
+            "complex_amplitude": complex_amplitude,
+        })
 
     f_logger.info(f"SweepData转换完成，共 {len(tf_results)} 个点的传递函数数据")
 
     return tf_results
 
 
-# 获取模块日志器
-logger = get_logger(__name__)
+def subtract_point_tf_data_list(
+    total_field_list: list[PointTFData],
+    background_field_list: list[PointTFData],
+) -> list[PointTFData]:
+    """
+    将两个 PointTFData 列表逼点相减，获取去除背景场后的复振幅。
 
-# 配置matplotlib中文字体支持
-plt.rcParams["font.sans-serif"] = [
-    "Microsoft YaHei",
-    "SimHei",
-    "SimSun",
-    "Microsoft JhengHei",
-    "DejaVu Sans",
-]
-plt.rcParams["axes.unicode_minus"] = False
+    假定两个列表长度相同，且相同序号的点具有相同的 position。
+    对每一对同位置点，计算:
+        result.complex_amplitude = total.complex_amplitude - background.complex_amplitude
+
+    返回的列表可以直接传入 plot_point_tf_data_list 进行绘图。
+
+    Args:
+        total_field_list: 总场（含背景）的传递函数数据列表
+        background_field_list: 背景场的传递函数数据列表
+
+    Returns:
+        list[PointTFData]: 去除背景场后的传递函数数据列表
+
+    Raises:
+        ValueError: 当两个列表长度不一致时
+
+    Examples:
+        ```python
+        >>> total = sweep_data_to_point_tf_data_list(total_sweep_data)
+        >>> background = sweep_data_to_point_tf_data_list(background_sweep_data)
+        >>> net_field = subtract_point_tf_data_list(total, background)
+        >>> fig, axes = plot_point_tf_data_list(net_field, mode="interpolated")
+        ```
+    """
+    f_logger = get_logger(f"{__name__}.subtract_point_tf_data_list")
+
+    if len(total_field_list) != len(background_field_list):
+        raise ValueError(
+            f"两个列表长度不一致: "
+            f"total_field_list={len(total_field_list)}, "
+            f"background_field_list={len(background_field_list)}"
+        )
+
+    f_logger.info(
+        f"开始计算差值场，共 {len(total_field_list)} 个点"
+    )
+
+    result_list: list[PointTFData] = []
+    for total_point, bg_point in zip(total_field_list, background_field_list, strict=True):
+        net_complex_amplitude = (
+            total_point["complex_amplitude"] - bg_point["complex_amplitude"]
+        )
+        result_list.append({
+            "position": total_point["position"],
+            "complex_amplitude": net_complex_amplitude,
+        })
+
+    f_logger.info("差值场计算完成")
+    return result_list
 
 
 def plot_point_tf_data_list(
@@ -197,7 +243,7 @@ def plot_point_tf_data_list(
     该函数接收已计算好的传递函数结果，根据mode参数选择不同的绘图模式：
     - "discrete": 方形色块版本，使用等距网格色块表示，适用于等距网格数据
     - "interpolated": 插值版本，使用连续彩色区域（contourf）展现空间分布
-    - "instantaneous": 瞬时声压场，计算 A·sin(φ) 模拟某一瞬间的声压场分布
+    - "instantaneous": 瞬时声压场，计算复振幅的实部 Re(H) 模拟某一瞬间的声压场分布
 
     Args:
         plot_tf_results: 传递函数计算结果列表（PointTFData格式）
@@ -242,8 +288,9 @@ def plot_point_tf_data_list(
     # 提取公共数据
     x_coords = np.array([result["position"].x for result in plot_tf_results])
     y_coords = np.array([result["position"].y for result in plot_tf_results])
-    amp_ratios = np.array([result["amp_ratio"] for result in plot_tf_results])
-    phase_shifts = np.array([result["phase_shift"] for result in plot_tf_results])
+    complex_amplitudes = np.array([result["complex_amplitude"] for result in plot_tf_results])
+    amp_ratios = np.abs(complex_amplitudes)
+    phase_shifts = np.angle(complex_amplitudes)
 
     f_logger.debug(
         f"数据范围: X=[{x_coords.min():.2f}, {x_coords.max():.2f}], "
@@ -265,7 +312,7 @@ def plot_point_tf_data_list(
         result = (fig, axes_pair)
     else:  # instantaneous
         fig, ax = _plot_instantaneous(
-            x_coords, y_coords, amp_ratios, phase_shifts, f_logger
+            x_coords, y_coords, complex_amplitudes, f_logger
         )
         result = (fig, ax)
 
@@ -436,16 +483,15 @@ def _plot_interpolated(
 def _plot_instantaneous(
     x_coords: np.ndarray,
     y_coords: np.ndarray,
-    amp_ratios: np.ndarray,
-    phase_shifts: np.ndarray,
+    complex_amplitudes: np.ndarray,
     f_logger,
 ) -> tuple[Figure, Axes]:
     """绘制瞬时声压场分布图（内部函数）"""
     grid_resolution = 100
     interpolation_method = "cubic"
 
-    # 计算瞬时声压场值 A·sin(φ)
-    instantaneous_field = amp_ratios * np.sin(phase_shifts)
+    # 瞬时声压场 = 复振幅的实部 Re(H)
+    instantaneous_field = complex_amplitudes.real
 
     # 创建插值网格
     x_min, x_max = x_coords.min(), x_coords.max()
@@ -483,7 +529,7 @@ def _plot_instantaneous(
     )
     ax.set_xlabel("X 坐标 (mm)", fontsize=12)
     ax.set_ylabel("Y 坐标 (mm)", fontsize=12)
-    ax.set_title("瞬时声压场分布 (A·sin(φ))", fontsize=14, fontweight="bold")
+    ax.set_title("瞬时声压场分布 Re(H)", fontsize=14, fontweight="bold")
     ax.set_aspect("equal", adjustable="box")
     cbar = fig.colorbar(im, ax=ax, label="瞬时声压场强度")
     cbar.ax.tick_params(labelsize=10)

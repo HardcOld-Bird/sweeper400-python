@@ -150,13 +150,18 @@ def extract_single_tone_information_vvi(
     approx_freq: PositiveFloat | None = None,
     error_percentage: PositiveFloat = 5.0,
     precise_mode: bool = False,
-) -> tuple[float, np.ndarray]:
+) -> Waveform:
     """
-    对多通道Waveform进行单频信息提取，返回估计频率和各通道复振幅
+    对多通道Waveform进行单频信息提取，返回记录了估计结果的Waveform对象
 
     该函数对输入波形中的单频成分进行检测和参数估计，同时支持多通道和单通道波形。
     针对多通道情形进行了效率优化：频率估计仅使用第一个通道进行一次，
     然后将结果应用到所有通道。
+
+    提取完成后，将 estimated_frequency 和 channel_complex_amplitudes 写入
+    input_waveform 的相应属性，并作为 output_waveform 返回。若 input_waveform
+    的 frequency 或 channel_complex_amplitudes 属性原本不为 None，则会输出
+    警告并覆盖原有值。
 
     Args:
         input_waveform: 目标波形（多或单通道），形状为 (n_channels, n_samples)
@@ -169,10 +174,10 @@ def extract_single_tone_information_vvi(
               精度更高但速度较慢。
 
     Returns:
-        tuple[float, np.ndarray]:
-            - estimated_frequency: 估计的正弦波频率（Hz）
-            - channel_complex_amplitudes: 各通道复振幅数组，形状为 (n_channels,)，
-              dtype=complex128。abs为幅值，相角为相位（弧度制）。
+        output_waveform: 记录了提取结果的Waveform对象（与input_waveform共享数据），
+            其 frequency 属性为估计的正弦波频率（Hz），
+            channel_complex_amplitudes 属性为各通道复振幅数组，形状为 (n_channels,)，
+            dtype=complex128。abs为幅值，相角为相位（弧度制）。
 
     Examples:
         ```python
@@ -181,8 +186,8 @@ def extract_single_tone_information_vvi(
         >>> sampling_info = init_sampling_info(1000.0, 1024)
         >>> cca = np.array([2.0 + 0j])  # 单通道，幅值2.0，相位0
         >>> wf = get_sine(sampling_info, 50.0, ("ch0",), cca)
-        >>> freq, complex_amps = extract_single_tone_information_vvi(wf, approx_freq=50.0)
-        >>> print(f"频率: {freq:.2f}Hz, 幅值: {np.abs(complex_amps[0]):.4f}")
+        >>> result_wf = extract_single_tone_information_vvi(wf, approx_freq=50.0)
+        >>> print(f"频率: {result_wf.frequency:.2f}Hz, 幅值: {np.abs(result_wf.channel_complex_amplitudes[0]):.4f}")
         ```
     """
     # 获取函数日志器
@@ -403,4 +408,28 @@ def extract_single_tone_information_vvi(
         f"{np.abs(channel_complex_amplitudes).max():.6f}]"
     )
 
-    return estimated_frequency, channel_complex_amplitudes
+    # ==================== 构建输出Waveform ====================
+    # 检查input_waveform是否已有frequency或channel_complex_amplitudes
+    if input_waveform.frequency is not None:
+        f_logger.warning(
+            f"input_waveform的frequency属性不为None（当前值={input_waveform.frequency}），"
+            f"将被覆盖为新估计值 {estimated_frequency}"
+        )
+    if input_waveform.channel_complex_amplitudes is not None:
+        f_logger.warning(
+            "input_waveform的channel_complex_amplitudes属性不为None，"
+            "将被覆盖为新估计值"
+        )
+
+    # 创建output_waveform：使用input_waveform的数据和元数据，更新频率和复振幅
+    output_waveform = Waveform(
+        input_array=np.asarray(input_waveform),
+        sampling_rate=input_waveform.sampling_rate,
+        channel_names=input_waveform.channel_names,
+        timestamp=input_waveform.timestamp,
+        waveform_id=input_waveform.waveform_id,
+        frequency=estimated_frequency,
+        channel_complex_amplitudes=channel_complex_amplitudes,
+    )
+
+    return output_waveform
