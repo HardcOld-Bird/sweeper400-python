@@ -1,8 +1,12 @@
 # pyright: basic
+import numpy as np
+
 from sweeper400.analyze import (
-    get_sine_cycles,
+    get_sine,
     init_sampling_info,
-    init_sine_args,
+    load_compressed_data,
+    plot_waveform,
+    plot_sweep_waveforms,
 )
 from sweeper400.use import (
     Evolver,
@@ -36,12 +40,20 @@ ao_channels_feedback = (
 
 # 创建输出波形
 # 采样率建议为目标频率倍数，且尽可能接近又不大于200kHz
-# 单段采样数建议设为686000，可稳定执行反馈
-sampling_info = init_sampling_info(171500.0, 686000)  # 采样率171.5kHz, 4秒
-sine_args = init_sine_args(
-    frequency=3430.0, amplitude=0.05, phase=0.0
-)  # 3430Hz正弦波，波长10cm
-static_output_waveform = get_sine_cycles(sampling_info, sine_args)
+# 0.2s有时会显示警告，建议0.4s
+sampling_info = init_sampling_info(171500.0, 68600)  # 采样率171.5kHz, 0.4秒
+cca = np.full(
+    len(ao_channels_static),
+    0.1 + 0j,
+    dtype=np.complex128,
+)
+static_output_waveform = get_sine(
+    sampling_info=sampling_info,
+    frequency=3430.0,
+    channel_names=ao_channels_static,
+    channel_complex_amplitudes=cca,
+    full_cycle=False,
+)
 
 # 设定增益系数
 gain_coefficients = (
@@ -62,20 +74,54 @@ evo = Evolver(
     ao_channels_feedback=ao_channels_feedback,
     static_output_waveform=static_output_waveform,
     gain_coefficients=gain_coefficients,
+    # fishnet_tf_data_path="D:\\EveryoneDownloaded\\fishnet_r\\tf_data.pkl",
+    fishnet_tf_data_path="D:\\EveryoneDownloaded\\fishnet_L\\tf_data.pkl",
+)
+
+# %% 开始模拟
+_ = evo.simulate(
+    cycles_num=10,
+    ao_amplitude_limit=100,
+    result_folder="D:\\EveryoneDownloaded\\sim_L_0d4s\\",
+)
+# %% 进行更多模拟
+_ = evo.simulate(
+    cycles_num=20,
+    ao_amplitude_limit=100,
+    result_folder="D:\\EveryoneDownloaded\\sim_L_0d4s\\",
+)
+_ = evo.simulate(
+    cycles_num=50,
+    ao_amplitude_limit=100,
+    result_folder="D:\\EveryoneDownloaded\\sim_L_0d4s\\",
 )
 
 # %% 开始演化
 evo.evolve(
-    num_cycles=6,
-    ao_amplitude_limit=0.1,
-    result_folder="D:\\EveryoneDownloaded\\L_10step_4s\\",
+    cycles_num=10,
+    ao_amplitude_limit=0.5,
+    result_folder="D:\\EveryoneDownloaded\\L_10step_0d4s\\",
+)
+
+# %% 检查SweepData波形
+sd = load_compressed_data("D:\\EveryoneDownloaded\\fishnet_L_2\\raw_sweep_data_1.pkl")
+plot_sweep_waveforms(
+    sd,
+    "D:\\EveryoneDownloaded\\fishnet_L_2",
+    zoom_factor=1,
 )
 
 # %% 读取演化后的波形
 final_waveform = load_evolved_waveform(
-    file_path="D:\\EveryoneDownloaded\\L_10step_4s\\evolved_waveform.pkl",
-    segments=20,
+    file_path="D:\\EveryoneDownloaded\\L_6step_0d2s\\evolved_waveform.pkl",
+    segments=None,
 )
+plot_waveform(
+    final_waveform,
+    save_path="D:\\EveryoneDownloaded\\L_6step_0d2s\\final_waveform.png",
+    zoom_factor=100,
+)
+
 
 # %% 创建Sweeper对象
 
@@ -95,7 +141,7 @@ swp = SweeperCore(
     "PXI1Slot6/ao1",
 ),
     static_output_waveform=final_waveform,
-    point_list=get_square_grid(10.0, 310.0, 10.0, 310.0),
+    point_list=get_square_grid(1.0, 311.0, 1.0, 311.0),
 )
 
 # %% 步进电机校准
@@ -109,14 +155,14 @@ swp.move_to(160.0, 10.0)
 
 # %% 开始扫场测量
 swp.sweep(
-    result_folder="D:\\EveryoneDownloaded\\L_10step_4s_feedback_sweep\\",
+    result_folder="D:\\EveryoneDownloaded\\L_6step_0d2s_feedback_sweep\\",
     lowcut=1715.0,
     highcut=6860.0,
 )
 
 # %%
 swp.plot_data(
-    save_path="D:\\EveryoneDownloaded\\L_10step_4s_feedback_sweep\\",
+    save_path="D:\\EveryoneDownloaded\\L_6step_0d2s_feedback_sweep\\",
     lowcut=1715.0,
     highcut=6860.0,
 )

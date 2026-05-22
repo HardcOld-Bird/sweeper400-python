@@ -134,7 +134,7 @@ def get_sine(
         timestamp=timestamp,
         waveform_id=waveform_id,
         frequency=frequency,
-        channel_complex_amplitude=channel_complex_amplitudes,
+        channel_complex_amplitudes=channel_complex_amplitudes,
     )
 
     f_logger.debug(

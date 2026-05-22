@@ -5,7 +5,7 @@ Evolver 类的集成测试
 
 注意：
 - 测试需要连接 NI 机箱（PXIe-1083）和所有板卡（PXI1Slot2~6）
-- 测试需要 fishnet 校准数据（storage/calib/calib_result_fishnet/fishnet_tf_data.pkl）
+- 测试需要 fishnet 校准数据（storage/calib/calib_result_fishnet/fishnet_tf_data_path.pkl）
 - 由于硬件反馈处理耗时较长，建议每个演化周期的 static_output_waveform 时长 >= 0.5s
 
 运行方法：
@@ -43,7 +43,7 @@ _FREQ = 3430.0  # Hz
 _AMPLITUDE = 0.05  # V
 
 # AI 通道（8 个传声器通道）
-# 注意：必须与 fishnet_tf_data 中的 AI 通道名一致，即 PXI1Slot3~6 的 ai0/ai1
+# 注意：必须与 fishnet_tf_data_path 中的 AI 通道名一致，即 PXI1Slot3~6 的 ai0/ai1
 _AI_CHANNELS = (
     "PXI1Slot3/ai0",
     "PXI1Slot3/ai1",
@@ -172,7 +172,7 @@ class TestEvolverHardware:
 
         # 执行演化
         evolver.evolve(
-            num_cycles=num_cycles,
+            cycles_num=num_cycles,
             ao_amplitude_limit=_AO_AMPLITUDE_LIMIT,
         )
 
@@ -204,7 +204,7 @@ class TestEvolverHardware:
         2. 图像文件被正确保存到指定路径。
         """
         num_cycles = 2
-        evolver.evolve(num_cycles=num_cycles, ao_amplitude_limit=_AO_AMPLITUDE_LIMIT)
+        evolver.evolve(cycles_num=num_cycles, ao_amplitude_limit=_AO_AMPLITUDE_LIMIT)
 
         # 绘图
         save_path = tmp_path / "evolution_test.png"
@@ -230,7 +230,7 @@ class TestEvolverHardware:
         该测试验证重置机制是否正常工作。
         """
         # 第一次演化
-        evolver.evolve(num_cycles=2, ao_amplitude_limit=_AO_AMPLITUDE_LIMIT)
+        evolver.evolve(cycles_num=2, ao_amplitude_limit=_AO_AMPLITUDE_LIMIT)
         first_run_count = len(evolver._ai_complex_amps_history)
 
         # 重新初始化（因为 SingleChasCSIO 每次 stop 后需要重新 start）
@@ -238,7 +238,7 @@ class TestEvolverHardware:
         time.sleep(1.0)
 
         # 第二次演化（不同周期数）
-        evolver.evolve(num_cycles=3, ao_amplitude_limit=_AO_AMPLITUDE_LIMIT)
+        evolver.evolve(cycles_num=3, ao_amplitude_limit=_AO_AMPLITUDE_LIMIT)
         second_run_count = len(evolver._ai_complex_amps_history)
 
         # 第二次演化的记录应独立于第一次

@@ -436,7 +436,10 @@ class Waveform(np.ndarray):
             pass  # 同理
 
         if hasattr(obj, "_channel_complex_amplitudes"):
-            self.channel_complex_amplitudes = obj._channel_complex_amplitudes  # noqa
+            # 直接赋值私有属性，跳过setter验证。
+            # 因为NumPy切片（如nidaqmx内部的data[0][0]）会触发__array_finalize__，
+            # 此时新数组shape已变化，走setter的channels_num校验会误报错误。
+            self._channel_complex_amplitudes = obj._channel_complex_amplitudes  # noqa
         else:
             pass  # 同理
 

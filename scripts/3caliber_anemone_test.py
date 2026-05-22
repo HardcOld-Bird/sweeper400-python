@@ -6,7 +6,7 @@
 
 from sweeper400.analyze import init_sampling_info, plot_sweep_waveforms
 from sweeper400.calib import CaliberAnemone
-from sweeper400.analyze import load_sweep_data
+from sweeper400.analyze import load_compressed_data
 
 # %% 创建采样信息和正弦波参数（使用推荐的参数）
 sampling_info = init_sampling_info(171500.0, 34300)  # 采样率171.5kHz, 0.2秒
@@ -37,7 +37,7 @@ caliber.calibrate(
 )
 
 # %% 检查SweepData波形
-sd = load_sweep_data("D:\\EveryoneDownloaded\\before_calib\\raw_sweep_data.pkl")
+sd = load_compressed_data("D:\\EveryoneDownloaded\\before_calib\\raw_sweep_data.pkl")
 plot_sweep_waveforms(
     sd,
     "D:\\EveryoneDownloaded\\before_calib",
@@ -58,7 +58,7 @@ caliber.calibrate(
 )
 
 # %% 检查SweepData波形
-sd = load_sweep_data("D:\\EveryoneDownloaded\\after_calib\\raw_sweep_data.pkl")
+sd = load_compressed_data("D:\\EveryoneDownloaded\\after_calib\\raw_sweep_data.pkl")
 plot_sweep_waveforms(
     sd,
     "D:\\EveryoneDownloaded\\after_calib",

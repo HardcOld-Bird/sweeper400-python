@@ -919,7 +919,6 @@ class CaliberOctopus:
         sampling_info: SamplingInfo,
         frequency: PositiveFloat,
         amplitude: PositiveFloat,
-        phase: float = 0.0,
         ai_comp_data: str | Path | None = None,
         ao_comp_data: str | Path | None = None,
     ) -> None:
@@ -933,7 +932,6 @@ class CaliberOctopus:
             sampling_info: 采样信息，包含采样率和采样点数
             frequency: 正弦波频率（Hz）
             amplitude: 正弦波幅值（V）
-            phase: 正弦波相位（rad），默认为0.0
             ai_comp_data: 可选，AI补偿数据文件路径，将传递给CSIO。
             ao_comp_data: 可选，AO补偿数据文件路径，将传递给CSIO。
 
@@ -954,14 +952,13 @@ class CaliberOctopus:
         self._sampling_info = sampling_info
         self._frequency = frequency
         self._amplitude = amplitude
-        self._phase = phase
         self._ai_comp_data_path = ai_comp_data
         self._ao_comp_data_path = ao_comp_data
 
         # 生成同步多通道波形（所有通道相同的复振幅）
         cca = np.full(
             len(ao_channels),
-            amplitude * np.exp(1j * phase),
+            amplitude,
             dtype=np.complex128,
         )
         self._output_waveform = get_sine(
@@ -1123,7 +1120,7 @@ class CaliberOctopus:
         """
         ao_frequency = self._frequency
         ao_amplitude = self._amplitude
-        ao_phase = self._phase
+        ao_phase = 0.0
         num_ao_channels = len(self._ao_channels)
 
         if len(filtered_sweep_data["ai_data_list"]) != num_ao_channels:
@@ -2107,7 +2104,6 @@ class CaliberFishNet(CaliberOctopus):
         sampling_info: SamplingInfo,
         frequency: PositiveFloat,
         amplitude: PositiveFloat,
-        phase: float = 0.0,
         ao_comp_data: str | Path | None = None,
         ai_comp_data: str | Path | None = None,
     ) -> None:
@@ -2124,7 +2120,6 @@ class CaliberFishNet(CaliberOctopus):
             sampling_info: 采样信息，包含采样率和采样点数
             frequency: 正弦波频率（Hz）
             amplitude: 正弦波幅值（V）
-            phase: 正弦波相位（rad），默认为0.0
             ao_comp_data: 可选，AO通道补偿数据文件路径（通常由CaliberOctopus生成）。
                        支持三级优先级（由父类CaliberOctopus处理）：
                        1. 用户显式提供的路径（如果提供）
@@ -2156,7 +2151,6 @@ class CaliberFishNet(CaliberOctopus):
             sampling_info=sampling_info,
             frequency=frequency,
             amplitude=amplitude,
-            phase=phase,
             ai_comp_data=ai_comp_data,
             ao_comp_data=ao_comp_data,
         )
@@ -2770,7 +2764,7 @@ class PowerTester:
            - 还原原始传递函数复数值
            - 读取sampling_info和frequency
         2. start方法执行阶段：
-           - 根据min_power、max_power、step_num生成功率序列
+           - 根据min_power、end_power、step_num生成功率序列
            - 对每个功率值创建CaliberOctopus对象进行测试
            - 每个测试包含work和examine两个阶段
         3. 结果汇总阶段：
@@ -2790,8 +2784,8 @@ class PowerTester:
 
     # 执行功率测试
     tester.test(
-        min_power=0.01,
-        max_power=0.05,
+        start_power=0.01,
+        end_power=0.05,
         step_num=5,
         work_chunks_num=240,
         result_folder="storage/calib/power_test_result"
@@ -2945,14 +2939,14 @@ class PowerTester:
     # 近零功率点幅值常量，用于线性度验证
     NEAR_ZERO_POWER: float = 0.01
     # work阶段后的冷却等待时间（秒），用于消除温度对传递函数的影响
-    COOLING_TIME: float = 120.0
+    COOLING_TIME: float = 420.0
     # 两次校准测量之间的间隔时间（秒），避免连续测量的热效应累积
-    EXAMINE_INTERVAL: float = 30.0
+    EXAMINE_INTERVAL: float = 90.0
 
     def test(
         self,
-        min_power: PositiveFloat = 0.01,
-        max_power: PositiveFloat = 0.02,
+        start_power: PositiveFloat = 0.01,
+        end_power: PositiveFloat = 0.02,
         step_num: PositiveInt = 2,
         work_chunks_num: PositiveInt = 120,
         result_folder: str = "storage/calib/power_test_result",
@@ -2974,8 +2968,8 @@ class PowerTester:
         测试完成后，绘制PowerTest概览图，展示传输特性随功率的变化趋势。
 
         Args:
-            min_power: 最小功率（Amplitude），默认0.01
-            max_power: 最大功率（Amplitude），默认0.02
+            start_power: 起始功率（Amplitude），默认0.01
+            end_power: 结束功率（Amplitude），默认0.02
             step_num: 功率步数，默认2
             work_chunks_num: work阶段的chunk数量，默认120
             result_folder: 结果保存文件夹路径
@@ -2984,14 +2978,14 @@ class PowerTester:
             ValueError: 当min_power >= max_power时
         """
         # 参数验证
-        if min_power >= max_power:
-            error_msg = f"min_power({min_power})必须严格小于max_power({max_power})"
-            self.logger.error(error_msg)
-            raise ValueError(error_msg)
+        # if start_power >= end_power:
+        #     error_msg = f"start_power({start_power})必须严格小于max_power({end_power})"
+        #     self.logger.error(error_msg)
+        #     raise ValueError(error_msg)
 
         self.logger.info(
             f"开始功率测试 - "
-            f"功率范围: {min_power}V ~ {max_power}V, "
+            f"功率范围: {start_power}V ~ {end_power}V, "
             f"步数: {step_num}, "
             f"work_chunks_num: {work_chunks_num}, "
             f"近零功率点: {self.NEAR_ZERO_POWER}V, "
@@ -3000,7 +2994,7 @@ class PowerTester:
         )
 
         # 生成功率序列
-        power_values = np.linspace(min_power, max_power, step_num)
+        power_values = np.linspace(start_power, end_power, step_num)
         self.logger.info(f"功率序列: {power_values}")
 
         # 确定结果保存路径
@@ -3031,7 +3025,6 @@ class PowerTester:
                 sampling_info=self._sampling_info,
                 frequency=self._frequency,
                 amplitude=float(power),
-                phase=self._phase,
                 ao_comp_data=self._ao_comp_data_path,
             )
 
@@ -3120,7 +3113,6 @@ class PowerTester:
                 sampling_info=self._sampling_info,
                 frequency=self._frequency,
                 amplitude=self.NEAR_ZERO_POWER,
-                phase=self._phase,
                 ao_comp_data=self._ao_comp_data_path,
             )
 
