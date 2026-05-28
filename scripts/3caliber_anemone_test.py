@@ -4,14 +4,11 @@
 这是一个用于实际硬件测试的脚本，可以直接运行来测试校准功能。
 """
 
-from sweeper400.analyze import init_sampling_info, plot_sweep_waveforms
+from sweeper400.analyze import plot_sweep_waveforms
 from sweeper400.calib import CaliberAnemone
 from sweeper400.analyze import load_compressed_data
 
-# %% 创建采样信息和正弦波参数（使用推荐的参数）
-sampling_info = init_sampling_info(171500.0, 34300)  # 采样率171.5kHz, 0.2秒
-
-# 定义通道配置
+# %% 定义通道配置
 ai_channels = (
     "PXI1Slot3/ai0",
     "PXI1Slot3/ai1",
@@ -27,7 +24,6 @@ ai_channels = (
 # 创建校准对象
 caliber = CaliberAnemone(
     ai_channels=ai_channels,
-    sampling_info=sampling_info,
 )
 
 # %% 执行校准
@@ -48,7 +44,6 @@ plot_sweep_waveforms(
 
 caliber = CaliberAnemone(
     ai_channels=ai_channels,
-    sampling_info=sampling_info,
     ai_comp_data="D:\\EveryoneDownloaded\\before_calib\\ai_comp_data.pkl",
 )
 
@@ -70,7 +65,6 @@ plot_sweep_waveforms(
 # 创建校准对象
 caliber = CaliberAnemone(
     ai_channels=ai_channels,
-    sampling_info=sampling_info,
 )
 
 # 执行校准，结果存储在项目storage目录下

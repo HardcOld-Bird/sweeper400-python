@@ -8,7 +8,6 @@
 
 # 将模块功能提升至包级别，可缩短外部import语句
 from .evolver import Evolver, load_evolved_waveform
-from .feedback_funcs import static_uniform_feedback, static_diff_feedback
 from .sweeper import SweeperCore, get_square_grid
 
 # 控制 import * 的行为
@@ -17,6 +16,4 @@ __all__ = [
     "load_evolved_waveform",
     "get_square_grid",
     "SweeperCore",
-    "static_uniform_feedback",
-    "static_diff_feedback",
 ]

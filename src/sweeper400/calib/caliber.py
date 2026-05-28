@@ -16,11 +16,10 @@ import pandas as pd
 
 from ..analyze import (
     CompData,
-    init_comp_data,
     Point2D,
     PointSweepData,
-    PositiveInt,
     PositiveFloat,
+    PositiveInt,
     SamplingInfo,
     SweepData,
     TFData,
@@ -32,12 +31,15 @@ from ..analyze import (
     extract_single_tone_information_vvi,
     filter_sweep_data,
     get_sine,
+    init_comp_data,
+    init_sampling_info,
+    load_data_with_fallback,
+    load_freq_optimizer_result,
     save_compressed_data,
     tf_to_comp,
-    load_data_with_fallback,
 )
-from ..measure import SingleChasCSIO
 from ..logger import get_logger
+from ..measure import SingleChasCSIO
 
 # 获取模块日志器
 logger = get_logger(__name__)
@@ -129,7 +131,7 @@ class CaliberAnemone:
     def __init__(
         self,
         ai_channels: tuple[str, ...],
-        sampling_info: SamplingInfo,
+        sampling_info: SamplingInfo | None = None,
         frequency: float = 1000.0,
         ai_comp_data: str | Path | None = None,
     ) -> None:
@@ -139,8 +141,10 @@ class CaliberAnemone:
         Args:
             ai_channels: AI 通道名称元组（例如 ("PXI1Slot2/ai0", "PXI1Slot3/ai0", ...)）。
                          海葵模式下同时采集所有通道的数据。
-            sampling_info: 采样信息，包含采样率和采样点数
-            frequency: 外部声源频率（Hz），默认为1000.0
+            sampling_info: 采样信息，包含采样率和采样点数。如果为None，将自动从
+                          FrequencyOptimizer的存储结果中加载。
+            frequency: 外部声源频率（Hz），默认为1000.0。如果为None，将自动从
+                      FrequencyOptimizer的存储结果中加载。
             ai_comp_data: 可选，AI补偿数据文件路径。支持三级优先级：
                        1. 用户显式提供的路径（如果提供）
                        2. 默认路径 "storage/calib/calib_result_anemone/ai_comp_data.pkl"
@@ -148,10 +152,22 @@ class CaliberAnemone:
 
         Raises:
             ValueError: 当参数无效时
+            RuntimeError: 当无法获取frequency/sampling_info时
         """
         # 验证参数
         if not ai_channels:
             raise ValueError("AI 通道列表不能为空")
+
+        # 当 sampling_info 为 None 时，使用默认值
+        if sampling_info is None:
+            # 根据1000Hz的预期频率设置
+            sampling_info = init_sampling_info(200000, 40000)
+            logger.info(
+                f"sampling_info 使用默认值: "
+                f"sampling_rate={sampling_info['sampling_rate']:.1f}Hz, "
+                f"samples_num={sampling_info['samples_num']}"
+            )
+
         if frequency <= 0:
             raise ValueError("频率必须为正数")
 
@@ -916,9 +932,9 @@ class CaliberOctopus:
         self,
         ai_channels: tuple[str, ...],
         ao_channels: tuple[str, ...],
-        sampling_info: SamplingInfo,
-        frequency: PositiveFloat,
-        amplitude: PositiveFloat,
+        sampling_info: SamplingInfo | None = None,
+        frequency: PositiveFloat | None = None,
+        amplitude: PositiveFloat = 0.01,
         ai_comp_data: str | Path | None = None,
         ao_comp_data: str | Path | None = None,
     ) -> None:
@@ -929,22 +945,44 @@ class CaliberOctopus:
             ai_channels: AI 通道名称元组（例如 ("PXI2Slot2/ai0",)）。
                          章鱼模式下通常只使用第一个元素，其余元素将被忽略。
             ao_channels: AO 通道名称元组（例如 ("PXI2Slot2/ao0", "PXI2Slot2/ao1", ...)）
-            sampling_info: 采样信息，包含采样率和采样点数
-            frequency: 正弦波频率（Hz）
-            amplitude: 正弦波幅值（V）
+            sampling_info: 采样信息，包含采样率和采样点数。如果为None，将自动从
+                          FrequencyOptimizer的存储结果中加载。
+            frequency: 正弦波频率（Hz）。如果为None，将自动从
+                      FrequencyOptimizer的存储结果中加载。
+            amplitude: 正弦波幅值（V），默认0.01
             ai_comp_data: 可选，AI补偿数据文件路径，将传递给CSIO。
             ao_comp_data: 可选，AO补偿数据文件路径，将传递给CSIO。
 
         Raises:
             ValueError: 当参数无效时
             FileNotFoundError: 当用户显式提供路径但文件不存在时
-            RuntimeError: 当补偿数据文件加载失败时
+            RuntimeError: 当补偿数据文件加载失败时或无法获取frequency/sampling_info时
         """
         # 验证参数
         if not ai_channels:
             raise ValueError("AI 通道列表不能为空")
         if not ao_channels:
             raise ValueError("AO 通道列表不能为空")
+
+        # 当 sampling_info 或 frequency 为 None 时，从 FrequencyOptimizer 结果加载
+        if sampling_info is None or frequency is None:
+            freq_result = load_freq_optimizer_result()
+            if freq_result is None:
+                raise RuntimeError(
+                    "sampling_info 或 frequency 为 None，但无法从 "
+                    "'storage/calib/calib_result_freq/freq_result.pkl' 加载默认值。"
+                    "请先运行 FrequencyOptimizer 或显式提供这些参数。"
+                )
+            if sampling_info is None:
+                sampling_info = freq_result["sampling_info"]
+                logger.info(
+                    f"sampling_info 从存储结果加载: "
+                    f"sampling_rate={sampling_info['sampling_rate']:.1f}Hz, "
+                    f"samples_num={sampling_info['samples_num']}"
+                )
+            if frequency is None:
+                frequency = freq_result["frequency"]
+                logger.info(f"frequency 从存储结果加载: {frequency:.2f}Hz")
 
         # 保存配置参数
         self._ai_channels = ai_channels  # 章鱼模式下默认使用第一个元素
@@ -1375,8 +1413,6 @@ class CaliberOctopus:
         starts_num: int = 10,
         chunks_per_start: int = 3,
         apply_filter: bool = True,
-        lowcut: float = 100.0,
-        highcut: float = 20000.0,
         result_folder: str | Path | None = None,
         settle_time: float | None = None,
     ) -> None:
@@ -1403,8 +1439,6 @@ class CaliberOctopus:
                 这是提高校准精度的主要手段，建议设置更高的值。
             chunks_per_start: 每次启动采集的连续chunk数，默认为3
             apply_filter: 是否应用滤波，默认为True
-            lowcut: 滤波器低频截止频率（Hz），默认为100.0
-            highcut: 滤波器高频截止频率（Hz），默认为20000.0
             result_folder: 可选，结果保存文件夹路径。如果为None，将使用默认路径
                           'storage/calib/calib_result_octopus'（相对于项目根目录）。
                           最终将保存多个raw_sweep_data_N.pkl文件、两幅绘图和一个平均后的CalibData文件
@@ -1487,6 +1521,8 @@ class CaliberOctopus:
 
             # 2. 应用滤波（如果需要）
             if apply_filter:
+                lowcut = self._frequency * 0.5
+                highcut = self._frequency * 2.0
                 logger.info(f"应用带通滤波器: {lowcut}Hz - {highcut}Hz")
                 filtered_data = filter_sweep_data(
                     averaged_data,
@@ -2101,9 +2137,9 @@ class CaliberFishNet(CaliberOctopus):
         self,
         ai_channels: tuple[str, ...],
         ao_channels: tuple[str, ...],
-        sampling_info: SamplingInfo,
-        frequency: PositiveFloat,
-        amplitude: PositiveFloat,
+        sampling_info: SamplingInfo | None = None,
+        frequency: PositiveFloat | None = None,
+        amplitude: PositiveFloat = 0.01,
         ao_comp_data: str | Path | None = None,
         ai_comp_data: str | Path | None = None,
     ) -> None:
@@ -2117,9 +2153,11 @@ class CaliberFishNet(CaliberOctopus):
             ai_channels: AI 通道名称元组（例如 ("PXI1Slot2/ai0", "PXI2Slot2/ai0", ...)）。
                          渔网模式下通常包含多个 AI 通道，以测量完整的传递函数矩阵。
             ao_channels: AO 通道名称元组（例如 ("PXI2Slot2/ao0", "PXI2Slot2/ao1", ...)）
-            sampling_info: 采样信息，包含采样率和采样点数
-            frequency: 正弦波频率（Hz）
-            amplitude: 正弦波幅值（V）
+            sampling_info: 采样信息，包含采样率和采样点数。如果为None，将自动从
+                          FrequencyOptimizer的存储结果中加载。
+            frequency: 正弦波频率（Hz）。如果为None，将自动从
+                      FrequencyOptimizer的存储结果中加载。
+            amplitude: 正弦波幅值（V），默认0.01
             ao_comp_data: 可选，AO通道补偿数据文件路径（通常由CaliberOctopus生成）。
                        支持三级优先级（由父类CaliberOctopus处理）：
                        1. 用户显式提供的路径（如果提供）
@@ -2297,11 +2335,9 @@ class CaliberFishNet(CaliberOctopus):
         starts_num: int = 10,
         chunks_per_start: int = 3,
         apply_filter: bool = True,
-        lowcut: float = 100.0,
-        highcut: float = 20000.0,
         result_folder: str | Path | None = None,
         settle_time: float | None = None,
-    ) -> None:
+    ) -> TFData:
         """
         执行校准流程（多次独立校准并平均）
 
@@ -2323,13 +2359,14 @@ class CaliberFishNet(CaliberOctopus):
                 这是提高校准精度的主要手段，建议设置更高的值。
             chunks_per_start: 每次启动采集的连续chunk数，默认为3
             apply_filter: 是否应用滤波，默认为True
-            lowcut: 滤波器低频截止频率（Hz），默认为100.0
-            highcut: 滤波器高频截止频率（Hz），默认为20000.0
             result_folder: 可选，结果保存文件夹路径。如果为None，将使用默认路径
                           'storage/calib/calib_result_fishnet'（相对于项目根目录）。
                           最终将保存多个raw_sweep_data_N.pkl文件、绘图和一个平均后的TFData文件
             settle_time: 通道切换后的稳定等待时间（秒）。如果为None，则使用初始化时
                         计算的默认值（chunk时长 + 0.1秒）
+
+        Returns:
+            TFData: 平均后的传递函数数据
 
         Raises:
             ValueError: 当参数无效时
@@ -2407,6 +2444,8 @@ class CaliberFishNet(CaliberOctopus):
 
             # 2. 应用滤波（如果需要）
             if apply_filter:
+                lowcut = self._frequency * 0.5
+                highcut = self._frequency * 2.0
                 logger.info(f"应用带通滤波器: {lowcut}Hz - {highcut}Hz")
                 filtered_data = filter_sweep_data(
                     averaged_data,
@@ -2468,6 +2507,8 @@ class CaliberFishNet(CaliberOctopus):
         logger.info(f"校准流程完成，所有结果已保存到: {result_path}")
         logger.info("=" * 60)
 
+        return averaged_tf_data
+
     def save_tf_data(
         self,
         save_path: str | Path,
@@ -2514,8 +2555,8 @@ class CaliberFishNet(CaliberOctopus):
 
         return copy.deepcopy(self._result_averaged_tf_data)
 
+    @staticmethod
     def _export_tf_data_to_csv(
-        self,
         tf_data: TFData,
         result_path: Path,
     ) -> None:
@@ -2741,6 +2782,1024 @@ class CaliberFishNet(CaliberOctopus):
         logger.info("传递函数图绘制完成")
 
 
+class FrequencyOptimizer:
+    """
+    # 频率优化器
+
+    该类用于测定当天最佳实验频率。由于声速会随空气特性变化，固定尺寸的声学
+    超构表面样件的最佳工作频率每天会有细微差异。本类通过现场测定确定当天最佳频率。
+
+    ## 原理：
+        超表面的8个周期性管槽结构中分别插入了传声器。设计目标是相邻管槽测得的
+        声波恰好反相（相差π）。当频率偏离最佳值时，相邻通道的相位差会偏离π，
+        且偏移量与频率偏差成线性关系。通过测量多个频率点的相位偏差，线性插值
+        找到相位偏差为零的频率即为最佳频率。
+
+    ## 算法流程：
+        1. 在初始频率（默认3430Hz）处测量所有传声器的传递函数
+        2. 计算相邻通道相位差与π的加权偏差（signed metric）
+        3. 在附近频率（如3440Hz）再次测量
+        4. 通过线性插值预测最佳频率（metric为零的点）
+        5. 在预测频率处测量验证
+        6. 如果偏差仍然显著，重复步骤4-5直至收敛
+
+    ## 采样参数规则：
+        对于频率f：
+        - sampling_rate = f × 50（每周期50个采样点）
+        - samples_num = 34300（固定，对应686个完整周期）
+
+    ## 相位偏差指标：
+        对每对相邻通道(i, i+1)，计算 angle(-z_{i+1}/z_i)，理想值为0。
+        使用幅值平方作为权重进行加权平均，得到有方向的偏差指标。
+
+    ## 使用示例：
+    ```python
+    from sweeper400.calib import FrequencyOptimizer
+
+    optimizer = FrequencyOptimizer(
+        ai_channels=(
+            "PXI1Slot2/ai0", "PXI1Slot2/ai1",
+            "PXI1Slot3/ai0", "PXI1Slot3/ai1",
+            "PXI1Slot4/ai0", "PXI1Slot4/ai1",
+            "PXI1Slot5/ai0", "PXI1Slot5/ai1",
+        ),
+        ao_channel="PXI1Slot2/ao0",
+        amplitude=0.01,
+    )
+
+    # 执行频率优化
+    optimal_freq = optimizer.optimize()
+    print(f"最佳频率: {optimal_freq:.2f} Hz")
+
+    # 绘制优化结果
+    optimizer.plot_result()
+    ```
+
+    ## 注意事项：
+        - 校准前确保超表面样件和传声器已正确安装
+        - AI通道数不必恰好为8，类内部会自适应处理
+        - 结果保存后，其他类可通过设置 frequency=None 和 sampling_info=None 自动加载
+    """
+
+    # 获取类日志器（类属性，所有实例共享）
+    logger = get_logger(f"{__name__}.FrequencyOptimizer")
+
+    # 固定参数
+    SAMPLES_PER_CYCLE: int = 50  # 每周期采样点数
+    SAMPLES_NUM: int = 34300  # 单段采样数（686个周期）
+
+    def __init__(
+        self,
+        ai_channels: tuple[str, ...],
+        ao_channel: str,
+        amplitude: PositiveFloat = 0.01,
+        ai_comp_data: str | Path | None = None,
+        ao_comp_data: str | Path | None = None,
+    ) -> None:
+        """
+        初始化频率优化器
+
+        Args:
+            ai_channels: AI 通道名称元组（超表面管槽中的传声器）。
+                         典型为8个通道，但允许多于或少于8个。
+            ao_channel: AO 通道名称（单个扬声器/喇叭）。
+            amplitude: 输出正弦波幅值（V），默认0.01。
+            ai_comp_data: 可选，AI补偿数据文件路径，传递给内部CaliberFishNet。
+            ao_comp_data: 可选，AO补偿数据文件路径，传递给内部CaliberFishNet。
+
+        Raises:
+            ValueError: 当参数无效时
+        """
+        if not ai_channels:
+            raise ValueError("AI 通道列表不能为空")
+        if len(ai_channels) < 2:
+            raise ValueError("AI 通道数至少为2（需要计算相邻通道相位差）")
+
+        self._ai_channels = ai_channels
+        self._ao_channel = ao_channel
+        self._amplitude = amplitude
+        self._ai_comp_data = ai_comp_data
+        self._ao_comp_data = ao_comp_data
+
+        # 测量历史记录: [(frequency, signed_metric, amplitudes, phases)]
+        self._measurement_history: list[
+            dict[str, float | np.ndarray]
+        ] = []
+
+        # 最终结果
+        self._optimal_frequency: float | None = None
+        self._optimal_sampling_info: SamplingInfo | None = None
+        self._optimization_mode: Literal["phase", "amplitude"] | None = None
+        self._metric_ref: float = 1.0  # 归一化基准（第一次测量的|metric|）
+
+        logger.info(
+            f"FrequencyOptimizer 实例已创建 - "
+            f"AI通道数: {len(ai_channels)}, "
+            f"AO通道: {ao_channel}, "
+            f"幅值: {amplitude}V"
+        )
+
+    def _make_sampling_info(self, frequency: float) -> SamplingInfo:
+        """
+        根据频率生成对应的采样信息
+
+        规则: sampling_rate = frequency × 50, samples_num = 34300
+
+        Args:
+            frequency: 目标频率（Hz）
+
+        Returns:
+            SamplingInfo 字典
+        """
+        sampling_rate = frequency * self.SAMPLES_PER_CYCLE
+        return init_sampling_info(sampling_rate, self.SAMPLES_NUM)
+
+    def _measure_at_frequency(
+        self,
+        frequency: float,
+        measurement_index: int,
+        starts_num: int = 3,
+        chunks_per_start: int = 3,
+        settle_time: float | None = None,
+        result_path: Path | None = None,
+    ) -> TFData:
+        """
+        在指定频率处进行一次完整的传递函数测量
+
+        创建一个 CaliberFishNet 实例（1个AO × N个AI），调用其 calibrate 方法
+        执行完整的多次校准流程（包含保存原始数据、平均、滤波等），
+        并将校准数据保存为结果文件夹中的子文件夹以便追溯。
+
+        Args:
+            frequency: 测量频率（Hz）
+            measurement_index: 测量序号（从1开始），用于子文件夹命名
+            starts_num: 独立校准次数，默认3（calibrate的starts_num参数）
+            chunks_per_start: 每次采集的chunk数，默认3
+            settle_time: 稳定等待时间（秒）
+            result_path: 可选，结果文件夹根路径。如果提供，将在其中创建
+                        子文件夹保存本次测量的完整校准数据。
+
+        Returns:
+            TFData: 平均后的传递函数数据
+        """
+        sampling_info = self._make_sampling_info(frequency)
+
+        logger.info(
+            f"在 {frequency:.2f}Hz 处进行测量 (#{measurement_index}) "
+            f"(采样率={sampling_info['sampling_rate']:.1f}Hz, "
+            f"采样数={sampling_info['samples_num']}, "
+            f"独立校准次数={starts_num})"
+        )
+
+        # 创建 CaliberFishNet 实例（1个AO通道 × N个AI通道）
+        caliber = CaliberFishNet(
+            ai_channels=self._ai_channels,
+            ao_channels=(self._ao_channel,),
+            sampling_info=sampling_info,
+            frequency=frequency,
+            amplitude=self._amplitude,
+            ai_comp_data=self._ai_comp_data,
+            ao_comp_data=self._ao_comp_data,
+        )
+
+        # 确定本次测量的子文件夹路径
+        if result_path is not None:
+            sub_folder = (
+                result_path
+                / f"measurement_{measurement_index}_{frequency:.2f}Hz"
+            )
+        else:
+            sub_folder = (
+                Path(__file__).resolve().parents[3]
+                / "storage"
+                / "calib"
+                / "calib_result_freq"
+                / f"measurement_{measurement_index}_{frequency:.2f}Hz"
+            )
+
+        # 使用完整的 calibrate 方法执行校准
+        tf_data = caliber.calibrate(
+            starts_num=starts_num,
+            chunks_per_start=chunks_per_start,
+            apply_filter=True,
+            result_folder=sub_folder,
+            settle_time=settle_time,
+        )
+
+        logger.info(f"频率 {frequency:.2f}Hz 处测量完成 (#{measurement_index})")
+        return tf_data
+
+    @staticmethod
+    def _compute_metric(
+        tf_data: TFData,
+        mode: Literal["phase", "amplitude"] = "amplitude",
+    ) -> tuple[float, np.ndarray, np.ndarray]:
+        """
+        从TFData计算优化指标
+
+        根据 mode 选择不同的计算逻辑：
+        - phase mode: 计算相邻通道相位差与π的加权平均偏差（rad）
+        - amplitude mode: 计算所有通道幅值之和
+
+        Args:
+            tf_data: 传递函数数据（1行×N列矩阵，行为AO通道，列为AI通道）
+            mode: 优化模式，默认 "amplitude"
+
+        Returns:
+            tuple of:
+            - metric (float): 指标值
+              - phase mode: 加权平均相位偏差（正=频率偏高，负=频率偏低）
+              - amplitude mode: 所有通道幅值之和（越大越好）
+            - amplitudes (ndarray): 各通道幅值数组
+            - phases (ndarray): 各通道相位数组
+        """
+        tf_df = tf_data["tf_dataframe"]
+
+        # 提取复数传递函数值（1行×N列，取第一行的所有列）
+        tf_complex = tf_df.iloc[0, :].values.astype(complex)
+
+        # 提取幅值和相位
+        amplitudes = np.abs(tf_complex)
+        phases = np.angle(tf_complex)
+
+        if mode == "amplitude":
+            # 目标函数：所有通道幅值之和
+            metric = float(np.sum(amplitudes))
+            logger.debug(
+                f"幅值之和指标: metric={metric:.2f}, "
+                f"平均幅值={np.mean(amplitudes):.6f}, "
+                f"通道数={len(amplitudes)}"
+            )
+        else:
+            # 计算相邻通道的相位偏差
+            n_channels = len(tf_complex)
+            deviations = np.zeros(n_channels - 1)
+            weights = np.zeros(n_channels - 1)
+
+            for i in range(n_channels - 1):
+                ratio = -tf_complex[i + 1] / tf_complex[i]
+                deviations[i] = np.angle(ratio)
+                weights[i] = min(amplitudes[i] ** 2, amplitudes[i + 1] ** 2)
+
+            if np.sum(weights) > 0:
+                metric = float(np.average(deviations, weights=weights))
+            else:
+                metric = float(np.mean(deviations))
+
+            logger.debug(
+                f"相位偏差指标: metric={metric:.6f}rad, "
+                f"平均幅值={np.mean(amplitudes):.6f}"
+            )
+
+        return metric, amplitudes, phases
+
+    def optimize(
+        self,
+        mode: Literal["phase", "amplitude"] = "amplitude",
+        initial_freq: float = 3430.0,
+        second_freq: float = 3420.0,
+        max_iterations: int = 10,
+        tolerance: float = 0.001,
+        starts_num: int = 1,
+        chunks_per_start: int = 3,
+        settle_time: float | None = None,
+        result_folder: str | Path | None = None,
+    ) -> float:
+        """
+        执行频率优化流程
+
+        通过迭代测量和分析，找到最佳工作频率。
+        支持两种优化模式：
+
+        - **phase mode**: 寻找使相邻通道相位差与π的偏差为零的频率。
+          使用线性插值（割线法）迭代逼近零点。适用于理想化的无限周期模型。
+        - **amplitude mode**: 寻找使所有通道幅值之和最大的频率。
+          仅假设目标函数是单峰的（先增后减），使用区间收缩法逐步
+          逼近极大值。适用于有限周期的实际超表面。
+
+        Args:
+            mode: 优化模式，"phase" 或 "amplitude"，默认 "amplitude"
+            initial_freq: 初始测量频率（Hz），默认3430.0
+            second_freq: 第二个测量频率（Hz），默认3440.0
+            max_iterations: 最大迭代次数，默认10
+            tolerance: 收敛容差（归一化比例），默认0.005。
+                      所有metric均以第一次测量值的绝对值为基准进行归一化，
+                      因此tolerance表示"相对于初始值的比例"。
+                      - phase mode: 当 |normalized_metric| < tolerance 时停止
+                      - amplitude mode: 收敛判据为存在3个相邻测量点(p1,p2,p3)，
+                        其中p2的metric大于p1和p3，且两侧归一化metric之差均
+                        < tolerance
+            starts_num: 每次测量中的独立校准次数，默认3
+            chunks_per_start: 每次测量采集的chunk数，默认3
+            settle_time: 稳定等待时间（秒）
+            result_folder: 可选，结果保存文件夹路径。如果为None，使用默认路径
+                          'storage/calib/calib_result_freq'
+
+        Returns:
+            float: 最佳频率（Hz）
+
+        Raises:
+            ValueError: 当 mode 参数无效时
+            RuntimeError: 当优化未能收敛时
+        """
+        # 验证 mode 参数
+        if mode not in ("phase", "amplitude"):
+            raise ValueError(
+                f"mode 必须为 'phase' 或 'amplitude'，收到: '{mode}'"
+            )
+
+        self._optimization_mode = mode
+        logger.info("=" * 60)
+        logger.info(f"开始频率优化流程 (mode={mode})")
+        logger.info(f"初始频率: {initial_freq:.2f}Hz, 第二频率: {second_freq:.2f}Hz")
+        logger.info(f"最大迭代: {max_iterations}, 容差: {tolerance}")
+        logger.info(f"每次测量: {starts_num}次独立校准, {chunks_per_start}个chunk/次")
+        logger.info("=" * 60)
+
+        # 提前解析结果保存路径，用于传递给 _measure_at_frequency 保存子文件夹
+        if result_folder is None:
+            resolved_result_path = (
+                Path(__file__).resolve().parents[3]
+                / "storage"
+                / "calib"
+                / "calib_result_freq"
+            )
+        else:
+            resolved_result_path = Path(result_folder)
+        resolved_result_path.mkdir(parents=True, exist_ok=True)
+
+        # 清空测量历史
+        self._measurement_history = []
+        measurement_counter = 0
+
+        # 第一次测量
+        measurement_counter += 1
+        tf_data_1 = self._measure_at_frequency(
+            initial_freq,
+            measurement_index=measurement_counter,
+            starts_num=starts_num,
+            chunks_per_start=chunks_per_start,
+            settle_time=settle_time,
+            result_path=resolved_result_path,
+        )
+        metric_1, amps_1, phases_1 = self._compute_metric(tf_data_1, mode)
+
+        # 设定归一化基准：以第一次测量的|metric|为参考
+        self._metric_ref = abs(metric_1) if abs(metric_1) > 1e-12 else 1.0
+        logger.info(
+            f"频率 {initial_freq:.2f}Hz: raw metric = {metric_1:.6f}, "
+            f"归一化基准 = {self._metric_ref:.6f}"
+        )
+
+        # 归一化后存储
+        metric_1_norm = metric_1 / self._metric_ref
+        self._measurement_history.append({
+            "frequency": initial_freq,
+            "metric": metric_1_norm,
+            "amplitudes": amps_1,
+            "phases": phases_1,
+        })
+
+        # Phase mode: 检查是否已满足条件（使用归一化值）
+        if mode == "phase" and abs(metric_1_norm) < tolerance:
+            logger.info(f"初始频率已满足容差要求，最佳频率: {initial_freq:.2f}Hz")
+            self._finalize(initial_freq, resolved_result_path)
+            return initial_freq
+
+        # 第二次测量
+        measurement_counter += 1
+        tf_data_2 = self._measure_at_frequency(
+            second_freq,
+            measurement_index=measurement_counter,
+            starts_num=starts_num,
+            chunks_per_start=chunks_per_start,
+            settle_time=settle_time,
+            result_path=resolved_result_path,
+        )
+        metric_2, amps_2, phases_2 = self._compute_metric(tf_data_2, mode)
+        metric_2_norm = metric_2 / self._metric_ref
+        self._measurement_history.append({
+            "frequency": second_freq,
+            "metric": metric_2_norm,
+            "amplitudes": amps_2,
+            "phases": phases_2,
+        })
+        logger.info(
+            f"频率 {second_freq:.2f}Hz: raw metric = {metric_2:.6f}, "
+            f"归一化 = {metric_2_norm:.6f}"
+        )
+
+        # Phase mode: 检查是否已满足条件（使用归一化值）
+        if mode == "phase" and abs(metric_2_norm) < tolerance:
+            logger.info(f"第二频率已满足容差要求，最佳频率: {second_freq:.2f}Hz")
+            self._finalize(second_freq, resolved_result_path)
+            return second_freq
+
+        # 进入迭代优化
+        freq_center = (initial_freq + second_freq) / 2.0
+
+        if mode == "amplitude":
+            iterate_result = self._iterate_amplitude(
+                initial_freq, second_freq, metric_1_norm, metric_2_norm,
+                freq_center, max_iterations, tolerance, starts_num,
+                chunks_per_start, settle_time, resolved_result_path,
+                measurement_counter,
+            )
+        else:
+            iterate_result = self._iterate_phase(
+                initial_freq, second_freq, metric_1_norm, metric_2_norm,
+                freq_center, max_iterations, tolerance, starts_num,
+                chunks_per_start, settle_time, resolved_result_path,
+                measurement_counter,
+            )
+
+        return iterate_result
+
+
+    def _iterate_phase(
+        self,
+        initial_freq: float,
+        second_freq: float,
+        metric_1: float,
+        metric_2: float,
+        freq_center: float,
+        max_iterations: int,
+        tolerance: float,
+        starts_num: int,
+        chunks_per_start: int,
+        settle_time: float | None,
+        resolved_result_path: Path,
+        measurement_counter: int,
+    ) -> float:
+        """Phase mode 迭代：割线法逼近相位偏差零点"""
+        freq_a, metric_a = initial_freq, metric_1
+        freq_b, metric_b = second_freq, metric_2
+
+        for iteration in range(max_iterations):
+            logger.info(f"--- 迭代 {iteration + 1}/{max_iterations} ---")
+
+            # 线性插值预测零点
+            if abs(metric_b - metric_a) < 1e-12:
+                logger.warning("两个测量点的metric几乎相同，无法线性插值")
+                break
+
+            predicted_freq = freq_a - metric_a * (freq_b - freq_a) / (
+                metric_b - metric_a
+            )
+
+            # 安全检查：预测频率不应偏离初始值太远（±200Hz）
+            if abs(predicted_freq - freq_center) > 200.0:
+                logger.warning(
+                    f"预测频率 {predicted_freq:.2f}Hz 偏离中心过远，"
+                    f"限制在 [{freq_center - 200:.0f}, {freq_center + 200:.0f}]Hz"
+                )
+                predicted_freq = np.clip(
+                    predicted_freq, freq_center - 200.0, freq_center + 200.0
+                )
+
+            logger.info(f"线性插值预测最佳频率: {predicted_freq:.2f}Hz")
+
+            # 在预测频率处测量
+            assert isinstance(predicted_freq, float)
+            measurement_counter += 1
+            tf_data_new = self._measure_at_frequency(
+                predicted_freq,
+                measurement_index=measurement_counter,
+                starts_num=starts_num,
+                chunks_per_start=chunks_per_start,
+                settle_time=settle_time,
+                result_path=resolved_result_path,
+            )
+            metric_new, amps_new, phases_new = self._compute_metric(
+                tf_data_new, "phase"
+            )
+            metric_new_norm = metric_new / self._metric_ref
+            self._measurement_history.append({
+                "frequency": predicted_freq,
+                "metric": metric_new_norm,
+                "amplitudes": amps_new,
+                "phases": phases_new,
+            })
+            logger.info(
+                f"频率 {predicted_freq:.2f}Hz: "
+                f"归一化metric = {metric_new_norm:.6f}"
+            )
+
+            # 检查收敛（使用归一化值）
+            if abs(metric_new_norm) < tolerance:
+                logger.info(
+                    f"已收敛！最佳频率: {predicted_freq:.2f}Hz "
+                    f"(归一化metric={metric_new_norm:.6f} < tolerance={tolerance})"
+                )
+                self._finalize(predicted_freq, resolved_result_path)
+                return predicted_freq
+
+            # 选择下一对插值点：使用新点替换同号的旧点
+            if metric_new_norm * metric_a > 0:
+                freq_a, metric_a = predicted_freq, metric_new_norm
+            else:
+                freq_b, metric_b = predicted_freq, metric_new_norm
+
+        # 未能完全收敛，使用metric绝对值最小的频率点
+        best_entry = min(
+            self._measurement_history, key=lambda x: abs(x["metric"])
+        )
+        best_freq = float(best_entry["frequency"])
+
+        logger.warning(
+            f"达到最大迭代次数 {max_iterations}，"
+            f"使用metric最小的频率: {best_freq:.2f}Hz "
+            f"(metric={best_entry['metric']:.6f}rad)"
+        )
+        self._finalize(best_freq, resolved_result_path)
+        return best_freq
+
+    def _iterate_amplitude(
+        self,
+        initial_freq: float,
+        second_freq: float,
+        metric_1: float,
+        metric_2: float,
+        freq_center: float,
+        max_iterations: int,
+        tolerance: float,
+        starts_num: int,
+        chunks_per_start: int,
+        settle_time: float | None,
+        resolved_result_path: Path,
+        measurement_counter: int,
+    ) -> float:
+        """
+        Amplitude mode 迭代：区间收缩法寻找极大值
+
+        仅假设目标函数是单峰的（先增后减，有唯一极大值）。
+        通过逐步缩减包围峰值的区间来逼近极大值。
+
+        算法步骤：
+        1. 测量第三个点（根据前两点趋势方向选择），以建立初始区间
+        2. 每次迭代：
+           a. 将所有历史测量点按频率排序
+           b. 检查收敛条件（是否存在满足条件的3相邻点）
+           c. 找到当前metric最大的点（peak candidate）
+           d. 若peak在边缘：向该方向延伸一步
+           e. 若peak被包围：在较宽半区间的中点测量以缩减区间
+        """
+        step = second_freq - initial_freq  # 有符号步长，保留方向信息
+
+        # --- 第三个测量点 ---
+        # 根据前两点的趋势选择第三个点，以"包围"可能的峰值
+        if metric_2 > metric_1:
+            # 幅值朝 second_freq 方向增大，继续延伸
+            third_freq = second_freq + step
+        elif metric_1 > metric_2:
+            # 幅值朝 initial_freq 方向增大，反向延伸
+            third_freq = initial_freq - step
+        else:
+            # 相等（极罕见），取中点
+            third_freq = freq_center
+
+        # 安全限制
+        third_freq = float(
+            np.clip(third_freq, freq_center - 200.0, freq_center + 200.0)
+        )
+
+        measurement_counter += 1
+        tf_data_3 = self._measure_at_frequency(
+            third_freq,
+            measurement_index=measurement_counter,
+            starts_num=starts_num,
+            chunks_per_start=chunks_per_start,
+            settle_time=settle_time,
+            result_path=resolved_result_path,
+        )
+        metric_3, amps_3, phases_3 = self._compute_metric(
+            tf_data_3, "amplitude"
+        )
+        metric_3_norm = metric_3 / self._metric_ref
+        self._measurement_history.append({
+            "frequency": third_freq,
+            "metric": metric_3_norm,
+            "amplitudes": amps_3,
+            "phases": phases_3,
+        })
+        logger.info(
+            f"频率 {third_freq:.2f}Hz: 归一化metric = {metric_3_norm:.6f}"
+        )
+
+        # --- 区间收缩迭代 ---
+        for iteration in range(max_iterations):
+            logger.info(f"--- 迭代 {iteration + 1}/{max_iterations} ---")
+
+            # 将所有历史测量点按频率排序
+            sorted_hist = sorted(
+                self._measurement_history, key=lambda x: x["frequency"]
+            )
+            n_points = len(sorted_hist)
+
+            # 检查收敛条件：是否存在3个相邻点满足条件
+            for i in range(n_points - 2):
+                p1, p2, p3 = sorted_hist[i], sorted_hist[i + 1], sorted_hist[i + 2]
+                if (
+                    p2["metric"] > p1["metric"]
+                    and p2["metric"] > p3["metric"]
+                    and (p2["metric"] - p1["metric"]) < tolerance
+                    and (p2["metric"] - p3["metric"]) < tolerance
+                ):
+                    best_freq = float(p2["frequency"])
+                    logger.info(
+                        f"已收敛！找到极大值点: {best_freq:.4f}Hz "
+                        f"(metric={p2['metric']:.6f}, "
+                        f"Δleft={p2['metric'] - p1['metric']:.6f}, "
+                        f"Δright={p2['metric'] - p3['metric']:.6f} "
+                        f"< tolerance={tolerance})"
+                    )
+                    self._finalize(best_freq, resolved_result_path)
+                    return best_freq
+
+            # 找到当前metric最大的点的索引（在sorted_hist中）
+            best_idx = max(
+                range(n_points), key=lambda i: sorted_hist[i]["metric"]
+            )
+
+            # 决定下一个测量点
+            if best_idx == 0:
+                # Peak在左边缘 — 向左延伸
+                left_step = (
+                    sorted_hist[1]["frequency"] - sorted_hist[0]["frequency"]
+                )
+                new_freq = sorted_hist[0]["frequency"] - left_step
+                logger.info(
+                    f"Peak在左边缘，向左延伸: {new_freq:.2f}Hz"
+                )
+            elif best_idx == n_points - 1:
+                # Peak在右边缘 — 向右延伸
+                right_step = (
+                    sorted_hist[-1]["frequency"] - sorted_hist[-2]["frequency"]
+                )
+                new_freq = sorted_hist[-1]["frequency"] + right_step
+                logger.info(
+                    f"Peak在右边缘，向右延伸: {new_freq:.2f}Hz"
+                )
+            else:
+                # Peak被包围 — 在较宽半区间的中点测量
+                left_freq = sorted_hist[best_idx - 1]["frequency"]
+                peak_freq = sorted_hist[best_idx]["frequency"]
+                right_freq = sorted_hist[best_idx + 1]["frequency"]
+
+                left_width = peak_freq - left_freq
+                right_width = right_freq - peak_freq
+
+                if left_width >= right_width:
+                    new_freq = (left_freq + peak_freq) / 2.0
+                    logger.info(
+                        f"Peak被包围，缩减左半区间: "
+                        f"[{left_freq:.2f}, {peak_freq:.2f}] → "
+                        f"中点 {new_freq:.2f}Hz"
+                    )
+                else:
+                    new_freq = (peak_freq + right_freq) / 2.0
+                    logger.info(
+                        f"Peak被包围，缩减右半区间: "
+                        f"[{peak_freq:.2f}, {right_freq:.2f}] → "
+                        f"中点 {new_freq:.2f}Hz"
+                    )
+
+            # 安全限制
+            new_freq = float(
+                np.clip(new_freq, freq_center - 200.0, freq_center + 200.0)
+            )
+
+            # 在新频率处测量
+            measurement_counter += 1
+            tf_data_new = self._measure_at_frequency(
+                new_freq,
+                measurement_index=measurement_counter,
+                starts_num=starts_num,
+                chunks_per_start=chunks_per_start,
+                settle_time=settle_time,
+                result_path=resolved_result_path,
+            )
+            metric_new, amps_new, phases_new = self._compute_metric(
+                tf_data_new, "amplitude"
+            )
+            metric_new_norm = metric_new / self._metric_ref
+            self._measurement_history.append({
+                "frequency": new_freq,
+                "metric": metric_new_norm,
+                "amplitudes": amps_new,
+                "phases": phases_new,
+            })
+            logger.info(
+                f"频率 {new_freq:.2f}Hz: 归一化metric = {metric_new_norm:.6f}"
+            )
+
+        # 未能完全收敛，使用幅值最大的测量点
+        best_entry = max(
+            self._measurement_history, key=lambda x: x["metric"]
+        )
+        best_freq = float(best_entry["frequency"])
+
+        logger.warning(
+            f"达到最大迭代次数 {max_iterations}，"
+            f"使用幅值之和最大的频率: {best_freq:.2f}Hz "
+            f"(metric={best_entry['metric']:.6f})"
+        )
+        self._finalize(best_freq, resolved_result_path)
+        return best_freq
+
+    def _finalize(
+        self,
+        optimal_frequency: float,
+        result_folder: str | Path | None = None,
+    ) -> None:
+        """
+        完成优化：保存结果和绘图
+
+        Args:
+            optimal_frequency: 确定的最佳频率
+            result_folder: 结果保存路径
+        """
+        self._optimal_frequency = optimal_frequency
+        self._optimal_sampling_info = self._make_sampling_info(optimal_frequency)
+
+        # 确定结果保存路径
+        if result_folder is None:
+            result_path = (
+                Path(__file__).resolve().parents[3]
+                / "storage"
+                / "calib"
+                / "calib_result_freq"
+            )
+        else:
+            result_path = Path(result_folder)
+
+        result_path.mkdir(parents=True, exist_ok=True)
+
+        # 保存核心结果（供其他类自动加载）
+        freq_result = {
+            "frequency": optimal_frequency,
+            "sampling_info": self._optimal_sampling_info,
+            "mode": self._optimization_mode,
+        }
+        freq_result_path = result_path / "freq_result.pkl"
+        try:
+            save_compressed_data(freq_result, freq_result_path, 6, "频率优化结果")
+            logger.info(f"频率优化结果已保存到: {freq_result_path}")
+        except Exception as e:
+            logger.error(f"保存频率优化结果失败: {e}", exc_info=True)
+
+        # 保存完整的测量历史数据
+        history_path = result_path / "measurement_history.pkl"
+        try:
+            save_compressed_data(
+                self._measurement_history, history_path, 6, "测量历史数据"
+            )
+            logger.info(f"测量历史数据已保存到: {history_path}")
+        except Exception as e:
+            logger.error(f"保存测量历史数据失败: {e}", exc_info=True)
+
+        # 绘制并保存结果图
+        plot_path = result_path / "freq_optimization.png"
+        self.plot_result(save_path=plot_path)
+
+        logger.info(f"频率优化完成，所有结果已保存到: {result_path}")
+
+    def plot_result(self, save_path: str | Path | None = None) -> None:
+        """
+        绘制频率优化结果图
+
+        根据优化模式自动选择绘图方式：
+        - **phase mode**: 横轴频率，纵轴相位偏差(rad)，线性趋势线+零点标记
+        - **amplitude mode**: 横轴频率，纵轴幅值之和，测量点连线+峰值标记
+
+        所有测量过的频率点绘制为散点，最终确定的最佳频率以竖线标记。
+
+        Args:
+            save_path: 可选，图像保存路径。如果为None则只显示不保存。
+
+        Raises:
+            RuntimeError: 当尚未执行优化时
+        """
+        if not self._measurement_history:
+            raise RuntimeError("尚未执行频率优化，无法绘图")
+
+        logger.info("开始绘制频率优化结果图")
+
+        mode = self._optimization_mode or "amplitude"
+
+        # 提取数据
+        frequencies = np.array(
+            [entry["frequency"] for entry in self._measurement_history]
+        )
+        metrics = np.array(
+            [entry["metric"] for entry in self._measurement_history]
+        )
+
+        # 创建图表
+        fig, ax = plt.subplots(1, 1, figsize=(12, 7))
+
+        # 绘制散点（所有测量点）
+        ax.scatter(
+            frequencies,
+            metrics,
+            s=120,
+            c="steelblue",
+            edgecolors="black",
+            linewidths=1.5,
+            zorder=5,
+            label="测量点",
+        )
+
+        # 为每个散点添加序号标注
+        for idx, (freq, metric) in enumerate(
+            zip(frequencies, metrics, strict=True)
+        ):
+            ax.annotate(
+                f"#{idx + 1}",
+                xy=(freq, metric),
+                xytext=(5, 8),
+                textcoords="offset points",
+                fontsize=8,
+                alpha=0.7,
+            )
+
+        # 根据模式绘制趋势线
+        freq_range = np.linspace(
+            frequencies.min() - 5, frequencies.max() + 5, 200
+        )
+
+        if mode == "phase":
+            self._plot_trend(ax, frequencies, metrics, freq_range, "phase")
+        else:
+            self._plot_trend(ax, frequencies, metrics, freq_range, "amplitude")
+
+        # 标记最终确定的最佳频率
+        if self._optimal_frequency is not None:
+            ax.axvline(
+                self._optimal_frequency,
+                color="red",
+                linestyle="-",
+                linewidth=2,
+                alpha=0.5,
+                label=f"最佳频率: {self._optimal_frequency:.2f}Hz",
+            )
+
+        # 设置坐标轴和标题
+        ax.set_xlabel("频率 (Hz)", fontsize=12)
+        if mode == "phase":
+            ax.set_ylabel("归一化相位偏差", fontsize=12)
+            # 绘制零线
+            ax.axhline(
+                0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5
+            )
+        else:
+            ax.set_ylabel("归一化幅值之和", fontsize=12)
+
+        mode_label = "Phase" if mode == "phase" else "Amplitude"
+        ax.set_title(
+            f"频率优化结果 ({mode_label} mode)\n"
+            f"AI通道数: {len(self._ai_channels)}, "
+            f"AO通道: {self._ao_channel}",
+            fontsize=14,
+            pad=15,
+        )
+        ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.8)
+        ax.legend(loc="best", fontsize=10)
+
+        plt.tight_layout()
+
+        # 保存或显示
+        if save_path is not None:
+            save_path_obj = Path(save_path)
+            save_path_obj.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(save_path_obj, dpi=300, bbox_inches="tight")
+            logger.info(f"频率优化图已保存到: {save_path_obj}")
+
+        plt.show()
+        logger.info("频率优化图绘制完成")
+
+    @staticmethod
+    def _plot_trend(
+        ax: plt.Axes,
+        frequencies: np.ndarray,
+        metrics: np.ndarray,
+        freq_range: np.ndarray,
+        mode: Literal["phase", "amplitude"] = "amplitude",
+    ) -> None:
+        """
+        根据模式绘制趋势线
+
+        Args:
+            ax: matplotlib 坐标轴
+            frequencies: 测量频率数组
+            metrics: 指标数组
+            freq_range: 用于绘制趋势线的频率范围
+            mode: 优化模式，默认 "amplitude"
+        """
+        if mode == "phase":
+            # Phase mode: 线性趋势线 + 零点标记
+            if len(frequencies) < 2:
+                return
+
+            coeffs = np.polyfit(frequencies, metrics, 1)
+            poly = np.poly1d(coeffs)
+
+            ax.plot(
+                freq_range,
+                poly(freq_range),
+                "r--",
+                linewidth=2,
+                alpha=0.7,
+                label=f"线性趋势线 (斜率={coeffs[0]:.4f} rad/Hz)",
+            )
+
+            # 标记趋势线零点
+            if abs(coeffs[0]) > 1e-12:
+                zero_freq = -coeffs[1] / coeffs[0]
+                ax.axvline(
+                    zero_freq,
+                    color="green",
+                    linestyle=":",
+                    linewidth=1.5,
+                    alpha=0.7,
+                )
+                ax.scatter(
+                    [zero_freq],
+                    [0],
+                    s=200,
+                    marker="*",
+                    c="green",
+                    edgecolors="darkgreen",
+                    linewidths=1.5,
+                    zorder=6,
+                    label=f"趋势线零点: {zero_freq:.2f}Hz",
+                )
+        else:
+            # Amplitude mode: 连接线 + 峰值标记
+            if len(frequencies) < 2:
+                return
+
+            # 按频率排序绘制连接线
+            sort_idx = np.argsort(frequencies)
+            sorted_freqs = frequencies[sort_idx]
+            sorted_metrics = metrics[sort_idx]
+
+            ax.plot(
+                sorted_freqs,
+                sorted_metrics,
+                "r--",
+                linewidth=1.5,
+                alpha=0.6,
+                label="测量点连线",
+            )
+
+            # 标记当前最大值点
+            best_idx = np.argmax(metrics)
+            ax.scatter(
+                [frequencies[best_idx]],
+                [metrics[best_idx]],
+                s=200,
+                marker="*",
+                c="green",
+                edgecolors="darkgreen",
+                linewidths=1.5,
+                zorder=6,
+                label=f"最大幅值点: {frequencies[best_idx]:.2f}Hz",
+            )
+
+    @property
+    def optimal_frequency(self) -> float | None:
+        """
+        获取优化后的最佳频率
+
+        Returns:
+            最佳频率（Hz），如果尚未执行优化则返回None
+        """
+        return self._optimal_frequency
+
+    @property
+    def optimal_sampling_info(self) -> SamplingInfo | None:
+        """
+        获取优化后的最佳采样信息
+
+        Returns:
+            SamplingInfo字典，如果尚未执行优化则返回None
+        """
+        return self._optimal_sampling_info
+
+    @property
+    def measurement_history(
+        self,
+    ) -> list[dict[str, float | np.ndarray]]:
+        """
+        获取所有测量历史记录
+
+        Returns:
+            测量历史列表，每条记录包含 frequency、metric、amplitudes、phases
+        """
+        return self._measurement_history
+
+
 class PowerTester:
     """
     # 功率测试类
@@ -2834,7 +3893,7 @@ class PowerTester:
         )
 
         if loaded_ao_comp_data is None:
-            error_msg = f"未找到AO补偿数据文件"
+            error_msg = "未找到AO补偿数据文件"
             self.logger.error(error_msg)
             raise FileNotFoundError(error_msg)
 
@@ -3067,8 +4126,9 @@ class PowerTester:
                 )
 
                 # 从caliber获取examine阶段的传递函数结果
-                if caliber._result_averaged_tf_data is not None:
-                    tf_df = caliber._result_averaged_tf_data["tf_dataframe"]
+                tf_data = caliber.result_averaged_tf_data
+                if tf_data is not None:
+                    tf_df = tf_data["tf_dataframe"]
                     # 提取单个通道的传递函数复数值
                     # tf_dataframe是行矩阵：index为"AI"（固定字符串），columns为AO通道名
                     # 使用iloc[0, 0]获取唯一元素，避免依赖具体的行列名
@@ -3131,10 +4191,9 @@ class PowerTester:
                 )
 
                 # 从caliber_near_zero获取近零功率点的传递函数结果
-                if caliber_near_zero._result_averaged_tf_data is not None:
-                    tf_df_nz = caliber_near_zero._result_averaged_tf_data[
-                        "tf_dataframe"
-                    ]
+                tf_data_nz = caliber_near_zero.result_averaged_tf_data
+                if tf_data_nz is not None:
+                    tf_df_nz = tf_data_nz["tf_dataframe"]
                     tf_complex_nz = tf_df_nz.iloc[0, 0]
                     near_zero_results.append(
                         (float(power), complex(tf_complex_nz))
@@ -3314,7 +4373,7 @@ class PowerTester:
             c="orange",
             s=200,
             marker="*",
-            label=f"原始TF (校准值)",
+            label="原始TF (校准值)",
             zorder=5,
         )
 

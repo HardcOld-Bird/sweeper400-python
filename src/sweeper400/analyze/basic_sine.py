@@ -10,12 +10,12 @@ import numpy as np
 from scipy.optimize import curve_fit
 from scipy.signal import periodogram
 
+from ..logger import get_logger
 from .my_dtypes import (
     PositiveFloat,
     SamplingInfo,
     Waveform,
 )
-from ..logger import get_logger
 
 # 获取模块日志器
 logger = get_logger(__name__)
@@ -165,13 +165,15 @@ def extract_single_tone_information_vvi(
 
     Args:
         input_waveform: 目标波形（多或单通道），形状为 (n_channels, n_samples)
-        approx_freq: 搜索的中心频率（Hz）。默认为None，表示在全频率范围内搜索
+        approx_freq: 搜索的中心频率（Hz）。默认为None，此时将尝试从
+            FrequencyOptimizer的存储结果中加载频率作为搜索中心；
+            如果加载失败则在全频率范围内搜索。
         error_percentage: 允许的频率误差百分数，无单位。默认值为5.0
         precise_mode: 是否启用精确估计模式。默认为False。
             - False: 使用Periodogram+抛物线插值进行频率估计，线性最小二乘进行
               幅值和相位估计。速度快，适合大多数场景。
             - True: 在粗略估计基础上，使用curve_fit进行非线性最小二乘精确优化。
-              精度更高但速度较慢。
+              精度更高但收敛性差，且速度较慢。
 
     Returns:
         output_waveform: 记录了提取结果的Waveform对象（与input_waveform共享数据），
@@ -182,7 +184,7 @@ def extract_single_tone_information_vvi(
     Examples:
         ```python
         >>> import numpy as np
-        >>> from sweeper400.analyze import get_sine, init_sampling_info
+        >>> from analyze import get_sine, init_sampling_info
         >>> sampling_info = init_sampling_info(1000.0, 1024)
         >>> cca = np.array([2.0 + 0j])  # 单通道，幅值2.0，相位0
         >>> wf = get_sine(sampling_info, 50.0, ("ch0",), cca)
@@ -192,6 +194,17 @@ def extract_single_tone_information_vvi(
     """
     # 获取函数日志器
     f_logger = get_logger(f"{__name__}.extract_single_tone_information_vvi")
+
+    # 当 approx_freq 为 None 时，尝试从频率优化结果加载
+    if approx_freq is None:
+        from .calib_util_funcs import load_freq_optimizer_result
+
+        freq_result = load_freq_optimizer_result()
+        if freq_result is not None:
+            approx_freq = freq_result["frequency"]
+            f_logger.info(
+                f"approx_freq 从频率优化结果加载: {approx_freq:.2f}Hz"
+            )
 
     channels_num = input_waveform.channels_num
     samples_num = input_waveform.samples_num

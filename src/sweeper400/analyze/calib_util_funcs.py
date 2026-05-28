@@ -11,16 +11,63 @@ from typing import Any
 
 import numpy as np
 
+from ..logger import get_logger
+from .filter import detrend_waveform
 from .my_dtypes import (
     CompData,
+    SamplingInfo,
     Waveform,
 )
-from .filter import detrend_waveform
 from .post_process import load_compressed_data
-from ..logger import get_logger
 
 # 获取模块日志器
 logger = get_logger(__name__)
+
+
+def load_freq_optimizer_result(
+    result_folder: str | Path | None = None,
+) -> dict[str, float | SamplingInfo] | None:
+    """
+    加载频率优化器的校准结果
+
+    从存储路径加载 FrequencyOptimizer 保存的最佳频率和采样信息。
+    当其他类（如 CaliberOctopus、CaliberFishNet、SweeperCore）的 frequency 或
+    sampling_info 参数为 None 时，调用此函数获取默认值。
+
+    Args:
+        result_folder: 可选，结果文件夹路径。如果为 None，使用默认路径
+                      'storage/calib/calib_result_freq'（相对于项目根目录）。
+
+    Returns:
+        包含 'frequency' 和 'sampling_info' 键的字典，如果文件不存在则返回 None。
+        格式: {"frequency": float, "sampling_info": SamplingInfo}
+    """
+    if result_folder is None:
+        result_path = (
+            Path(__file__).resolve().parents[3]
+            / "storage"
+            / "calib"
+            / "calib_result_freq"
+        )
+    else:
+        result_path = Path(result_folder)
+
+    freq_result_file = result_path / "freq_result.pkl"
+
+    if not freq_result_file.exists():
+        logger.debug(f"频率优化结果文件不存在: {freq_result_file}")
+        return None
+
+    try:
+        result = load_compressed_data(freq_result_file, "频率优化结果")
+        logger.info(
+            f"已加载频率优化结果: frequency={result['frequency']:.2f}Hz, "
+            f"sampling_rate={result['sampling_info']['sampling_rate']:.1f}Hz"
+        )
+        return result
+    except Exception as e:
+        logger.warning(f"加载频率优化结果失败: {e}")
+        return None
 
 
 def load_data_with_fallback(

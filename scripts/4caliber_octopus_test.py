@@ -4,15 +4,12 @@
 这是一个用于实际硬件测试的脚本，可以直接运行来测试校准功能。
 """
 
-from sweeper400.analyze import init_sampling_info, plot_sweep_waveforms
+from sweeper400.analyze import plot_sweep_waveforms
 from sweeper400.calib import CaliberOctopus
 from sweeper400.analyze import load_compressed_data
 
-# %% 创建采样信息和正弦波参数（使用推荐的参数）
-sampling_info = init_sampling_info(171500.0, 34300)  # 采样率171.5kHz, 0.2秒
-
-# 定义通道配置
-ai_channels = ("PXI1Slot2/ai0",)
+# %% 定义通道配置
+ai_channels = ("PXI1Slot5/ai0",)
 ao_channels = (
     "PXI1Slot3/ao0",
     "PXI1Slot3/ao1",
@@ -28,14 +25,12 @@ ao_channels = (
 caliber = CaliberOctopus(
     ai_channels=ai_channels,
     ao_channels=ao_channels,
-    sampling_info=sampling_info,
-    frequency=3430.0,
     amplitude=0.05,
 )
 
 # %% 执行校准
 caliber.calibrate(
-    starts_num=2,
+    starts_num=1,
     chunks_per_start=3,
     result_folder="D:\\EveryoneDownloaded\\before_calib",
 )
@@ -53,14 +48,12 @@ plot_sweep_waveforms(
 caliber = CaliberOctopus(
     ai_channels=ai_channels,
     ao_channels=ao_channels,
-    sampling_info=sampling_info,
-    frequency=3430.0,
     amplitude=0.05,
     ao_comp_data="D:\\EveryoneDownloaded\\before_calib\\ao_comp_data.pkl",
 )
 
 caliber.calibrate(
-    starts_num=2,
+    starts_num=1,
     chunks_per_start=3,
     result_folder="D:\\EveryoneDownloaded\\after_calib",
 )
@@ -71,13 +64,19 @@ caliber.calibrate(
 caliber = CaliberOctopus(
     ai_channels=ai_channels,
     ao_channels=ao_channels,
-    sampling_info=sampling_info,
-    frequency=3430.0,
-    amplitude=0.05,
+    amplitude=0.1,
 )
 
 # 执行校准，结果存储在项目storage目录下
 caliber.calibrate(
     starts_num=10,
     chunks_per_start=3,
+)
+
+# %% 检查SweepData波形
+sd = load_compressed_data("D:\\XXXIIIGGG\\projects\\pySweep\\pySweepWS\\storage\\calib\\calib_result_octopus\\raw_sweep_data_1.pkl")
+plot_sweep_waveforms(
+    sd,
+    "D:\\XXXIIIGGG\\projects\\pySweep\\pySweepWS\\storage\\calib\\calib_result_octopus",
+    zoom_factor=1,
 )

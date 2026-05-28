@@ -1101,8 +1101,7 @@ class Evolver:
                 # 4. 处理数据，得到新反馈 AO 复振幅（实测模式）
                 new_ao_complex_amps = self._feedback_method(
                     ai_waveform=ai_waveform,
-                    # mode="acquisition",
-                    mode="analytical",  # 调试中
+                    mode="acquisition",
                 )
 
                 # 5. 更新当前缓存
@@ -1125,6 +1124,14 @@ class Evolver:
                     result_folder_path = Path(result_folder)
                     result_folder_path.mkdir(parents=True, exist_ok=True)
 
+                    # 演化原始数据
+                    sweep_data_save_path = result_folder_path / "raw_sweep_data.pkl"
+                    save_compressed_data(
+                        self._evolution_data,
+                        sweep_data_save_path,
+                        data_type_name="演化SweepData",
+                    )
+
                     # 最终合并波形
                     waveform_save_path = result_folder_path / "evolved_waveform.pkl"
                     save_compressed_data(
@@ -1133,7 +1140,7 @@ class Evolver:
                         data_type_name="演化结果Waveform",
                     )
 
-                    # 演化轨迹图（同时绘制 AI 总声场轨迹与反馈 AO 轨迹）
+                    # 演化轨迹图（同时绘制两种模式下 AI 总声场轨迹与反馈 AO 轨迹）
                     self.plot_evolution(
                         save_path=result_folder_path / "evolution_ai.png",
                         target="ai",
@@ -1141,6 +1148,16 @@ class Evolver:
                     self.plot_evolution(
                         save_path=result_folder_path / "evolution_ao.png",
                         target="ao",
+                    )
+                    self.plot_evolution(
+                        save_path=result_folder_path / "evolution_diff_ai.png",
+                        target="ai",
+                        mode="diff",
+                    )
+                    self.plot_evolution(
+                        save_path=result_folder_path / "evolution_diff_ao.png",
+                        target="ao",
+                        mode="diff",
                     )
 
                     self.logger.info(f"结果已保存到: {result_folder_path}")
@@ -1173,19 +1190,19 @@ class Evolver:
         save_path: str | Path | None = None,
         show: bool = False,
         target: Literal["ai", "ao"] = "ai",
-        mode: Literal["diff", "absolute"] = "diff",
+        mode: Literal["absolute", "diff"] = "absolute",
     ) -> None:
         """
         在复平面上绘制各通道的演化轨迹。
 
         ## 模式
 
-        - `"diff"`（默认，evolve 使用）：绘制"实测/模拟值 - 理论稳态解"的差值轨迹。
-          理想情况下随着演化进行，所有折线应逐渐向坐标原点（理论稳态解所在位置）
-          收敛。该模式要求理论解必须已通过 `simulate(...)` 求得。
-        - `"absolute"`（simulate 使用）：直接绘制"实测/模拟值"本身的复平面轨迹。
+        - `"absolute"`（默认，simulate 使用）：直接绘制"实测/模拟值"本身的复平面轨迹。
           该模式不依赖理论解；若理论解已存在（即已调用过 `simulate(...)`），
           则会作为参考点（红色 ×）一并标注于图中。
+        - `"diff"`（evolve 使用）：绘制"实测/模拟值 - 理论稳态解"的差值轨迹。
+          理想情况下随着演化进行，所有折线应逐渐向坐标原点（理论稳态解所在位置）
+          收敛。该模式要求理论解必须已通过 `simulate(...)` 求得。
 
         理论稳态解（即每个通道在理想反馈下应当达到的复振幅）由 `simulate(...)`
         方法的**矩阵阶段**事先求得并储存于 `_theoretical_total_ai_complex_amps`
@@ -1222,7 +1239,7 @@ class Evolver:
 
         if mode not in ("diff", "absolute"):
             raise ValueError(
-                f"非法 mode: {mode!r}，仅支持 'diff' 或 'absolute'。"
+                f"非法 mode: {mode!r}，仅支持 'absolute' 或 'diff'。"
             )
 
         if not history:
@@ -1241,21 +1258,21 @@ class Evolver:
 
         # 数据源：history 形状 (cycles_num, n_ch)
         data_array = np.asarray(history)
-        if mode == "diff":
+        if mode == "absolute":
+            plot_array = data_array
+            xlabel = f"实部（{quantity_label}）"
+            ylabel = f"虚部（{quantity_label}）"
+            title = (
+                f"反馈演化 - {quantity_label} 复平面轨迹\n"
+                f"（周期数: {num_cycles}，频率: {self._frequency:.1f} Hz）"
+            )
+        else:  # mode == "diff"
             # 相对于理论解的差值轨迹
             plot_array = data_array - theoretical[None, :]
             xlabel = f"实部（{quantity_label} - 理论）"
             ylabel = f"虚部（{quantity_label} - 理论）"
             title = (
                 f"反馈演化 - {quantity_label} 与 理论稳态解 之差\n"
-                f"（周期数: {num_cycles}，频率: {self._frequency:.1f} Hz）"
-            )
-        else:  # mode == "absolute"
-            plot_array = data_array
-            xlabel = f"实部（{quantity_label}）"
-            ylabel = f"虚部（{quantity_label}）"
-            title = (
-                f"反馈演化 - {quantity_label} 复平面轨迹\n"
                 f"（周期数: {num_cycles}，频率: {self._frequency:.1f} Hz）"
             )
 

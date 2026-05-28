@@ -14,6 +14,7 @@ from .basic_sine import (
 from .calib_util_funcs import (
     comp_waveform,
     load_data_with_fallback,
+    load_freq_optimizer_result,
 )
 from .filter import (
     detrend_waveform,
@@ -88,4 +89,5 @@ __all__ = [
     "save_compressed_data",
     "comp_waveform",
     "load_data_with_fallback",
+    "load_freq_optimizer_result",
 ]

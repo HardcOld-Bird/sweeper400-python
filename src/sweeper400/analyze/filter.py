@@ -201,7 +201,7 @@ def filter_sweep_data(
     highcut: PositiveFloat = 20000.0,
     filter_order: PositiveInt = 4,
     trim_samples: int = 0,
-    use_continuous_filtering: bool = True,
+    use_continuous_filtering: bool = False,
 ) -> SweepData:
     """
     对SweepData中的所有波形进行滤波
@@ -217,9 +217,9 @@ def filter_sweep_data(
         filter_order: 高通滤波器阶数，默认为4
         trim_samples: 滤波后切除波形开头的采样点数量，用于消除边缘效应，默认为0
             （一般来说，去趋势+单向滤波方案的边缘效应并不显著，无需切除）
-        use_continuous_filtering: 是否使用连续滤波模式，默认为True
-            - True: 在所有波形间传递滤波器状态(zi)，保持滤波连续性
+        use_continuous_filtering: 是否使用连续滤波模式，默认为False
             - False: 每个波形独立滤波（传统模式）
+            - True: 在所有波形间传递滤波器状态(zi)，保持滤波连续性
 
     Returns:
         滤波后的SweepData，结构与输入完全相同，但所有波形已被滤波

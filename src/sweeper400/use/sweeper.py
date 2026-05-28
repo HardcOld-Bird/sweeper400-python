@@ -23,18 +23,19 @@ from ..analyze import (
     PositiveFloat,
     PositiveInt,
     SweepData,
-    Waveform,
     TFData,
+    Waveform,
     get_sine,
     init_sampling_info,
     load_compressed_data,
-    save_compressed_data,
+    load_freq_optimizer_result,
     plot_point_tf_data_list,
+    save_compressed_data,
     sweep_data_to_point_tf_data_list,
 )
+from ..logger import get_logger
 from ..measure import SingleChasCSIO
 from ..move import MotorController
-from ..logger import get_logger
 
 # 获取模块日志器
 logger = get_logger(__name__)
@@ -343,17 +344,31 @@ class SweeperCore:
 
         # 处理输出波形为None的情况
         if static_output_waveform is None:
-            # 创建默认波形
-            sampling_info = init_sampling_info(10000.0, 5000)
+            # 尝试从 FrequencyOptimizer 存储结果加载频率和采样信息
+            freq_result = load_freq_optimizer_result()
+            if freq_result is not None:
+                sampling_info = freq_result["sampling_info"]
+                frequency = freq_result["frequency"]
+                logger.info(
+                    f"未提供输出波形，从频率优化结果加载: "
+                    f"frequency={frequency:.2f}Hz, "
+                    f"sampling_rate={sampling_info['sampling_rate']:.1f}Hz"
+                )
+            else:
+                # 回退到硬编码默认值
+                sampling_info = init_sampling_info(10000.0, 5000)
+                frequency = 1000.0
+                logger.debug(
+                    "未提供输出波形且无频率优化结果，"
+                    "创建默认波形：1000Hz正弦波，幅值0.0，采样率10kHz"
+                )
+
             static_output_waveform = get_sine(
                 sampling_info=sampling_info,
-                frequency=1000.0,
+                frequency=frequency,
                 channel_names=("default_ao",),
                 channel_complex_amplitudes=np.array([0.0 + 0j]),
                 full_cycle=True,
-            )
-            logger.debug(
-                "未提供输出波形，创建默认波形：1000Hz正弦波，幅值0.0，采样率10kHz"
             )
         # 类型断言，静态输出波形不可能为None
         assert static_output_waveform is not None
@@ -671,17 +686,31 @@ class SweeperCore:
 
         # 处理输出波形为None的情况
         if static_output_waveform is None:
-            # 创建默认波形
-            sampling_info = init_sampling_info(10000.0, 5000)
+            # 尝试从 FrequencyOptimizer 存储结果加载频率和采样信息
+            freq_result = load_freq_optimizer_result()
+            if freq_result is not None:
+                sampling_info = freq_result["sampling_info"]
+                frequency = freq_result["frequency"]
+                logger.info(
+                    f"未提供输出波形，从频率优化结果加载: "
+                    f"frequency={frequency:.2f}Hz, "
+                    f"sampling_rate={sampling_info['sampling_rate']:.1f}Hz"
+                )
+            else:
+                # 回退到硬编码默认值
+                sampling_info = init_sampling_info(10000.0, 5000)
+                frequency = 1000.0
+                logger.debug(
+                    "未提供输出波形且无频率优化结果，"
+                    "创建默认波形：1000Hz正弦波，幅值0.01，采样率10kHz"
+                )
+
             static_output_waveform = get_sine(
                 sampling_info=sampling_info,
-                frequency=1000.0,
+                frequency=frequency,
                 channel_names=("default_ao",),
                 channel_complex_amplitudes=np.array([0.01 + 0j]),
                 full_cycle=True,
-            )
-            logger.debug(
-                "未提供输出波形，创建默认波形：1000Hz正弦波，幅值0.01，采样率10kHz"
             )
         # 类型断言，静态输出波形不可能为None
         assert static_output_waveform is not None
