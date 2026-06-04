@@ -36,5 +36,5 @@ fo.optimize(
 #     result_folder="D:\\EveryoneDownloaded\\freq_calib_test_phs",
 # )
 
-# %% 执行最终测试，结果存储在项目storage目录下
+# %% 执行最终测量，结果存储在项目storage目录下
 fo.optimize()

@@ -201,14 +201,18 @@ def filter_sweep_data(
     highcut: PositiveFloat = 20000.0,
     filter_order: PositiveInt = 4,
     trim_samples: int = 0,
-    use_continuous_filtering: bool = False,
 ) -> SweepData:
     """
     对SweepData中的所有波形进行滤波
 
     该函数对SweepData中的所有AI波形进行去趋势、应用带通（单向）滤波、并按需裁剪信号头。
     滤波器只设计一次，然后复用到所有波形上，提高处理效率。
-    支持连续滤波模式，通过传递滤波器状态(zi)在不同波形间保持滤波连续性，减少边缘效应。
+
+    滤波策略：
+        - 在每个PointSweepData内部，ai_data列表中的多个波形chunk之间复用滤波器
+          状态(zi)，保持滤波连续性（因为这些chunk通常是连续采集的）。
+        - 在不同PointSweepData之间，重置滤波器状态(zi)为零（因为不同测量点的
+          波形来自不同空间位置，数据本身不连续）。
 
     Args:
         sweep_data: 原始的扫场测量数据
@@ -217,9 +221,6 @@ def filter_sweep_data(
         filter_order: 高通滤波器阶数，默认为4
         trim_samples: 滤波后切除波形开头的采样点数量，用于消除边缘效应，默认为0
             （一般来说，去趋势+单向滤波方案的边缘效应并不显著，无需切除）
-        use_continuous_filtering: 是否使用连续滤波模式，默认为False
-            - False: 每个波形独立滤波（传统模式）
-            - True: 在所有波形间传递滤波器状态(zi)，保持滤波连续性
 
     Returns:
         滤波后的SweepData，结构与输入完全相同，但所有波形已被滤波
@@ -233,9 +234,9 @@ def filter_sweep_data(
         >>> from use import SweeperCore
         >>> sweeper = SweeperCore()
         >>> raw_data = sweeper.export_data()
-        >>> # 应用高通滤波器（默认10Hz截止频率）
+        >>> # 应用带通滤波器（默认100Hz-20000Hz通带）
         >>> filtered_data = filter_sweep_data(raw_data)
-        >>> # 或自定义滤波器参数并切除开头100个采样点
+        >>> # 或自定义滤波器参数并切除开头500个采样点
         >>> filtered_data = filter_sweep_data(  # noqa
         ...     raw_data,
         ...     lowcut=1000.0,
@@ -249,8 +250,8 @@ def filter_sweep_data(
 
     Notes:
         - 滤波器在所有波形间复用，避免重复设计的计算开销
-        - 连续滤波模式通过传递zi状态，将多个波形视为一个连续信号进行滤波
-        - 这可以显著减少波形间的边缘效应，提高滤波稳定性
+        - 同一测量点内的多个波形chunk之间传递zi状态，减少边缘效应
+        - 不同测量点之间重置zi状态，避免不连续数据间的状态残留污染
         - 滤波后的数据结构与原始数据完全相同，可直接用于后续处理
         - trim_samples参数用于消除滤波器的边缘效应，当为0时不进行切除
     """
@@ -264,8 +265,7 @@ def filter_sweep_data(
         f"开始对SweepData应用带通滤波器: "
         f"通带下限={lowcut}Hz, 通带上限={highcut}Hz, "
         f"阶数={filter_order}, "
-        f"切除采样点数={trim_samples}, "
-        f"连续滤波模式={use_continuous_filtering}"
+        f"切除采样点数={trim_samples}"
     )
 
     # 获取采样率（使用第一个有效波形的采样率）
@@ -287,13 +287,10 @@ def filter_sweep_data(
     filtered_ai_data_list: list[PointSweepData] = []
     processed_count = 0
 
-    # 初始化滤波器状态（用于连续滤波模式）
+    # 获取通道数（用于初始化zi）
     # Waveform统一使用2D格式 (n_channels, n_samples)
     first_waveform = ai_data_list[0]["ai_data"][0]
     n_channels = first_waveform.channels_num  # 使用属性获取通道数
-    zi: NDArray[np.float64] = np.zeros((n_sections, n_channels, 2), dtype=np.float64)
-
-    f_logger.debug(f"初始化滤波器状态zi，形状: {zi.shape}")
 
     for point_idx, point_data in enumerate(ai_data_list):
         position = point_data["position"]
@@ -304,24 +301,23 @@ def filter_sweep_data(
             f"共{len(ai_waveforms)}个波形"
         )
 
-        # 对该点的所有AI波形应用滤波器
+        # 每个测量点重置滤波器状态（不同空间位置的波形不连续）
+        zi: NDArray[np.float64] = np.zeros(
+            (n_sections, n_channels, 2), dtype=np.float64
+        )
+
+        # 对该点的所有AI波形应用滤波器（点内chunk间复用zi）
         filtered_ai_waveforms: list[Waveform] = []
         for waveform_idx, waveform in enumerate(ai_waveforms):
             # 去趋势处理
             detrended_wf = detrend_waveform(waveform)
 
-            # 滤波处理（使用连续滤波模式或传统模式）
-            if use_continuous_filtering:
-                # 连续滤波模式：传递zi并接收新的zf
-                filtered_wf, zf = filter_waveform(detrended_wf, sos, zi=zi)
-                zi = zf  # 更新状态供下一个波形使用
-                f_logger.debug(
-                    f"  波形 {waveform_idx}: 使用连续滤波，传递zi状态"
-                )
-            else:
-                # 传统模式：每个波形独立滤波
-                filtered_wf= filter_waveform(detrended_wf, sos)
-                f_logger.debug(f"  波形 {waveform_idx}: 独立滤波")
+            # 有状态滤波：在同一测量点的chunk间传递zi
+            filtered_wf, zf = filter_waveform(detrended_wf, sos, zi=zi)
+            zi = zf  # 更新状态供该点的下一个chunk使用
+            f_logger.debug(
+                f"  波形 {waveform_idx}: 点内连续滤波，传递zi状态"
+            )
 
             # 如果需要切除开头的采样点
             if trim_samples > 0:

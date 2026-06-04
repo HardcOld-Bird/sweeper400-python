@@ -50,6 +50,7 @@ from .post_process import (
     average_tf_data_list,
     comp_to_tf,
     load_compressed_data,
+    pick_waveform_channels,
     save_compressed_data,
     tf_to_comp,
 )
@@ -86,6 +87,7 @@ __all__ = [
     "subtract_point_tf_data_list",
     "PointTFData",
     "load_compressed_data",
+    "pick_waveform_channels",
     "save_compressed_data",
     "comp_waveform",
     "load_data_with_fallback",

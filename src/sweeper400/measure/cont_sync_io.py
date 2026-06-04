@@ -30,6 +30,7 @@ from ..analyze import (
     Waveform,
     load_data_with_fallback,
     comp_waveform,
+    pick_waveform_channels,
 )
 from ..logger import get_logger
 
@@ -402,10 +403,14 @@ class SingleChasCSIO:
 
         # 情况2：多通道输入，检查通道数匹配
         elif waveform.channels_num == channels_num:
-            multi_ch_waveform = waveform
-            # 更新channel_names以匹配目标通道
+            # 使用 pick_waveform_channels 统一处理通道匹配/重排/报错逻辑
+            multi_ch_waveform = pick_waveform_channels(waveform, channel_names)
             if waveform.channel_names != channel_names:
-                multi_ch_waveform.channel_names = channel_names
+                logger.warning(
+                    f"静态输出波形的channel_names顺序不匹配"
+                    f"（原始: {waveform.channel_names}，目标: {channel_names}），"
+                    f"已按目标顺序重新组装波形"
+                )
 
         # 情况3：通道数不匹配
         else:

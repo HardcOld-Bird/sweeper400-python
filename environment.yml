@@ -8,15 +8,16 @@ channels:
   - defaults
 
 dependencies:
-  - python=3.12.12
+  - python=3.12.13
   - pip
   - nidaqmx-python
   - numpy
   - scipy
   - scipy-stubs
   - matplotlib
+  - sympy
+  - pyvista
   - pandas
-  - pandas-stubs
   - pydantic
   - ruff
   - pre-commit
@@ -25,4 +26,5 @@ dependencies:
   - commitizen
 
   - pip:
+    - mph
     - -e ./src

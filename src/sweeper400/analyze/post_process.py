@@ -19,10 +19,10 @@ from ..logger import get_logger
 from .my_dtypes import (
     CompData,
     PointSweepData,
+    PositiveInt,
     SweepData,
     TFData,
     Waveform,
-    PositiveInt,
 )
 
 # 获取模块日志器
@@ -114,6 +114,75 @@ def load_compressed_data(file_path: str | Path, data_type_name: str = "数据") 
     except Exception as e:
         f_logger.error(f"{data_type_name}加载失败: {e}", exc_info=True)
         raise OSError(f"无法从 {file_path} 加载{data_type_name}: {e}") from e
+
+
+def pick_waveform_channels(
+    waveform: Waveform,
+    picked_channels: tuple[str, ...],
+) -> Waveform:
+    """
+    从 Waveform 中按指定通道列表筛选并重排通道。
+
+    根据 `picked_channels` 中给定的通道名称和顺序，从输入波形中提取
+    对应通道的数据，忽略未出现在 `picked_channels` 中的多余通道，
+    并在 `picked_channels` 中包含输入波形不存在的通道时抛出错误。
+
+    如果 `waveform.channel_names` 已与 `picked_channels` 完全一致
+    （顺序和内容都相同），则直接返回原始波形，不做额外拷贝。
+
+    Args:
+        waveform: 输入的多通道波形对象。
+        picked_channels: 需要保留的通道名称元组，按此顺序排列输出。
+
+    Returns:
+        仅包含 `picked_channels` 中指定通道的 Waveform 对象，
+        通道顺序与 `picked_channels` 一致。
+
+    Raises:
+        ValueError: 当 `picked_channels` 中包含输入波形不存在的通道名时。
+    """
+    # 快速路径：完全匹配时直接返回
+    if waveform.channel_names == picked_channels:
+        return waveform
+
+    available_names = waveform.channel_names
+
+    # 检查是否存在缺失通道
+    missing = [ch for ch in picked_channels if ch not in available_names]
+    if missing:
+        raise ValueError(
+            f"picked_channels 中包含原始波形不存在的通道: {missing}。"
+            f"原始波形可用通道: {list(available_names)}"
+        )
+
+    # 按 picked_channels 的顺序提取对应通道的索引
+    indices = [available_names.index(ch) for ch in picked_channels]
+
+    # 提取通道数据子集，shape = (len(picked_channels), n_samples)
+    picked_data = np.asarray(waveform)[indices, :]
+
+    # 提取对应的 channel_complex_amplitudes 子集（如果存在）
+    picked_cca: np.ndarray | None = None
+    if waveform.channel_complex_amplitudes is not None:
+        picked_cca = waveform.channel_complex_amplitudes[indices]
+
+    # 构建新的 Waveform
+    result = Waveform(
+        input_array=picked_data,
+        sampling_rate=waveform.sampling_rate,
+        channel_names=picked_channels,
+        timestamp=waveform.timestamp,
+        waveform_id=waveform.waveform_id,
+        frequency=waveform.frequency,
+        channel_complex_amplitudes=picked_cca,
+    )
+
+    logger.debug(
+        f"pick_waveform_channels: {waveform.channel_names} -> {picked_channels}, "
+        f"shape: {waveform.shape} -> {result.shape}"
+    )
+
+    return result
 
 
 def average_single_waveform(

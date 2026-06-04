@@ -1,7 +1,7 @@
 """
 # 多通道校准模块
 
-模块路径：`sweeper400.calib.caliber`
+模块路径：`sweeper400.calib.clb`
 
 包含用于多通道输出情形下各通道响应函数校准的类和函数。
 """
@@ -37,6 +37,7 @@ from ..analyze import (
     load_freq_optimizer_result,
     save_compressed_data,
     tf_to_comp,
+    plot_sweep_data_as_single_waveform,
 )
 from ..logger import get_logger
 from ..measure import SingleChasCSIO
@@ -85,14 +86,14 @@ class CaliberAnemone:
 
     ## 使用示例：
     ```python
-    from sweeper400.use.caliber import CaliberAnemone
+    from sweeper400.use.clb import CaliberAnemone
     from sweeper400.analyze import init_sampling_info
 
     # 创建采样信息
     sampling_info = init_sampling_info(171500.0, 85750)  # 采样率171.5kHz, 0.5秒
 
     # 创建校准对象
-    caliber = CaliberAnemone(
+    clb = CaliberAnemone(
         ai_channels=(
             "PXI1Slot2/ai0", "PXI1Slot2/ai1",
             "PXI1Slot3/ai0", "PXI1Slot3/ai1",
@@ -104,17 +105,17 @@ class CaliberAnemone:
     )
 
     # 执行校准（采集3个chunk）
-    caliber.calibrate(chunks_num=3)
+    clb.calibrate(chunks_num=3)
 
     # 校准结果会自动保存到默认路径
     # 也可以手动保存到指定路径
-    caliber.save_comp_data("calibration_results.pkl")
+    clb.save_comp_data("calibration_results.pkl")
 
     # 绘制极坐标图
-    caliber.plot_comp_data(mode="polar")
+    clb.plot_comp_data(mode="polar")
 
     # 绘制直角坐标图
-    caliber.plot_comp_data(mode="cartesian")
+    clb.plot_comp_data(mode="cartesian")
     ```
 
     ## 注意事项：
@@ -873,14 +874,14 @@ class CaliberOctopus:
 
     ## 使用示例：
     ```python
-    from sweeper400.use.caliber import CaliberOctopus
+    from sweeper400.use.clb import CaliberOctopus
     from sweeper400.analyze import init_sampling_info
 
     # 创建采样信息
     sampling_info = init_sampling_info(171500.0, 85750)  # 采样率171.5kHz, 0.5秒
 
     # 创建校准对象
-    caliber = CaliberOctopus(
+    clb = CaliberOctopus(
         ai_channels=("PXI1Slot2/ai0",),
         ao_channels=(
             "PXI2Slot2/ao0", "PXI2Slot2/ao1",
@@ -895,14 +896,14 @@ class CaliberOctopus:
 
     # 执行校准（10次独立校准，每次4个chunk）
     # 可选：指定settle_time参数来覆盖默认值
-    caliber.calibrate(starts_num=10, chunks_per_start=4)
+    clb.calibrate(starts_num=10, chunks_per_start=4)
 
     # 校准结果会自动保存到默认路径
     # 也可以手动保存到指定路径
-    caliber.save_comp_data("calibration_results.pkl")
+    clb.save_comp_data("calibration_results.pkl")
 
     # 绘制极坐标图
-    caliber.plot_comp_data(mode="polar")
+    clb.plot_comp_data(mode="polar")
 
     # 校准验证：使用已有补偿数据进行二次校准
     caliber_verify = CaliberOctopus(
@@ -1528,6 +1529,7 @@ class CaliberOctopus:
                     averaged_data,
                     lowcut=lowcut,
                     highcut=highcut,
+                    trim_samples=300,  # 约6个周期
                 )
             else:
                 filtered_data = averaged_data
@@ -1538,12 +1540,10 @@ class CaliberOctopus:
             fusion_plot_path = result_path / fusion_plot_filename
 
             try:
-                from ..analyze.plot import plot_sweep_data_as_single_waveform
-
                 fig, _ = plot_sweep_data_as_single_waveform(
                     sweep_data=filtered_data,
                     save_path=str(fusion_plot_path),
-                    zoom_factor=200,
+                    zoom_factor=50,
                 )
                 # 关闭图形以释放内存
                 import matplotlib.pyplot as plt
@@ -2084,14 +2084,14 @@ class CaliberFishNet(CaliberOctopus):
 
     ## 使用示例：
     ```python
-    from sweeper400.use.caliber import CaliberFishNet
+    from sweeper400.use.clb import CaliberFishNet
     from sweeper400.analyze import init_sampling_info
 
     # 创建采样信息
     sampling_info = init_sampling_info(171500.0, 85750)  # 采样率171.5kHz, 0.5秒
 
     # 创建校准对象
-    caliber = CaliberFishNet(
+    clb = CaliberFishNet(
         ai_channels=(
             "PXI1Slot2/ai0", "PXI2Slot2/ai0", "PXI2Slot2/ai1",
             "PXI2Slot3/ai0", "PXI2Slot3/ai1", "PXI3Slot2/ai0",
@@ -2109,14 +2109,14 @@ class CaliberFishNet(CaliberOctopus):
     )
 
     # 执行校准（10次独立校准，每次4个chunk）
-    caliber.calibrate(starts_num=10, chunks_per_start=4)
+    clb.calibrate(starts_num=10, chunks_per_start=4)
 
     # 校准结果会自动保存到默认路径
     # 也可以手动保存到指定路径
-    caliber.save_tf_data("calibration_results.pkl")
+    clb.save_tf_data("calibration_results.pkl")
 
     # 绘制传递函数图
-    caliber.plot_comp_data()
+    clb.plot_comp_data()
     ```
 
     ## 注意事项：
@@ -2451,11 +2451,35 @@ class CaliberFishNet(CaliberOctopus):
                     averaged_data,
                     lowcut=lowcut,
                     highcut=highcut,
+                    trim_samples=300,  # 约6个周期
                 )
             else:
                 filtered_data = averaged_data
 
-            # 3. 使用 _calculate_tf_data 计算传递函数（已返回TFData）
+            # 3. 绘制滤波后数据的融合画像
+            logger.info("绘制滤波后数据的融合画像")
+            fusion_plot_filename = f"fusion_waveform_{calib_idx + 1}.png"
+            fusion_plot_path = result_path / fusion_plot_filename
+
+            try:
+                fig, _ = plot_sweep_data_as_single_waveform(
+                    sweep_data=filtered_data,
+                    save_path=str(fusion_plot_path),
+                    zoom_factor=50,
+                )
+                # 关闭图形以释放内存
+                import matplotlib.pyplot as plt
+                plt.close(fig)
+
+                logger.info(f"融合画像已保存到: {fusion_plot_path}")
+            except Exception as e:
+                logger.error(
+                    f"绘制第 {calib_idx + 1} 次校准的融合画像时发生错误: {e}",
+                    exc_info=True,
+                )
+                # 继续处理，不中断整个校准流程
+
+            # 4. 使用 _calculate_tf_data 计算传递函数（已返回TFData）
             tf_data = self._calculate_tf_data(filtered_data)
             all_tf_data_list.append(tf_data)
 
@@ -3055,7 +3079,7 @@ class FrequencyOptimizer:
 
     def optimize(
         self,
-        mode: Literal["phase", "amplitude"] = "amplitude",
+        mode: Literal["amplitude", "phase"] = "amplitude",
         initial_freq: float = 3430.0,
         second_freq: float = 3420.0,
         max_iterations: int = 10,
@@ -3078,7 +3102,7 @@ class FrequencyOptimizer:
           逼近极大值。适用于有限周期的实际超表面。
 
         Args:
-            mode: 优化模式，"phase" 或 "amplitude"，默认 "amplitude"
+            mode: 优化模式，"amplitude" 或 "phase"，默认 "amplitude"
             initial_freq: 初始测量频率（Hz），默认3430.0
             second_freq: 第二个测量频率（Hz），默认3440.0
             max_iterations: 最大迭代次数，默认10
@@ -3103,9 +3127,9 @@ class FrequencyOptimizer:
             RuntimeError: 当优化未能收敛时
         """
         # 验证 mode 参数
-        if mode not in ("phase", "amplitude"):
+        if mode not in ("amplitude", "phase"):
             raise ValueError(
-                f"mode 必须为 'phase' 或 'amplitude'，收到: '{mode}'"
+                f"mode 必须为 'amplitude' 或 'phase'，收到: '{mode}'"
             )
 
         self._optimization_mode = mode
@@ -3832,7 +3856,7 @@ class PowerTester:
 
     ## 使用示例：
     ```python
-    from sweeper400.use.caliber import PowerTester
+    from sweeper400.use.clb import PowerTester
 
     # 创建功率测试对象
     tester = PowerTester(

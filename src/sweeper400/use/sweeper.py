@@ -364,8 +364,8 @@ class SweeperCore:
                 )
 
             static_output_waveform = get_sine(
-                sampling_info=sampling_info,
-                frequency=frequency,
+                sampling_info=sampling_info,  # noqa
+                frequency=frequency,  # noqa
                 channel_names=("default_ao",),
                 channel_complex_amplitudes=np.array([0.0 + 0j]),
                 full_cycle=True,

@@ -30,6 +30,7 @@ from ..analyze import (
     get_sine,
     load_compressed_data,
     load_data_with_fallback,
+    pick_waveform_channels,
     save_compressed_data,
 )
 from ..logger import get_logger
@@ -765,12 +766,12 @@ class Evolver:
                 result_folder_path = Path(result_folder)
                 result_folder_path.mkdir(parents=True, exist_ok=True)
                 self.plot_evolution(
-                    save_path=result_folder_path / f"ai_{cycles_num}steps.png",
+                    save_path=result_folder_path / f"sim_ai_{cycles_num}steps.png",
                     target="ai",
                     mode="absolute",
                 )
                 self.plot_evolution(
-                    save_path=result_folder_path / f"ao_{cycles_num}steps.png",
+                    save_path=result_folder_path / f"sim_ao_{cycles_num}steps.png",
                     target="ao",
                     mode="absolute",
                 )
@@ -1142,20 +1143,20 @@ class Evolver:
 
                     # 演化轨迹图（同时绘制两种模式下 AI 总声场轨迹与反馈 AO 轨迹）
                     self.plot_evolution(
-                        save_path=result_folder_path / "evolution_ai.png",
+                        save_path=result_folder_path / f"evo_ai_{cycles_num}steps.png",
                         target="ai",
                     )
                     self.plot_evolution(
-                        save_path=result_folder_path / "evolution_ao.png",
+                        save_path=result_folder_path / f"evo_ao_{cycles_num}steps.png",
                         target="ao",
                     )
                     self.plot_evolution(
-                        save_path=result_folder_path / "evolution_diff_ai.png",
+                        save_path=result_folder_path / f"evo_ai(diff)_{cycles_num}steps.png",
                         target="ai",
                         mode="diff",
                     )
                     self.plot_evolution(
-                        save_path=result_folder_path / "evolution_diff_ao.png",
+                        save_path=result_folder_path / f"evo_ao(diff)_{cycles_num}steps.png",
                         target="ao",
                         mode="diff",
                     )
@@ -1416,6 +1417,7 @@ class Evolver:
 def load_evolved_waveform(
     file_path: str | Path,
     segments: PositiveInt | None = None,
+    picked_channels: tuple[str, ...] | None = None,
 ) -> Waveform:
     """
     从文件加载演化最终波形。
@@ -1432,18 +1434,25 @@ def load_evolved_waveform(
             波形调用 `average_single_waveform` 进行分段平均，使时长缩短为
             原来的 1 / segments。要求采样点数能被 segments 整除。
             默认 None（不压缩）。
+        picked_channels: 需要保留的通道名称元组。若不为 None，则仅保留指定的
+            通道（按 `picked_channels` 中的顺序排列），丢弃其余通道。若
+            `picked_channels` 中包含原始波形不存在的通道名，则抛出 ValueError。
+            默认 None（保留所有通道）。
 
     Returns:
-        多通道 Waveform 对象，包含 static + feedback 通道的合并信号。
+        多通道 Waveform 对象，包含 static + feedback 通道的合并信号
+        （若指定了 picked_channels 则仅包含所选通道）。
 
     Raises:
         FileNotFoundError: 当文件不存在时。
         IOError: 当文件读取失败时。
-        ValueError: 当加载的数据不是有效的 Waveform，或 segments 不能整除采样点数时。
+        ValueError: 当加载的数据不是有效的 Waveform，或 segments 不能整除采样点数时，
+            或 picked_channels 中包含原始波形不存在的通道名时。
     """
     f_logger = get_logger(f"{__name__}.load_evolved_waveform")
 
     file_path = Path(file_path)
+    assert isinstance(file_path, Path)
     if not file_path.exists():
         raise FileNotFoundError(f"演化波形文件不存在: {file_path}")
 
@@ -1460,6 +1469,7 @@ def load_evolved_waveform(
         f"frequency={loaded_data.frequency}"
     )
 
+    # ---- 分段平均 ----
     if segments is not None:
         try:
             loaded_data = average_single_waveform(loaded_data, segments=segments)
@@ -1471,5 +1481,13 @@ def load_evolved_waveform(
         except Exception as e:
             f_logger.error(f"分段平均压缩失败: {e}", exc_info=True)
             raise
+
+    # ---- 通道筛选 ----
+    if picked_channels is not None:
+        loaded_data = pick_waveform_channels(loaded_data, picked_channels)
+        f_logger.info(
+            f"已筛选通道: picked_channels={picked_channels}, "
+            f"筛选后 shape={loaded_data.shape}"
+        )
 
     return loaded_data
