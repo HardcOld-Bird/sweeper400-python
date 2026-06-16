@@ -6,8 +6,9 @@
 本模块定义了sweeper400项目中特有的自定义**数据类型和容器**。
 主要包含用于管理时域波形数据的Waveform类。
 """
-# 允许类型前向引用（也即"Waveform"可以写为Waveform）
+# 允许类型前向引用（也即“Waveform”可以写为Waveform）
 from __future__ import annotations
+
 from typing import Annotated, Any, NamedTuple, TypedDict, TypeGuard
 
 import numpy as np

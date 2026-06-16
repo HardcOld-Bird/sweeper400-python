@@ -14,7 +14,7 @@ import mph
 import numpy as np
 
 # 导入并应用项目的中文字体配置
-from config.matplotlib_config import setup_chinese_fonts
+from config import setup_chinese_fonts
 
 setup_chinese_fonts()
 

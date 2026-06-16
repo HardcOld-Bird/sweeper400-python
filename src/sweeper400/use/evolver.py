@@ -46,39 +46,40 @@ class Evolver:
 
     基于 SingleChasCSIO 的离散式反馈演化控制器。
     与扫场不同，Evolver 不控制步进电机进行空间移动，而是专注于通过多通道反馈控制，
-    让各 AI 通道的总声场按照指定的"增益系数"演化收敛至理论稳态。
+    让各 AI 通道的总声场按照从 SimScanner 扫描结果中选取的"增益系数"演化收敛至理论稳态。
 
     ## 工作原理
 
-    用户指定一组"增益系数"（每个反馈 AO 通道一个复数）和一组初始静态激励波形。
+    增益系数不再由用户手动指定，而是由 ``simulate()`` 方法从 SimScanner 生成的
+    参数扫描结果（``scan_result.npz``）中，根据 (cr, ci) 和 mode 自动选取。
     演化器内部将 static + feedback 通道合并成一个统一的稳态输出，并以
     "稳态测量 → 离线计算 → 整体更换 → 再次等待稳态"的循环执行：
 
     1. 对最新一段 AI 数据进行去趋势 + 带通滤波；
-    2. 用 `extract_single_tone_information_vvi` 估计 AI 各通道的"总声场复振幅"；
+    2. 用 ``extract_single_tone_information_vvi`` 估计 AI 各通道的"总声场复振幅"；
     3. 利用预先存储的传递矩阵对角元，从总声场中扣除"自身反馈通道贡献"，
        得到"入射声场复振幅"；
     4. 依据增益系数计算目标总声场，进而得到"全步长"反馈 AO 更新量 Δa；
-       再按**自适应松弛因子 α*** 缩放（`a_new = a_old + α* · Δa`），避免
+       再按**自适应松弛因子 α*** 缩放（``a_new = a_old + α* · Δa``），避免
        谱半径过大时的发散；
-    5. 幅值安全检查（默认 0.1 V 上限）；
+    5. 幅值安全检查（默认 0.5 V 上限）；
     6. 整体重建 static + feedback 合并波形并通过
-       `SingleChasCSIO.update_static_output_waveform` 更换；
-    7. 阻塞等待 `settle_time`，确保新稳态形成后再开始下一轮。
+       ``SingleChasCSIO.update_static_output_waveform`` 更换；
+    7. 阻塞等待 ``settle_time``，确保新稳态形成后再开始下一轮。
 
     ## 收敛性与自适应松弛因子
 
-    一旦 TFData 与 `gain_coefficients` 给定，反馈迭代算子
-    `A = (I - G)(I - D^{-1} M^T)` 就完全确定（M=tf_feedback, D=diag(tf_diag),
-    G=diag(gain)）。因此 `__init__` 阶段会：
+    一旦 TFData 与 ``gain_coefficients`` 给定，反馈迭代算子
+    ``A = (I - G)(I - D^{-1} M^T)`` 就完全确定（M=tf_feedback, D=diag(tf_diag),
+    G=diag(gain)）。``simulate()`` 阶段会：
 
-    - 计算 A 的全部特征值和谱半径 ρ(A) → 存为 `_iteration_eigenvalues`
-      与 `_spectral_radius_unrelaxed`；
-    - 在 α∈(0, 1] 上扫描，挑选使 `ρ((1-α)I + α A)` 最小的 α*，并将其
-      存为 `_relaxation_factor`，对应谱半径存为 `_spectral_radius_relaxed`；
+    - 计算 A 的全部特征值和谱半径 ρ(A) → 存为 ``_iteration_eigenvalues``
+      与 ``_spectral_radius_unrelaxed``；
+    - 在 α∈(0, 1] 上扫描，挑选使 ``ρ((1-α)I + α A)`` 最小的 α*，并将其
+      存为 ``_relaxation_factor``，对应谱半径存为 ``_spectral_radius_relaxed``；
     - 通过日志直观告知用户系统能否收敛、衰减率多少。
 
-    后续 `_feedback_method` 与 `simulate(mode='analytical')` 都会自动使用 α*。
+    后续 ``_feedback_method`` 与 ``evolve()`` 都会自动使用 α*。
 
     ## 使用方式
 
@@ -93,17 +94,23 @@ class Evolver:
         sampling_info, 3430.0, ("PXI1Slot2/ao0",), cca, full_cycle=True
     )
 
-    gain_coefficients = (1.5 + 0.0j,) * 8
-
     evolver = Evolver(
         ai_channels=("PXI1Slot3/ai0", ...),                # 8 个
         ao_channels_static=("PXI1Slot2/ao0",),
         ao_channels_feedback=("PXI1Slot3/ao0", ...),       # 8 个
         static_output_waveform=static_wf,
-        gain_coefficients=gain_coefficients,
-        # fishnet_tf_data_path=...                              # 可选，默认走 fallback
+        # sim_result_scan_path=...                              # 可选，默认走 storage/sim/sim_result_scan
     )
 
+    # 先调用 simulate 选取增益系数并计算理论解
+    evolver.simulate(
+        cr=1.006, ci=-0.073,
+        mode="eight_probes",     # 或 "floquet_probes"
+        pick_max=False,          # 或 True
+        result_folder="output/sim_result",
+    )
+
+    # 然后调用 evolve 执行硬件演化
     final_wf = evolver.evolve(
         cycles_num=10,
         result_folder="output/evolution_result",
@@ -112,18 +119,27 @@ class Evolver:
 
     ## 注意事项
 
-    - `static_output_waveform` 时长建议较长（>= 0.5 s），以便 update_static_output_waveform
+    - ``static_output_waveform`` 时长建议较长（>= 0.5 s），以便 update_static_output_waveform
       生效后能尽快进入稳态。
-    - `gain_coefficients` 长度必须与 `ao_channels_feedback` 和 `ai_channels` 一致
-      （每个反馈 AO 通道对应一个 AI 通道）。
-    - 演化过程中若任意通道的 AO 幅值超过 `ao_amplitude_limit`，将立即终止。
-    - 演化数据储存在 `_evolution_data`（`SweepData` 格式）中，x 坐标为周期序号（从 1 开始）。
-    - `evolve()` 返回的最终合并 Waveform 可直接作为 `SweeperCore` 的
-      `static_output_waveform` 使用，从而无需反馈逻辑即可重放出最终稳态。
+    - ``evolve()`` 使用的增益系数来自最后一次 ``simulate()`` 调用所选取的结果。
+    - 演化过程中若任意通道的 AO 幅值超过 ``ao_amplitude_limit``，将立即终止。
+    - 演化数据储存在 ``_evolution_data``（``SweepData`` 格式）中，x 坐标为周期序号（从 1 开始）。
+    - ``evolve()`` 返回的最终合并 Waveform 可直接作为 ``SweeperCore`` 的
+      ``static_output_waveform`` 使用，从而无需反馈逻辑即可重放出最终稳态。
     """
 
     # 类日志器（类属性，所有实例共享）
     logger = get_logger(f"{__name__}.Evolver")
+
+    # =========================================================================
+    #  类常量
+    # =========================================================================
+
+    #: 解析迭代仿真收敛容差（相对误差，0.01%）
+    _ITERATION_TOLERANCE: float = 0.0001
+
+    #: 解析迭代仿真最大迭代次数（超过此值仍不收敛则视为发散）
+    _MAX_ITERATION_CYCLES: int = 10000
 
     # =========================================================================
     #  初始化
@@ -135,8 +151,8 @@ class Evolver:
         ao_channels_static: tuple[str, ...],
         ao_channels_feedback: tuple[str, ...],
         static_output_waveform: Waveform,
-        gain_coefficients: tuple[complex, ...],
         fishnet_tf_data_path: str | Path | None = None,
+        sim_result_scan_path: str | Path | None = None,
         settle_time: PositiveFloat | None = None,
         convergence_threshold: PositiveFloat = 0.95,
     ) -> None:
@@ -150,43 +166,35 @@ class Evolver:
                 会被实时更新。
             static_output_waveform: 静态主激励输出波形。其 `frequency` 与
                 `channel_complex_amplitudes` 将作为系统初始激励参数被反复使用。
-            gain_coefficients: 增益系数元组（每个反馈 AO 通道对应一个复数），
-                长度需与 `ao_channels_feedback` 及 `ai_channels` 相同。
             fishnet_tf_data_path: Fishnet 传递函数数据文件路径（可选）。
                 直接转交给内部 `SingleChasCSIO`；同时 Evolver 自身也会
                 通过 `load_data_with_fallback` 读取该文件，并将
                 `tf_dataframe` 数据部分预先转为复数 ndarray 储存为属性，
                 供反馈数据处理与理论解求解使用。
+            sim_result_scan_path: SimScanner 参数扫描结果目录路径（可选）。
+                默认从 `storage/sim/sim_result_scan` 读取。该目录中应包含
+                `scan_result.npz` 文件，由 `SimScanner.run_scan()` 生成。
+                `simulate()` 方法将从该文件中加载增益系数。
             settle_time: 每次 `update_static_output_waveform` 之后的
                 等待时间（秒）。默认值为 `2 × static_output_waveform.duration + 0.1`，
                 保证旧波形完全退出缓冲区、新波形在再生模式下完全填充。
-            convergence_threshold: 收敛性安全阈值，默认 0.95。初始化阶段会先
+            convergence_threshold: 收敛性安全阈值，默认 0.95。`simulate()` 阶段
                 求出最优松弛因子 α* 及对应的迭代算子谱半径 ρ(A_α*)；若
                 `ρ(A_α*) > convergence_threshold`，即"理论上虽收敛但每周期
-                衰减率不足 (1 - threshold)"，将输出警告，
-                建议（调小 |g_i - 1|、更换 TF 数据等），避免做了一次漫长的
-                硬件演化才发现收敛太慢。设为 1.0 可放宽到"任意理论收敛即可"，
-                但通常不建议——接近 1 的谱半径意味着持续振荡。
+                衰减率不足 (1 - threshold)"，将输出警告。
 
         Raises:
-            ValueError: 当通道/增益数不一致，或缺少必要的复振幅/频率属性时。
+            ValueError: 当通道数不一致，或缺少必要的复振幅/频率属性时。
             RuntimeError: 当 fishnet_tf_data 加载失败、SingleChasCSIO 初始化失败、
-                tf_dataframe 中缺少必要的 AO/AI 通道时；或自适应松弛后的迭代
-                算子谱半径仍超过 `convergence_threshold` 时。
+                tf_dataframe 中缺少必要的 AO/AI 通道时。
         """
         # ---- 参数验证 ----
         n_fb = len(ao_channels_feedback)
         n_ai = len(ai_channels)
-        n_gain = len(gain_coefficients)
 
-        if n_gain != n_fb:
+        if n_fb != n_ai:
             raise ValueError(
-                f"gain_coefficients 长度 ({n_gain}) 必须与 "
-                f"ao_channels_feedback 长度 ({n_fb}) 相同"
-            )
-        if n_gain != n_ai:
-            raise ValueError(
-                f"gain_coefficients 长度 ({n_gain}) 必须与 "
+                f"ao_channels_feedback 长度 ({n_fb}) 必须与 "
                 f"ai_channels 长度 ({n_ai}) 相同"
             )
         if static_output_waveform.frequency is None:
@@ -206,10 +214,6 @@ class Evolver:
         self._ao_channels_feedback: tuple[str, ...] = ao_channels_feedback
         self._ao_channels_combined: tuple[str, ...] = (
             ao_channels_static + ao_channels_feedback
-        )
-
-        self._gain_coefficients: np.ndarray = np.asarray(
-            gain_coefficients, dtype=np.complex128
         )
 
         self._frequency: PositiveFloat = static_output_waveform.frequency
@@ -247,12 +251,27 @@ class Evolver:
             self._tf_diag,
         ) = self._build_tf_matrices(self._fishnet_tf_data["tf_dataframe"])
 
-        # ---- 收敛性分析 + 自适应松弛因子 ----
-        # 一旦 TFData 与增益系数确定，反馈迭代算子就完全确定，
-        # 因此可以提前判断系统能否收敛并选取最优松弛因子 α*。
-        # α* 将在 _feedback_method 的 Step 4 中应用：a_new = a_old + α* · Δa。
+        # ---- SimScanner 扫描结果路径 ----
+        if sim_result_scan_path is None:
+            self._sim_result_scan_path: Path = (
+                Path("storage/sim/sim_result_scan")
+            )
+        else:
+            self._sim_result_scan_path = Path(sim_result_scan_path)
+
+        # ---- 增益系数与收敛分析（延迟到 simulate 阶段） ----
+        # 增益系数由 simulate() 从扫描结果中选取后设置。
+        self._gain_coefficients: np.ndarray | None = None
+        # 松弛因子 α* 和谱半径也在 simulate() 中通过 _analyze_convergence 计算。
         self._convergence_threshold: float = float(convergence_threshold)
-        _, _, self._relaxation_factor, _, = self._analyze_convergence()
+        self._relaxation_factor: float | None = None
+        # 缓存已加载的扫描结果数据（npz 内容），避免重复读取磁盘。
+        self._scan_result_data: np.lib.npyio.NpzFile | None = None
+        # 最近一次 simulate 选取的增益系数（供 plot_gain_coefficients 使用）
+        self._picked_gain_8: np.ndarray | None = None
+        self._picked_floquet_gains_3: np.ndarray | None = None
+        self._picked_cr: float | None = None
+        self._picked_ci: float | None = None
 
         # ---- 反馈滤波器（按频率构建一次） ----
         self._sos = butter(
@@ -333,9 +352,8 @@ class Evolver:
             f"Static AO 通道: {ao_channels_static}, "
             f"Feedback AO 通道: {ao_channels_feedback}, "
             f"频率: {self._frequency:.2f} Hz, "
-            f"增益系数: {gain_coefficients}, "
-            f"稳态等待: {self._wait_time_after_update:.3f} s, "
-            f"松弛因子 α*: {self._relaxation_factor:.4f} "
+            f"扫描结果路径: {self._sim_result_scan_path}, "
+            f"稳态等待: {self._wait_time_after_update:.3f} s"
         )
 
     # =========================================================================
@@ -567,6 +585,136 @@ class Evolver:
 
         return eigenvalues, rho_unrelaxed, best_alpha, rho_relaxed
 
+    # =========================================================================
+    #  参数扫描仿真结果加载与增益系数选取
+    # =========================================================================
+
+    def _load_scan_result(self) -> np.lib.npyio.NpzFile:
+        """
+        加载 SimScanner 的参数扫描结果 npz 文件。
+
+        优先使用缓存（`_scan_result_data`），避免重复读取磁盘。
+
+        Returns:
+            npz 文件对象，包含 cr_values, ci_values, eight_gains, floquet_gains 等数组。
+
+        Raises:
+            FileNotFoundError: 当扫描结果文件不存在时。
+        """
+        if self._scan_result_data is not None:
+            return self._scan_result_data
+
+        npz_path = self._sim_result_scan_path / "scan_result.npz"
+        if not npz_path.exists():
+            raise FileNotFoundError(
+                f"SimScanner 扫描结果文件不存在: {npz_path}\n"
+                "请先运行 SimScanner.run_scan() 生成参数扫描结果，"
+                "或在初始化时指定正确的 sim_result_scan_path。"
+            )
+
+        self._scan_result_data = np.load(npz_path, allow_pickle=False)
+        self.logger.info(
+            f"已加载 SimScanner 扫描结果: {npz_path}, "
+            f"cr_values={self._scan_result_data['cr_values']}, "
+            f"ci_values={self._scan_result_data['ci_values']}"
+        )
+        return self._scan_result_data
+
+    def _pick_gains_from_scan(
+        self,
+        cr: float,
+        ci: float,
+        mode: Literal["eight_probes", "floquet_probes"] = "eight_probes",
+        pick_max: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int, float, float]:
+        """
+        从扫描结果中选取一组 (cr, ci) 参数组合的增益系数。
+
+        ## 选取逻辑
+
+        - `pick_max=False`：选取距离输入 (cr, ci) 最近的参数组合。
+        - `pick_max=True`：
+            - `mode="eight_probes"`：选取"8 个增益系数模长的平均值"最大的一组。
+            - `mode="floquet_probes"`：选取"基于传声器 (point1) 的增益系数模长"最大的一组。
+
+        ## 返回值
+
+        Returns:
+            gain_8: 8 周期模式 8 个增益系数，shape (8,)。
+            floquet_gains_3: Floquet 模式 3 个增益系数 [bnd1, bnd2, point1]，shape (3,)。
+            gain_for_experiment: 用于实验的 8 个增益系数，shape (8,)。
+                - mode="eight_probes" 时与 gain_8 相同；
+                - mode="floquet_probes" 时将 point1 增益复制为 8 个。
+            cr_idx: 选中的 cr 索引。
+            ci_idx: 选中的 ci 索引。
+            picked_cr: 选中的 cr 值。
+            picked_ci: 选中的 ci 值。
+        """
+        data = self._load_scan_result()
+        cr_values = data["cr_values"]
+        ci_values = data["ci_values"]
+        eight_gains = data["eight_gains"]       # (res, res, 8)
+        floquet_gains = data["floquet_gains"]   # (res, res, 3)
+
+        if pick_max:
+            if mode == "eight_probes":
+                # 选取"8 个增益系数模长的平均值"最大的一组
+                metric = np.mean(np.abs(eight_gains), axis=2)  # (res, res)
+            else:  # floquet_probes
+                # 选取"基于传声器 (point1) 的增益系数模长"最大的一组
+                metric = np.abs(floquet_gains[:, :, 2])  # (res, res)
+            flat_idx = int(np.argmax(metric))
+            cr_idx, ci_idx = np.unravel_index(flat_idx, metric.shape)
+            self.logger.info(
+                f"pick_max=True, mode={mode}: "
+                f"选中 cr_idx={cr_idx}, ci_idx={ci_idx}, "
+                f"cr={cr_values[cr_idx]:.6f}, ci={ci_values[ci_idx]:.6f}, "
+                f"metric={metric[cr_idx, ci_idx]:.6f}"
+            )
+        else:
+            # 选取距离输入 (cr, ci) 最近的参数组合
+            cr_diffs = np.abs(cr_values - cr)
+            ci_diffs = np.abs(ci_values - ci)
+            cr_idx = int(np.argmin(cr_diffs))
+            ci_idx = int(np.argmin(ci_diffs))
+            self.logger.info(
+                f"pick_max=False: 选取最近参数组合 "
+                f"cr_idx={cr_idx} (cr={cr_values[cr_idx]:.6f}, 输入={cr:.6f}), "
+                f"ci_idx={ci_idx} (ci={ci_values[ci_idx]:.6f}, 输入={ci:.6f})"
+            )
+
+        # 提取增益系数
+        gain_8 = np.asarray(eight_gains[cr_idx, ci_idx, :], dtype=np.complex128)  # (8,)
+        floquet_gains_3 = np.asarray(
+            floquet_gains[cr_idx, ci_idx, :], dtype=np.complex128
+        )  # (3,) [bnd1, bnd2, point1]
+
+        # 构建用于实验的增益系数
+        if mode == "eight_probes":
+            gain_for_experiment = gain_8.copy()
+        else:  # floquet_probes: 使用 point1 (idx=2) 的增益复制到全部 8 个通道
+            gain_for_experiment = np.full(8, floquet_gains_3[2], dtype=np.complex128)
+
+        picked_cr = float(cr_values[cr_idx])
+        picked_ci = float(ci_values[ci_idx])
+
+        self.logger.info(
+            f"增益系数已选取 - "
+            f"8周期模式: {gain_8}, "
+            f"Floquet模式 [bnd1, bnd2, point1]: {floquet_gains_3}, "
+            f"实验用增益: {gain_for_experiment}"
+        )
+
+        return (
+            gain_8,
+            floquet_gains_3,
+            gain_for_experiment,
+            cr_idx,
+            ci_idx,
+            picked_cr,
+            picked_ci,
+        )
+
     def _simulate_matrix(self) -> tuple[np.ndarray, np.ndarray]:
         """
         ## 物理建模（matrix 模式内核）
@@ -574,7 +722,7 @@ class Evolver:
         系统由两个独立的物理关系联立而成：
 
         ① 叠加原理（物理定律）：
-            T_i（总声场Total） = S_i（静态输入贡献Static） + sum_j（对j求和） tf_feedback[j, i] * amps_feedback[j]
+            T_i(总声场Total) = S_i(静态输入贡献Static) + sum_j(对j求和) tf_feedback[j, i] * amps_feedback[j]
             其中 S_i = sum_s tf_static[s, i] * amps_static[s]
 
         ② 增益约束（控制目标）：
@@ -663,57 +811,76 @@ class Evolver:
 
     def simulate(
         self,
-        cycles_num: PositiveInt = 10,
+        cr: float,
+        ci: float,
+        mode: Literal["eight_probes", "floquet_probes"] = "eight_probes",
+        pick_max: bool = False,
         ao_amplitude_limit: PositiveFloat = 0.5,
         result_folder: str | Path | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
-        计算并保存理论稳态解，同时执行解析迭代仿真生成轨迹数据。
+        从扫描结果中选取增益系数，计算理论稳态解，并执行解析迭代仿真。
 
         ## 执行流程
 
-        本方法在一次调用中分两阶段执行，二者互不覆盖：
+        本方法分四个阶段执行：
 
-        1. **矩阵求解阶段**：在已知 `static_ao_complex_amps`、`gain_coefficients`
-           和传递矩阵的前提下，将"叠加原理 + 增益约束"联立为线性方程组
-           `(I - tf_feedback^T @ diag(β)) @ T = S`，一次性解出稳态总声场 T
-           与反馈 AO 复振幅。该结果**作为唯一的"理论稳态解"**存入
-           `_theoretical_feedback_ao_complex_amps` 与
-           `_theoretical_total_ai_complex_amps`。
+        1. **增益系数选取阶段**：根据输入参数 (cr, ci) 和 mode，从
+           SimScanner 生成的 ``scan_result.npz`` 中选取一组增益系数。
+           选取后立即完成收敛性分析与自适应松弛因子计算，
+           并将增益系数存入 ``_gain_coefficients``，松弛因子存入
+           ``_relaxation_factor``。
 
-        2. **解析迭代阶段**：完全模拟 `evolve()` 的离散反馈过程——从 0 反馈
-           出发，每周期调用 `_feedback_method(mode="analytical")`（内部用传递矩阵
-           解析推算总声场，等价于"无噪声理想环境"），并把结果回灌到
-           `_current_ao_complex_amps`。该阶段填充 `_ai_complex_amps_history`
-           与 `_ao_complex_amps_history`，便于绘图。
-           **迭代结果不再被视为理论解，也不会覆盖矩阵阶段写入的理论解。**
+        2. **矩阵求解阶段**：在已知 ``static_ao_complex_amps``、
+           ``gain_coefficients`` 和传递矩阵的前提下，将"叠加原理 + 增益约束"
+           联立为线性方程组 ``(I - tf_feedback^T @ diag(β)) @ T = S``，
+           一次性解出稳态总声场 T 与反馈 AO 复振幅。该结果作为唯一的
+           "理论稳态解"存入 ``_theoretical_feedback_ao_complex_amps`` 与
+           ``_theoretical_total_ai_complex_amps``。
 
-        最后，若提供 `result_folder`，则自动绘制并保存"AI 总声场轨迹"和
-        "反馈 AO 轨迹"两张图。绘图时各通道折线为迭代轨迹，红色 × 始终标注
-        矩阵阶段求得的理论稳态解。
+        3. **解析迭代阶段**：从 0 反馈出发，每周期调用
+           ``_feedback_method(mode="analytical")``（内部用传递矩阵解析推算总声场，
+           等价于"无噪声理想环境"），并将结果回灌到 ``_current_ao_complex_amps``。
+           迭代将持续进行，直到连续两轮 8 个传声器复振幅的相对差小于
+           收敛容差（1%），或者超过最大迭代次数（10000）仍未收敛（此时
+           发出警告并认为系统发散）。
+
+        4. **可选绘图阶段**：若提供 ``result_folder``，则自动绘制并保存
+           AI 总声场轨迹、反馈 AO 轨迹以及增益系数极坐标复平面图。
 
         ## evolve 的前置条件
 
-        调用一次成功的 `simulate()` 是后续 `evolve()` 运行的必要前提（evolve
-        需要拿到理论解作为绘图参考），否则 `evolve()` 会拒绝执行。
+        调用一次成功的 ``simulate()`` 是后续 ``evolve()`` 运行的必要前提
+        （evolve 需要拿到理论解和增益系数），否则 ``evolve()`` 会拒绝执行。
+        ``evolve()`` 使用的增益系数来自最后一次 ``simulate()`` 调用。
 
         Args:
-            cycles_num: 解析迭代仿真的周期数，默认 10。
+            cr: 管槽声速实部放缩因子，用于从扫描结果中选取增益系数。
+            ci: 管槽声速虚部放缩因子，用于从扫描结果中选取增益系数。
+            mode: 增益系数选取模式。
+                - ``"eight_probes"``（默认）：使用 8 周期模式的 8 个增益系数。
+                - ``"floquet_probes"``：使用 Floquet 模式基于传声器 (point1)
+                  的增益系数，将其复制到全部 8 个通道。
+            pick_max: 是否选取"最优"参数组合而非最近的。
+                - ``False``（默认）：选取距离 (cr, ci) 最近的参数组合。
+                - ``True``：当 mode="eight_probes" 时选取 8 个增益系数模长
+                  平均值最大的一组；当 mode="floquet_probes" 时选取基于
+                  传声器 (point1) 的增益系数模长最大的一组。
             ao_amplitude_limit: 反馈 AO 幅值安全上限（V），默认 0.5。
-                与 `evolve()` 同名参数行为一致；仅在迭代阶段生效，超过即抛错。
+                与 ``evolve()`` 同名参数行为一致；仅在迭代阶段生效，超过即抛错。
             result_folder: 结果保存文件夹路径，可选。若提供则在末尾自动绘制
-                并保存"AI 总声场轨迹"和"反馈 AO 轨迹"两张图。
+                并保存 AI/AO 轨迹图及增益系数图。
 
         Returns:
             (theoretical_feedback_ao_complex_amps, theoretical_total_ai_complex_amps)，
             即矩阵阶段求得的理论稳态解。
 
         Raises:
+            FileNotFoundError: 当扫描结果文件不存在时。
             ValueError: 当 gain_coefficients 中存在零值时。
             RuntimeError: 当闭环矩阵奇异，或迭代阶段反馈 AO 超过安全上限时。
         """
         # ---- 阶段 0：清空旧状态 ----
-        # 理论解先清空，确保仿真任一阶段失败时，evolve 不会拿到陈旧的理论解。
         n_fb = len(self._ao_channels_feedback)
         self._ao_amplitude_limit = float(ao_amplitude_limit)
         self._current_ao_complex_amps = np.zeros(n_fb, dtype=np.complex128)
@@ -722,8 +889,41 @@ class Evolver:
         self._theoretical_feedback_ao_complex_amps = None
         self._theoretical_total_ai_complex_amps = None
 
-        # ---- 阶段 1：矩阵求解，写入理论解 ----
-        self.logger.info("simulate 阶段 1/2: 通过线性方程组求解理论稳态解...")
+        # ---- 阶段 1：从扫描结果中选取增益系数 + 收敛性分析 ----
+        self.logger.info(
+            f"simulate 阶段 1/3: 选取增益系数 "
+            f"(cr={cr}, ci={ci}, mode={mode}, pick_max={pick_max})..."
+        )
+        (
+            gain_8,
+            floquet_gains_3,
+            gain_for_experiment,
+            _cr_idx,
+            _ci_idx,
+            picked_cr,
+            picked_ci,
+        ) = self._pick_gains_from_scan(cr, ci, mode, pick_max)
+
+        # 设置增益系数（供 _simulate_matrix 和 _feedback_method 使用）
+        self._gain_coefficients = gain_for_experiment
+
+        # 缓存选取的增益系数信息（供 plot_gain_coefficients 使用）
+        self._picked_gain_8 = gain_8
+        self._picked_floquet_gains_3 = floquet_gains_3
+        self._picked_cr = picked_cr
+        self._picked_ci = picked_ci
+
+        # 收敛性分析 + 自适应松弛因子
+        eigenvalues, rho_unrelaxed, best_alpha, rho_relaxed = (
+            self._analyze_convergence()
+        )
+        self._relaxation_factor = best_alpha
+        self._iteration_eigenvalues = eigenvalues
+        self._spectral_radius_unrelaxed = rho_unrelaxed
+        self._spectral_radius_relaxed = rho_relaxed
+
+        # ---- 阶段 2：矩阵求解，写入理论解 ----
+        self.logger.info("simulate 阶段 2/3: 通过线性方程组求解理论稳态解...")
         theoretical_feedback, theoretical_total_ai = self._simulate_matrix()
         self._theoretical_feedback_ao_complex_amps = theoretical_feedback
         self._theoretical_total_ai_complex_amps = theoretical_total_ai
@@ -734,23 +934,58 @@ class Evolver:
             f"理论解 - 总声场复振幅模长: {np.abs(theoretical_total_ai)}"
         )
 
-        # ---- 阶段 2：解析迭代仿真（不覆盖理论解，仅填充历史轨迹） ----
+        # ---- 阶段 3：解析迭代仿真（基于收敛判据的自动终止） ----
         self.logger.info(
-            f"simulate 阶段 2/2: 解析迭代仿真，"
-            f"cycles_num={cycles_num}, ao_amplitude_limit={ao_amplitude_limit} V"
+            f"simulate 阶段 3/3: 解析迭代仿真，"
+            f"容差={self._ITERATION_TOLERANCE:.1%}, "
+            f"最大迭代={self._MAX_ITERATION_CYCLES}, "
+            f"ao_amplitude_limit={ao_amplitude_limit} V"
         )
-        for cycle_idx in range(1, int(cycles_num) + 1):
+        converged = False
+        prev_ai_complex_amps: np.ndarray | None = None
+        relative_change = float("inf")
+
+        for cycle_idx in range(1, self._MAX_ITERATION_CYCLES + 1):
             new_ao_complex_amps = self._feedback_method(
                 ai_waveform=None, mode="analytical"
             )
             self._current_ao_complex_amps = new_ao_complex_amps.copy()
-            self.logger.debug(
-                f"[simulate] 周期 {cycle_idx}/{cycles_num} 完成"
+
+            # 收敛性判断：当前轮 vs 上一轮的 AI 总声场复振幅
+            current_ai = self._ai_complex_amps_history[-1]
+            if prev_ai_complex_amps is not None:
+                diff_norm = np.linalg.norm(current_ai - prev_ai_complex_amps)
+                ref_norm = np.linalg.norm(prev_ai_complex_amps)
+                relative_change = (
+                    diff_norm / ref_norm if ref_norm > 0 else diff_norm
+                )
+                if relative_change < self._ITERATION_TOLERANCE:
+                    self.logger.info(
+                        f"迭代仿真于第 {cycle_idx} 轮收敛 "
+                        f"(相对变化={relative_change:.6f} < "
+                        f"容差={self._ITERATION_TOLERANCE:.1%})"
+                    )
+                    converged = True
+                    break
+
+            prev_ai_complex_amps = current_ai.copy()
+
+            if cycle_idx % 100 == 0:
+                self.logger.debug(
+                    f"[simulate] 周期 {cycle_idx}/{self._MAX_ITERATION_CYCLES} "
+                    f"相对变化={relative_change:.6f}"
+                )
+
+        if not converged:
+            self.logger.warning(
+                f"迭代仿真未在 {self._MAX_ITERATION_CYCLES} 轮内收敛，"
+                f"系统可能发散！最终相对变化={relative_change:.6f}"
             )
 
         if self._ai_complex_amps_history and self._ao_complex_amps_history:
             self.logger.info(
-                f"迭代仿真终点 - 反馈 AO 复振幅模长: "
+                f"迭代仿真终点（{len(self._ai_complex_amps_history)} 轮） - "
+                f"反馈 AO 复振幅模长: "
                 f"{np.abs(self._ao_complex_amps_history[-1])}"
             )
             self.logger.info(
@@ -758,22 +993,24 @@ class Evolver:
                 f"{np.abs(self._ai_complex_amps_history[-1])}"
             )
 
-        # ---- 阶段 3：可选绘图 ----
-        # 使用 absolute 模式直接绘制迭代轨迹；红色 × 标注的"理论稳态解"
-        # 始终来源于阶段 1 的矩阵求解结果。
+        # ---- 阶段 4：可选绘图 ----
         if result_folder is not None:
             try:
                 result_folder_path = Path(result_folder)
                 result_folder_path.mkdir(parents=True, exist_ok=True)
+                actual_cycles = len(self._ai_complex_amps_history)
                 self.plot_evolution(
-                    save_path=result_folder_path / f"sim_ai_{cycles_num}steps.png",
+                    save_path=result_folder_path / f"sim_ai_{actual_cycles}steps.png",
                     target="ai",
                     mode="absolute",
                 )
                 self.plot_evolution(
-                    save_path=result_folder_path / f"sim_ao_{cycles_num}steps.png",
+                    save_path=result_folder_path / f"sim_ao_{actual_cycles}steps.png",
                     target="ao",
                     mode="absolute",
+                )
+                self.plot_gain_coefficients(
+                    save_path=result_folder_path / "sim_gains_complex.png",
                 )
             except Exception as e:
                 self.logger.error(f"保存仿真结果失败: {e}", exc_info=True)
@@ -843,10 +1080,10 @@ class Evolver:
         2. 旧反馈 AO 复振幅取 `self._current_ao_complex_amps`；
         3. 用 `tf_diag` 扣除自身反馈通道的贡献得到入射声场复振幅；
         4. 由增益系数计算"全步长"反馈 AO 更新量 Δa，并按
-           **自适应松弛因子** `self._relaxation_factor` (α*) 缩放：
-           `a_new = a_old + α* · Δa`。该 α* 在 `__init__` 阶段由
-           `_analyze_convergence` 一次性求出，目的是让迭代算子
-           `(1-α)I + α A` 的谱半径尽量小（< 1 即收敛）；
+           **自适应松弛因子** ``self._relaxation_factor`` (α*) 缩放：
+           ``a_new = a_old + α* · Δa``。该 α* 在 ``simulate()`` 阶段由
+           ``_analyze_convergence`` 计算，目的是让迭代算子
+           ``(1-α)I + α A`` 的谱半径尽量小（< 1 即收敛）；
         5. 幅值安全检查（任意通道超限即抛错）；
         6. 同时把本轮 T 和新 AO 复振幅追加到内部历史轨迹中。
 
@@ -982,21 +1219,23 @@ class Evolver:
         """
         启动反馈演化过程（阻塞执行）。
 
-        演化过程：
+        演化过程使用最后一次 ``simulate()`` 调用所选取的增益系数和松弛因子，
+        执行如下步骤：
+
         1. 重置内部状态；
         2. 启动 SingleChasCSIO（CSIO 的 feedback 通道为空，仅以稳态模式输出
            合并波形）；
         3. 循环执行 num_cycles 个演化周期：
-           - 等待 `settle_time` 秒以确保稳态；
+           - 等待 ``settle_time`` 秒以确保稳态；
            - 取一段最新的 AI 波形；
-           - 调用 `_feedback_method` 处理数据，得到新的反馈 AO 复振幅；
-           - 构建新的合并波形并通过 `update_static_output_waveform` 更换；
+           - 调用 ``_feedback_method`` 处理数据，得到新的反馈 AO 复振幅；
+           - 构建新的合并波形并通过 ``update_static_output_waveform`` 更换；
         4. 停止 CSIO，构建并返回最终合并波形；
-        5. 如果提供 `result_folder`，自动保存最终波形和演化轨迹图。
+        5. 如果提供 ``result_folder``，自动保存最终波形和演化轨迹图。
 
         Args:
             cycles_num: 演化周期数，默认 10。
-            ao_amplitude_limit: 反馈 AO 幅值安全上限（V），默认 0.1 V。
+            ao_amplitude_limit: 反馈 AO 幅值安全上限（V），默认 0.5 V。
             result_folder: 结果保存文件夹路径，若提供则自动保存最终波形和演化图。
 
         Returns:
@@ -1004,15 +1243,19 @@ class Evolver:
 
         Raises:
             RuntimeError: 当 AO 幅值超限或任务启动失败时；当尚未通过
-                `simulate(...)` 取得理论解时也会拒绝执行。
+                ``simulate(...)`` 取得理论解和增益系数时也会拒绝执行。
         """
-        # ---- 前置校验：必须先有理论解 ----
+        # ---- 前置校验：必须先有理论解和增益系数 ----
         if (
             self._theoretical_feedback_ao_complex_amps is None
             or self._theoretical_total_ai_complex_amps is None
         ):
             raise RuntimeError(
                 "尚未获取理论解，请先调用 simulate(...) 方法，再执行 evolve。"
+            )
+        if self._gain_coefficients is None or self._relaxation_factor is None:
+            raise RuntimeError(
+                "尚未设置增益系数或松弛因子，请先调用 simulate(...) 方法。"
             )
 
         # ---- 重置状态 ----
@@ -1047,6 +1290,8 @@ class Evolver:
         self.logger.info("=" * 60)
         self.logger.info("开始反馈演化")
         self.logger.info(f"演化周期数: {cycles_num}")
+        self.logger.info(f"增益系数: {self._gain_coefficients}")
+        self.logger.info(f"松弛因子 α*: {self._relaxation_factor:.4f}")
         self.logger.info(f"AO 幅值安全上限: {ao_amplitude_limit} V")
         self.logger.info(f"每段时长: {chunk_duration:.3f} s")
         self.logger.info(f"每轮稳态等待: {wait_time:.3f} s")
@@ -1183,7 +1428,7 @@ class Evolver:
         return final_waveform
 
     # =========================================================================
-    #  绘图方法：plot_evolution
+    #  绘图方法
     # =========================================================================
 
     def plot_evolution(
@@ -1374,6 +1619,115 @@ class Evolver:
             try:
                 fig.savefig(save_path, dpi=300, bbox_inches="tight")
                 self.logger.info(f"演化轨迹图已保存到: {save_path}")
+            except Exception as e:
+                self.logger.error(f"保存图像失败: {e}", exc_info=True)
+
+        if show:
+            plt.show()
+
+        plt.close(fig)
+
+    def plot_gain_coefficients(
+        self,
+        save_path: str | Path | None = None,
+        show: bool = False,
+    ) -> None:
+        """
+        在复平面上绘制所选 (cr, ci) 组合的增益系数图示。
+
+        无论 simulate 时 mode 为何，均绘制 11 个增益系数点：
+
+        - 8 周期模式的 8 个增益系数：使用圆形绘图点，并用折线依次连接
+          （1→2→3→...→7→8，但 8 与 1 不相连）。
+        - Floquet 周期模式的 3 个增益系数 [bnd1, bnd2, point1]：
+          使用不同形状绘图点（point1 用菱形、bnd1 用上三角、bnd2 用下三角），
+          彼此不连接。
+
+        本方法需要先调用 ``simulate()`` 以选取增益系数，否则将拒绝执行。
+
+        Args:
+            save_path: 图像保存路径（包含扩展名），可选。
+            show: 是否调用 plt.show() 显示图像，默认 False。
+
+        Raises:
+            RuntimeError: 当尚未调用 simulate() 选取增益系数时。
+        """
+        if (
+            self._picked_gain_8 is None
+            or self._picked_floquet_gains_3 is None
+        ):
+            raise RuntimeError(
+                "尚未选取增益系数，请先调用 simulate(...) 方法。"
+            )
+
+        gain_8 = self._picked_gain_8          # shape (8,)
+        floquet_3 = self._picked_floquet_gains_3  # shape (3,) [bnd1, bnd2, point1]
+        picked_cr = self._picked_cr
+        picked_ci = self._picked_ci
+
+        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+
+        # ---- 绘制 8 周期模式增益系数 ----
+        # 圆形绘图点 + 折线连接（1→2→...→8，8与1不相连）
+        colors_8 = plt.cm.tab10(np.linspace(0, 0.8, 8))
+        for i in range(8):
+            ax.scatter(
+                gain_8[i].real, gain_8[i].imag,
+                marker="o", s=120, color=colors_8[i],
+                edgecolors="black", linewidths=1, zorder=3,
+                label=f"8周期 g{i + 1} ({np.abs(gain_8[i]):.3f})",
+            )
+        # 折线连接 1→2→...→8（不闭合）
+        ax.plot(
+            gain_8.real, gain_8.imag,
+            color="steelblue", linewidth=1.5, alpha=0.6,
+            linestyle="-", zorder=2,
+        )
+
+        # ---- 绘制 Floquet 模式增益系数 ----
+        # point1 (idx=2) → 菱形, bnd1 (idx=0) → 上三角, bnd2 (idx=1) → 下三角
+        floquet_labels = ["bnd1", "bnd2", "point1"]
+        floquet_markers = ["^", "v", "D"]  # 上三角, 下三角, 菱形
+        floquet_colors = ["forestgreen", "darkorange", "crimson"]
+        for i in range(3):
+            ax.scatter(
+                floquet_3[i].real, floquet_3[i].imag,
+                marker=floquet_markers[i], s=180,
+                color=floquet_colors[i],
+                edgecolors="black", linewidths=1.5, zorder=4,
+                label=(
+                    f"Floquet {floquet_labels[i]} "
+                    f"({np.abs(floquet_3[i]):.3f})"
+                ),
+            )
+
+        # ---- 参考线和装饰 ----
+        ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
+        ax.axvline(x=0, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
+        # 绘制单位圆参考线
+        theta = np.linspace(0, 2 * np.pi, 200)
+        ax.plot(np.cos(theta), np.sin(theta),
+                color="lightgray", linewidth=1, linestyle=":", alpha=0.5)
+
+        ax.set_xlabel("实部", fontsize=12)
+        ax.set_ylabel("虚部", fontsize=12)
+        ax.set_title(
+            f"增益系数极坐标复平面\n"
+            f"(cr={picked_cr:.6f}, ci={picked_ci:.6f}, "
+            f"频率={self._frequency:.1f} Hz)",
+            fontsize=14, fontweight="bold",
+        )
+        ax.legend(loc="best", fontsize=9, framealpha=0.9)
+        ax.grid(True, alpha=0.3, linestyle=":", linewidth=0.5)
+        ax.set_aspect("equal", adjustable="box")
+        plt.tight_layout()
+
+        if save_path is not None:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                fig.savefig(save_path, dpi=300, bbox_inches="tight")
+                self.logger.info(f"增益系数图已保存到: {save_path}")
             except Exception as e:
                 self.logger.error(f"保存图像失败: {e}", exc_info=True)
 

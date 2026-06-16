@@ -13,6 +13,4 @@ __pycache__/
 /htmlcov/
 /参考资料/
 /storage/
-
-# big files
-/src/sweeper400/sim/gainEP_10in16out.mph
+/src/sweeper400/sim/mphs/

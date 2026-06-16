@@ -16,25 +16,18 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from scipy.interpolate import griddata
 
+from ..config import setup_chinese_fonts
 from ..logger import get_logger
 from .basic_sine import extract_single_tone_information_vvi
 from .filter import filter_sweep_data
 from .my_dtypes import Point2D, SweepData, Waveform
 from .post_process import average_sweep_data
 
+# 配置matplotlib中文字体支持
+setup_chinese_fonts()
 
 # 获取模块日志器
 logger = get_logger(__name__)
-
-# 配置matplotlib中文字体支持
-plt.rcParams["font.sans-serif"] = [
-    "Microsoft YaHei",
-    "SimHei",
-    "SimSun",
-    "Microsoft JhengHei",
-    "DejaVu Sans",
-]
-plt.rcParams["axes.unicode_minus"] = False
 
 
 # 本地定义的空间点传递函数数据类型，专用于空间扫场绘图函数。

@@ -19,15 +19,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from sweeper400.analyze import (
-    init_sampling_info,
-    init_sine_args,
-    get_sine_cycles,
-    Waveform,
-    TFData,
-)
+from sweeper400.analyze import Waveform, get_sine, init_sampling_info
 from sweeper400.use import Evolver
-
 
 # ============================================================
 #  常量配置（根据实际硬件环境修改）
@@ -70,8 +63,12 @@ _AO_CHANNELS_FEEDBACK = (
     "PXI1Slot6/ao1",
 )
 
-# 增益系数（8 个通道，均增益 1.0 倍，即保持总声场不变）
-_GAIN_COEFFICIENTS_UNITY = tuple([1.0 + 0.0j] * 8)
+# 增益系数相关参数已移至 simulate() 方法
+# Evolver 现在从 SimScanner 扫描结果中自动选取增益系数
+
+# 模拟参数（用于 simulate 调用）
+_CR = 1.006
+_CI = -0.073
 
 # AO 幅值安全上限（V）
 _AO_AMPLITUDE_LIMIT = 0.1
@@ -80,8 +77,10 @@ _AO_AMPLITUDE_LIMIT = 0.1
 def _make_static_waveform() -> Waveform:
     """生成测试用静态输出波形"""
     sampling_info = init_sampling_info(_SAMPLING_RATE, _SAMPLES_PER_CHUNK)
-    sine_args = init_sine_args(frequency=_FREQ, amplitude=_AMPLITUDE, phase=0.0)
-    return get_sine_cycles(sampling_info, sine_args)
+    cca = np.array([_AMPLITUDE + 0j])
+    return get_sine(
+        sampling_info, _FREQ, ("PXI1Slot2/ao0",), cca, full_cycle=True
+    )
 
 
 # ============================================================
@@ -91,48 +90,31 @@ def _make_static_waveform() -> Waveform:
 class TestEvolverInit:
     """测试 Evolver 初始化参数验证"""
 
-    def test_gain_coefficients_length_mismatch_feedback(self):
-        """gain_coefficients 长度与 ao_channels_feedback 不匹配时应抛出 ValueError"""
+    def test_channels_length_mismatch(self):
+        """ao_channels_feedback 与 ai_channels 长度不匹配时应抛出 ValueError"""
         static_wf = _make_static_waveform()
-        wrong_gain = (1.0 + 0j,) * 5  # 只有 5 个，但 ao_channels_feedback 有 8 个
+        wrong_ai = _AI_CHANNELS[:5]  # 只有 5 个 AI，但 feedback 有 8 个
 
-        with pytest.raises(ValueError, match="gain_coefficients 长度"):
-            Evolver(
-                ai_channels=_AI_CHANNELS,
-                ao_channels_static=_AO_CHANNELS_STATIC,
-                ao_channels_feedback=_AO_CHANNELS_FEEDBACK,
-                static_output_waveform=static_wf,
-                gain_coefficients=wrong_gain,
-            )
-
-    def test_gain_coefficients_length_mismatch_ai(self):
-        """gain_coefficients 长度与 ai_channels 不匹配时应抛出 ValueError"""
-        static_wf = _make_static_waveform()
-        # ai_channels 只用前 5 个，但 gain_coefficients 有 8 个（与 ao_channels_feedback 匹配）
-        wrong_ai = _AI_CHANNELS[:5]
-
-        with pytest.raises(ValueError, match="gain_coefficients 长度"):
+        with pytest.raises(ValueError, match="ao_channels_feedback 长度"):
             Evolver(
                 ai_channels=wrong_ai,
                 ao_channels_static=_AO_CHANNELS_STATIC,
                 ao_channels_feedback=_AO_CHANNELS_FEEDBACK,
                 static_output_waveform=static_wf,
-                gain_coefficients=_GAIN_COEFFICIENTS_UNITY,
             )
 
-    def test_missing_sine_args(self):
-        """static_output_waveform 没有 sine_args 时应抛出 ValueError"""
+    def test_missing_frequency(self):
+        """static_output_waveform 没有 frequency 时应抛出 ValueError"""
         static_wf = _make_static_waveform()
-        # 手动清除 sine_args
-        static_wf.sine_args = None
+        # 手动清除 frequency
+        static_wf._frequency = None
 
-        with pytest.raises(ValueError, match="sine_args"):
+        with pytest.raises(ValueError, match="frequency"):
             Evolver(
                 ai_channels=_AI_CHANNELS,
                 ao_channels_static=_AO_CHANNELS_STATIC,
                 ao_channels_feedback=_AO_CHANNELS_FEEDBACK,
                 static_output_waveform=static_wf,
-                gain_coefficients=_GAIN_COEFFICIENTS_UNITY,
             )
 
 
@@ -148,8 +130,13 @@ class TestEvolverHardware:
             ao_channels_static=_AO_CHANNELS_STATIC,
             ao_channels_feedback=_AO_CHANNELS_FEEDBACK,
             static_output_waveform=static_wf,
-            gain_coefficients=_GAIN_COEFFICIENTS_UNITY,
-            buffer_size_multiplier=15,  # 进一步增大缓冲区倍数，给反馈处理留出更多时间
+        )
+        # 先调用 simulate 选取增益系数
+        ev.simulate(
+            cr=_CR, ci=_CI,
+            mode="eight_probes",
+            pick_max=False,
+            ao_amplitude_limit=_AO_AMPLITUDE_LIMIT,
         )
         yield ev
         try:
