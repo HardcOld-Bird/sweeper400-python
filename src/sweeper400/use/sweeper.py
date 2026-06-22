@@ -848,6 +848,48 @@ class SweeperCore:
             self._set_state(SweepState.ERROR)
             return False
 
+    def sweep_blocking(
+        self,
+        result_folder: str | Path | None = None,
+        lowcut: float = 100.0,
+        highcut: float = 20000.0,
+    ) -> bool:
+        """
+        启动扫场测量（阻塞，等待全部完成后返回）
+
+        与 :meth:`sweep` 参数完全一致，区别在于本方法会阻塞当前线程，
+        直到扫场测量全部完成（成功/失败/被中止）后才返回。
+        内部复用 ``sweep()`` 启动后台线程，然后通过线程 ``join()`` 阻塞等待，
+        无额外轮询开销。
+
+        Args:
+            result_folder: 结果保存文件夹路径，如果提供则自动保存数据和绘图。
+                数据将保存为"sweep_data.pkl"，三种模式的图像分别保存为：
+                - "discrete_distribution.png"
+                - "interpolated_distribution.png"
+                - "instantaneous_field.png"
+            lowcut: 带通滤波器低截止频率（Hz），用于最终绘图，默认100.0
+            highcut: 带通滤波器高截止频率（Hz），用于最终绘图，默认20000.0
+
+        Returns:
+            bool: 扫场是否成功启动并完成（True 表示扫场已成功执行完毕，
+                False 表示启动失败或扫场过程中出错）
+        """
+        started = self.sweep(
+            result_folder=result_folder,
+            lowcut=lowcut,
+            highcut=highcut,
+        )
+        if not started:
+            return False
+
+        # 阻塞等待扫场线程结束
+        assert self._sweep_thread is not None
+        self._sweep_thread.join()
+
+        final_state = self._get_state()
+        return final_state == SweepState.COMPLETED
+
     def _worker_thread_function(self) -> None:
         """
         扫场工作线程的主函数

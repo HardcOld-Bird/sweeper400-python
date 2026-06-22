@@ -36,11 +36,14 @@ from .my_dtypes import (
 )
 from .plot import (
     PointTFData,
+    calculate_amplitude_integral,
+    combine_point_tf_data_list,
+    pick_area,
+    plot_comprehensive_experiment,
     plot_point_tf_data_list,
     plot_sweep_data_as_single_waveform,
     plot_sweep_waveforms,
     plot_waveform,
-    subtract_point_tf_data_list,
     sweep_data_to_point_tf_data_list,
 )
 from .post_process import (
@@ -84,7 +87,10 @@ __all__ = [
     "filter_waveform",
     "detrend_waveform",
     "sweep_data_to_point_tf_data_list",
-    "subtract_point_tf_data_list",
+    "combine_point_tf_data_list",
+    "pick_area",
+    "calculate_amplitude_integral",
+    "plot_comprehensive_experiment",
     "PointTFData",
     "load_compressed_data",
     "pick_waveform_channels",

@@ -101,13 +101,13 @@ class ScanResult:
     exp_eight_steady: np.ndarray  # shape (res, res, 8), complex128
     exp_floquet_steady: np.ndarray  # shape (res, res, 8), complex128
 
-    # 真实实验系统收敛性分析（可选，由 run_scan 自动填充）
-    exp_eight_rho: np.ndarray | None = field(default=None)   # shape (res, res)
-    exp_eight_alpha: np.ndarray | None = field(default=None)  # shape (res, res)
-    exp_eight_rho_relaxed: np.ndarray | None = field(default=None)  # shape (res, res)
-    exp_floquet_rho: np.ndarray | None = field(default=None)  # shape (res, res)
-    exp_floquet_alpha: np.ndarray | None = field(default=None)  # shape (res, res)
-    exp_floquet_rho_relaxed: np.ndarray | None = field(default=None)  # shape (res, res)
+    # 真实实验系统收敛性分析
+    exp_eight_rho: np.ndarray  # shape (res, res)
+    exp_eight_alpha: np.ndarray  # shape (res, res)
+    exp_eight_rho_relaxed: np.ndarray  # shape (res, res)
+    exp_floquet_rho: np.ndarray  # shape (res, res)
+    exp_floquet_alpha: np.ndarray  # shape (res, res)
+    exp_floquet_rho_relaxed: np.ndarray  # shape (res, res)
 
     def __repr__(self) -> str:
         return (
@@ -263,6 +263,7 @@ class SimScanner:
         input_amp_l: str = "1[Pa]",
         input_amp_r: str = "0[Pa]",
         fishnet_tf_data_path: str | Path | None = None,
+        result_folder: str | Path | None = None,
     ) -> ScanResult:
         """运行完整参数扫描仿真流程
 
@@ -283,6 +284,9 @@ class SimScanner:
             fishnet_tf_data_path: Fishnet 传递函数数据文件路径（可选）。
                 若为 None 则从默认路径 (storage/calib/calib_result_fishnet) 读取。
                 用于计算真实实验系统的预期稳态。
+            result_folder: 结果保存文件夹路径（可选）。
+                若为 None 则保存到默认路径 ``storage/sim/sim_result_scan``。
+                若指定路径，则数据和绘图将保存到该路径下。
 
         Returns:
             ScanResult 对象
@@ -529,7 +533,7 @@ class SimScanner:
         self.last_result = result
 
         # 保存数据和绘图
-        save_dir = self._save_scan_result(result)
+        save_dir = self._save_scan_result(result, result_folder=result_folder)
         self._plot_scan_results(result, save_dir)
 
         logger.info(f"参数扫描仿真完成，结果已保存至: {save_dir}")
@@ -1033,9 +1037,23 @@ class SimScanner:
     # 保存与可视化
     # =========================================================================
 
-    def _save_scan_result(self, result: ScanResult) -> Path:
-        """将扫描结果保存到 storage/sim/sim_result_scan/"""
-        save_dir = self.storage_dir / "sim_result_scan"
+    def _save_scan_result(
+        self, result: ScanResult, result_folder: str | Path | None = None,
+    ) -> Path:
+        """将扫描结果保存到磁盘
+
+        Args:
+            result: 扫描结果
+            result_folder: 自定义保存路径。若为 None 则保存到默认路径
+                ``storage/sim/sim_result_scan``。
+
+        Returns:
+            实际保存的目录路径
+        """
+        if result_folder is not None:
+            save_dir = Path(result_folder)
+        else:
+            save_dir = self.storage_dir / "sim_result_scan"
         save_dir.mkdir(parents=True, exist_ok=True)
 
         # 使用 npz 压缩格式保存

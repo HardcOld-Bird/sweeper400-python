@@ -7,21 +7,24 @@
 包含对采集数据进行可视化处理的函数和类。
 """
 
+import math
+from pathlib import Path
 from typing import Literal, TypedDict
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
+from matplotlib.gridspec import GridSpec
+from matplotlib.patches import Circle, Rectangle
 from scipy.interpolate import griddata
 
 from ..config import setup_chinese_fonts
 from ..logger import get_logger
 from .basic_sine import extract_single_tone_information_vvi
 from .filter import filter_sweep_data
-from .my_dtypes import Point2D, SweepData, Waveform
-from .post_process import average_sweep_data
+from .my_dtypes import Point2D, PositiveFloat, SweepData, Waveform
+from .post_process import average_sweep_data, load_compressed_data
 
 # 配置matplotlib中文字体支持
 setup_chinese_fonts()
@@ -167,68 +170,172 @@ def sweep_data_to_point_tf_data_list(
     return tf_results
 
 
-def subtract_point_tf_data_list(
-    total_field_list: list[PointTFData],
-    background_field_list: list[PointTFData],
-) -> list[PointTFData]:
+def combine_point_tf_data_list(
+    list_a: list[PointTFData] | None,
+    list_b: list[PointTFData] | None,
+    mode: Literal["add", "minus"] = "minus",
+) -> list[PointTFData] | None:
     """
-    将两个 PointTFData 列表逼点相减，获取去除背景场后的复振幅。
+    将两个 PointTFData 列表逐点相加或相减。
 
     假定两个列表长度相同，且相同序号的点具有相同的 position。
-    对每一对同位置点，计算:
-        result.complex_amplitude = total.complex_amplitude - background.complex_amplitude
+    - mode="add":   result.complex_amplitude = a.complex_amplitude + b.complex_amplitude
+    - mode="minus": result.complex_amplitude = a.complex_amplitude - b.complex_amplitude
 
-    返回的列表可以直接传入 plot_point_tf_data_list 进行绘图。
+    若任一输入为 None，直接返回 None（安全模式）。
 
     Args:
-        total_field_list: 总场（含背景）的传递函数数据列表
-        background_field_list: 背景场的传递函数数据列表
+        list_a: 第一个传递函数数据列表（可为 None）
+        list_b: 第二个传递函数数据列表（可为 None）
+        mode: 运算模式，"add"为相加，"minus"为相减，默认"minus"
 
     Returns:
-        list[PointTFData]: 去除背景场后的传递函数数据列表
+        list[PointTFData] | None: 运算后的传递函数数据列表，
+        若任一输入为 None 则返回 None
 
     Raises:
-        ValueError: 当两个列表长度不一致时
-
-    Examples:
-        ```python
-        >>> total = sweep_data_to_point_tf_data_list(total_sweep_data)
-        >>> background = sweep_data_to_point_tf_data_list(background_sweep_data)
-        >>> net_field = subtract_point_tf_data_list(total, background)
-        >>> fig, axes = plot_point_tf_data_list(net_field, mode="interpolated")
-        ```
+        ValueError: 当两个列表长度不一致或mode不合法时
     """
-    f_logger = get_logger(f"{__name__}.subtract_point_tf_data_list")
+    # None 安全模式
+    if list_a is None or list_b is None:
+        return None
 
-    if len(total_field_list) != len(background_field_list):
+    f_logger = get_logger(f"{__name__}.combine_point_tf_data_list")
+
+    if mode not in ("add", "minus"):
+        raise ValueError(f"mode必须为'add'或'minus'，当前值: {mode!r}")
+
+    if len(list_a) != len(list_b):
         raise ValueError(
-            f"两个列表长度不一致: "
-            f"total_field_list={len(total_field_list)}, "
-            f"background_field_list={len(background_field_list)}"
+            f"两个列表长度不一致: list_a={len(list_a)}, list_b={len(list_b)}"
         )
 
     f_logger.info(
-        f"开始计算差值场，共 {len(total_field_list)} 个点"
+        f"开始{'相加' if mode == 'add' else '相减'}操作，共 {len(list_a)} 个点"
     )
 
     result_list: list[PointTFData] = []
-    for total_point, bg_point in zip(total_field_list, background_field_list, strict=True):
-        net_complex_amplitude = (
-            total_point["complex_amplitude"] - bg_point["complex_amplitude"]
-        )
+    for point_a, point_b in zip(list_a, list_b, strict=True):
+        if mode == "add":
+            combined = point_a["complex_amplitude"] + point_b["complex_amplitude"]
+        else:
+            combined = point_a["complex_amplitude"] - point_b["complex_amplitude"]
         result_list.append({
-            "position": total_point["position"],
-            "complex_amplitude": net_complex_amplitude,
+            "position": point_a["position"],
+            "complex_amplitude": combined,
         })
 
-    f_logger.info("差值场计算完成")
+    f_logger.info("运算完成")
     return result_list
+
+
+def pick_area(
+    data_list: list[PointTFData],
+    picked_center: Point2D = Point2D(x=0, y=0),
+    picked_area_radius: PositiveFloat = 100,
+    area_shape: Literal["square", "circle"] = "square",
+) -> list[PointTFData]:
+    """
+    从 PointTFData 列表中筛选出位于指定区域内的点。
+
+    根据 area_shape 选择不同的距离判定方式：
+    - "square": x 和 y 到 center 的距离分别小于 radius（方形区域）
+    - "circle": 欧氏距离小于 radius（圆形区域）
+
+    Args:
+        data_list: 输入的 PointTFData 列表
+        picked_center: 区域中心点坐标（mm），默认 (0, 0)
+        picked_area_radius: 区域半径（mm），默认 100
+        area_shape: 区域形状，"square" 或 "circle"，默认 "square"
+
+    Returns:
+        list[PointTFData]: 筛选后的点列表
+    """
+    f_logger = get_logger(f"{__name__}.pick_area")
+
+    result: list[PointTFData] = []
+    cx, cy = picked_center.x, picked_center.y
+    r = picked_area_radius
+
+    for point in data_list:
+        px, py = point["position"].x, point["position"].y
+        if area_shape == "square":
+            if abs(px - cx) <= r and abs(py - cy) <= r:
+                result.append(point)
+        else:  # circle
+            if math.sqrt((px - cx) ** 2 + (py - cy) ** 2) <= r:
+                result.append(point)
+
+    f_logger.info(
+        f"区域筛选完成: center=({cx}, {cy}), radius={r}, shape={area_shape}, "
+        f"筛选出 {len(result)}/{len(data_list)} 个点"
+    )
+    return result
+
+
+def calculate_amplitude_integral(
+    data_list: list[PointTFData],
+    mode: Literal["abs", "fourier"] = "abs",
+    k_modulus: float = 2 * np.pi / 0.1,
+    k_angle_deg: float = 0,
+) -> float | complex:
+    """
+    计算 PointTFData 列表所代表区域的平均振幅或傅里叶分量。
+
+    - mode="abs": 计算所有点 complex_amplitude 模长的平均值（返回 float）
+    - mode="fourier": 计算向波矢 k 方向传播的分量的平均振幅（返回 complex）。
+      数学公式为:
+          (|k| / (2π)) * (1/N) * Σ p(r_j) * exp(-i k·r_j)
+      其中 k_x = k_modulus * cos(k_angle_deg), k_y = k_modulus * sin(k_angle_deg)，
+      r_j 为各点坐标（已从 mm 换算为 m）。
+
+    Args:
+        data_list: 输入的 PointTFData 列表
+        mode: 计算模式，"abs" 或 "fourier"，默认 "abs"
+        k_modulus: 波矢 k 的模值（1/m），默认 2π/0.1
+        k_angle_deg: 波矢 k 的角度（度），0=x正向，90=y正向，默认 0
+
+    Returns:
+        float (mode="abs") 或 complex (mode="fourier")
+    """
+    f_logger = get_logger(f"{__name__}.calculate_amplitude_integral")
+
+    if not data_list:
+        f_logger.warning("输入数据为空，返回 0")
+        return 0.0 if mode == "abs" else 0.0 + 0j
+
+    if mode == "abs":
+        amps = [abs(p["complex_amplitude"]) for p in data_list]
+        result = float(np.mean(amps))
+        f_logger.info(f"abs模式: 平均振幅 = {result:.6f}")
+        return result
+
+    # fourier 模式
+    k_angle_rad = math.radians(k_angle_deg)
+    kx = k_modulus * math.cos(k_angle_rad)
+    ky = k_modulus * math.sin(k_angle_rad)
+
+    total = 0.0 + 0j
+    for p in data_list:
+        x_m = p["position"].x * 1e-3  # mm → m
+        y_m = p["position"].y * 1e-3
+        phase = kx * x_m + ky * y_m
+        total += p["complex_amplitude"] * np.exp(-1j * phase)
+
+    result = (k_modulus / (2 * np.pi)) * total / len(data_list)
+    f_logger.info(
+        f"fourier模式: k=({kx:.4f}, {ky:.4f}), "
+        f"结果={result:.6f} (|结果|={abs(result):.6f})"
+    )
+    return result
 
 
 def plot_point_tf_data_list(
     plot_tf_results: list[PointTFData],
     mode: Literal["discrete", "interpolated", "instantaneous"] = "interpolated",
     save_path: str | None = None,
+    vmin: float | None = None,
+    vmax: float | None = None,
 ) -> tuple[Figure, Axes | tuple[Axes, Axes]]:
     """
     绘制传递函数的空间分布图（统一接口）
@@ -243,27 +350,13 @@ def plot_point_tf_data_list(
         mode: 绘图模式，可选 "discrete"、"interpolated"、"instantaneous"，
             默认为 "interpolated"
         save_path: 保存图片的路径，如果为None则不保存，默认为None
+        vmin: 颜色映射最小值（仅 instantaneous 模式），默认自动计算
+        vmax: 颜色映射最大值（仅 instantaneous 模式），默认自动计算
 
     Returns:
         fig: matplotlib Figure对象
         axes: 对于 "discrete" 和 "interpolated" 模式返回 (ax1, ax2) 元组；
               对于 "instantaneous" 模式返回单个 Axes 对象
-
-    Raises:
-        ValueError: 当输入数据为空或mode不合法时
-
-    Examples:
-        ```python
-        >>> # 假设已有传递函数计算结果
-        >>> test_plot_tf_results = sweep_data_to_point_tf_data_list(test_sweep_data)  # noqa
-        >>> # 使用离散色块模式
-        >>> fig, (ax1, ax2) = plot_point_tf_data_list(test_plot_tf_results, mode="discrete")
-        >>> # 使用插值模式
-        >>> fig, (ax1, ax2) = plot_point_tf_data_list(test_plot_tf_results, mode="interpolated")
-        >>> # 使用瞬时声压场模式
-        >>> fig, ax = plot_point_tf_data_list(test_plot_tf_results, mode="instantaneous")
-        >>> plt.show()
-        ```
     """
     # 获取函数日志器
     f_logger = get_logger(f"{__name__}.plot_point_tf_data_list")
@@ -304,13 +397,20 @@ def plot_point_tf_data_list(
         )
         result = (fig, axes_pair)
     else:  # instantaneous
-        fig, ax = _plot_instantaneous(
-            x_coords, y_coords, complex_amplitudes, f_logger
+        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+        _plot_instantaneous_on_ax(
+            ax, fig, x_coords, y_coords, complex_amplitudes,
+            vmin=vmin, vmax=vmax,
+            show_colorbar=True, colorbar_label="瞬时声压场强度",
+            title="瞬时声压场分布 Re(H)",
         )
+        plt.tight_layout()
+        f_logger.debug("瞬时声压场分布图绘制完成")
         result = (fig, ax)
 
     # 保存图片（如果指定了路径）
     if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
         f_logger.info(f"图片已保存至: {save_path}")
 
@@ -473,20 +573,26 @@ def _plot_interpolated(
     return fig, (ax1, ax2)
 
 
-def _plot_instantaneous(
+def _plot_instantaneous_on_ax(
+    ax: Axes,
+    fig: Figure,
     x_coords: np.ndarray,
     y_coords: np.ndarray,
     complex_amplitudes: np.ndarray,
-    f_logger,
-) -> tuple[Figure, Axes]:
-    """绘制瞬时声压场分布图（内部函数）"""
-    grid_resolution = 100
-    interpolation_method = "cubic"
+    vmin: float | None = None,
+    vmax: float | None = None,
+    show_colorbar: bool = True,
+    colorbar_label: str = "瞬时声压场强度",
+    title: str = "",
+) -> plt.cm.ScalarMappable:
+    """在已有的 Axes 上绘制瞬时场插值图（内部辅助函数）。
 
-    # 瞬时声压场 = 复振幅的实部 Re(H)
+    Returns:
+        contourf 返回的 ScalarMappable 对象，可用于外部创建共享 ColorBar。
+    """
+    grid_resolution = 100
     instantaneous_field = complex_amplitudes.real
 
-    # 创建插值网格
     x_min, x_max = x_coords.min(), x_coords.max()
     y_min, y_max = y_coords.min(), y_coords.max()
     x_margin = (x_max - x_min) * 0.1
@@ -497,39 +603,462 @@ def _plot_instantaneous(
     Xi, Yi = np.meshgrid(xi, yi)
 
     points = np.column_stack((x_coords, y_coords))
-
     try:
-        field_interpolated = griddata(
+        field_interp = griddata(
             points, instantaneous_field, (Xi, Yi),
-            method=interpolation_method, fill_value=np.nan,
+            method="cubic", fill_value=np.nan,
         )
-    except Exception as e:
-        f_logger.warning(f"cubic插值失败({e})，回退到linear插值")
-        field_interpolated = griddata(
+    except Exception:
+        field_interp = griddata(
             points, instantaneous_field, (Xi, Yi),
             method="linear", fill_value=np.nan,
         )
 
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-
-    # 对称颜色范围，确保零值在中央
-    vmax = max(np.max(np.abs(instantaneous_field)), np.nanmax(np.abs(field_interpolated)))
-    vmin = -vmax
+    # 强制对称颜色范围，确保白色始终代表零声压
+    if vmin is None or vmax is None:
+        auto_vmax = float(max(
+            np.max(np.abs(instantaneous_field)),
+            np.nanmax(np.abs(field_interp)),
+        ))
+        if vmin is None:
+            vmin = -auto_vmax
+        if vmax is None:
+            vmax = auto_vmax
+    # 强制对称: vmin = -vmax
+    abs_max = max(abs(vmin), abs(vmax))
+    vmin, vmax = -abs_max, abs_max
 
     im = ax.contourf(
-        Xi, Yi, field_interpolated,
+        Xi, Yi, field_interp,
         levels=50, cmap="RdBu_r", vmin=vmin, vmax=vmax,
     )
-    ax.set_xlabel("X 坐标 (mm)", fontsize=12)
-    ax.set_ylabel("Y 坐标 (mm)", fontsize=12)
-    ax.set_title("瞬时声压场分布 Re(H)", fontsize=14, fontweight="bold")
+    ax.set_xlabel("X 坐标 (mm)", fontsize=10)
+    ax.set_ylabel("Y 坐标 (mm)", fontsize=10)
+    if title:
+        ax.set_title(title, fontsize=11, fontweight="bold")
     ax.set_aspect("equal", adjustable="box")
-    cbar = fig.colorbar(im, ax=ax, label="瞬时声压场强度")
-    cbar.ax.tick_params(labelsize=10)
 
-    plt.tight_layout()
-    f_logger.debug("瞬时声压场分布图绘制完成")
-    return fig, ax
+    if show_colorbar:
+        cbar = fig.colorbar(im, ax=ax, label=colorbar_label)
+        cbar.ax.tick_params(labelsize=10)
+
+    return im
+
+
+# ---------------------------------------------------------------------------
+#  综合实验绘图函数
+# ---------------------------------------------------------------------------
+
+
+def _render_subplot(
+    ax: Axes, fig: Figure,
+    data_list: list[PointTFData] | None,
+    state: str,
+    vmin: float, vmax: float,
+    picked_center: Point2D,
+    picked_area_radius: float,
+    area_shape: str,
+    title: str = "",
+):
+    """渲染单个子图（normal / partial / unavailable）。"""
+    ax.set_title(title, fontsize=10, fontweight="bold")
+
+    if state == "unavailable" or data_list is None:
+        ax.set_facecolor("lightgray")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        return
+
+    # 内联绘制瞬时场插值图
+    _x = np.array([p["position"].x for p in data_list])
+    _y = np.array([p["position"].y for p in data_list])
+    _ca = np.array([p["complex_amplitude"] for p in data_list])
+    _plot_instantaneous_on_ax(
+        ax, fig, _x, _y, _ca,
+        vmin=vmin, vmax=vmax,
+        show_colorbar=False, title=title,
+    )
+
+    if state == "partial":
+        for spine in ax.spines.values():
+            spine.set_edgecolor("orange")
+            spine.set_linewidth(3)
+        ax.text(
+            0.5, 0.5, "!",
+            transform=ax.transAxes, fontsize=48,
+            color="orange", alpha=0.3,
+            ha="center", va="center", fontweight="bold",
+        )
+    else:  # normal — 绘制 picked_area 轮廓
+        cx, cy = picked_center.x, picked_center.y
+        r = picked_area_radius
+        if area_shape == "circle":
+            patch = Circle(
+                (cx, cy), r, fill=False,
+                edgecolor="orange", linewidth=2, linestyle="--",
+            )
+            ax.add_patch(patch)
+        else:
+            ax.plot(
+                [cx - r, cx + r, cx + r, cx - r, cx - r],
+                [cy - r, cy - r, cy + r, cy + r, cy - r],
+                color="orange", linewidth=2, linestyle="--",
+            )
+
+
+def plot_comprehensive_experiment(
+    # --- 10 组数据路径 ---
+    left_r_0_static_folder: str | Path | None = None,
+    left_r_0_feedback_folder: str | Path | None = None,
+    left_r_minus1_static_folder: str | Path | None = None,
+    left_r_minus1_feedback_folder: str | Path | None = None,
+    right_r_plus1_static_folder: str | Path | None = None,
+    right_r_plus1_feedback_folder: str | Path | None = None,
+    right_r_0_static_folder: str | Path | None = None,
+    right_r_0_feedback_folder: str | Path | None = None,
+    left_background_folder: str | Path | None = None,
+    right_background_folder: str | Path | None = None,
+    # --- 区域选取参数 ---
+    picked_center: Point2D = Point2D(x=155.5, y=155.5),
+    picked_area_radius: PositiveFloat = 100,
+    area_shape: Literal["square", "circle"] = "square",
+    # --- 积分参数 ---
+    integral_mode: Literal["abs", "fourier"] = "abs",
+    k_modulus: float = 2 * np.pi / 0.1,
+    k_angle_deg: float = 180,
+    save_path: str | Path | None = None,
+) -> tuple[Figure, tuple]:
+    """
+    绘制一次完整综合实验的结果图。
+
+    基于 10 组 SweepData 进行处理、加减运算、区域选取、振幅积分，
+    最终生成 passive 和 active 两张图，每张包含瞬时场分布、
+    共享归一化 ColorBar 以及散射矩阵数值。
+
+    子图状态:
+    - **normal**: 正常绘制瞬时场 + picked_area 橘黄色线框
+    - **partial**: 绘制瞬时场 + 橘黄色粗边框 + 感叹号（数据部分缺失）
+    - **unavailable**: 灰色填充（数据完全不可用）
+
+    Args:
+        left_r_0_static_folder: 左侧 r=0 静态数据文件夹路径
+        left_r_0_feedback_folder: 左侧 r=0 反馈数据文件夹路径
+        left_r_minus1_static_folder: 左侧 r=-1 静态数据文件夹路径
+        left_r_minus1_feedback_folder: 左侧 r=-1 反馈数据文件夹路径
+        right_r_plus1_static_folder: 右侧 r=+1 静态数据文件夹路径
+        right_r_plus1_feedback_folder: 右侧 r=+1 反馈数据文件夹路径
+        right_r_0_static_folder: 右侧 r=0 静态数据文件夹路径
+        right_r_0_feedback_folder: 右侧 r=0 反馈数据文件夹路径
+        left_background_folder: 左侧背景数据文件夹路径
+        right_background_folder: 右侧背景数据文件夹路径
+        picked_center: 区域选取中心点 (mm)，默认 (155.5, 155.5)
+        picked_area_radius: 区域选取半径 (mm)，默认 100
+        area_shape: 区域形状 "square" 或 "circle"，默认 "square"
+        integral_mode: 积分模式 "abs" 或 "fourier"，默认 "abs"
+        k_modulus: 波矢模值 (1/m)，默认 2π/0.1
+        k_angle_deg: 波矢角度 (度)，默认 180
+        save_path: 图片保存路径，None 则不保存
+
+    Returns:
+        (fig_passive, fig_active): 两个 Figure 对象的元组
+    """
+    f_logger = get_logger(f"{__name__}.plot_comprehensive_experiment")
+    f_logger.info("开始绘制综合实验结果")
+
+    # -- 内部辅助: 从文件夹加载 SweepData --
+    def _load_from_folder(folder: str | Path | None) -> SweepData | None:
+        if folder is None:
+            return None
+        pkl_path = Path(folder) / "sweep_data.pkl"
+        try:
+            return load_compressed_data(pkl_path, data_type_name="SweepData")
+        except (FileNotFoundError, OSError) as e:
+            f_logger.warning(f"加载失败: {pkl_path}, {e}")
+            return None
+
+    # -- 内部辅助: 渲染 S 矩阵 --
+    def _render_s_matrix_inner(
+        ax: Axes,
+        s_real: list[list[float]],
+        s_complex: list[list[complex]] | None = None,
+    ):
+        ax.axis("off")
+        ax.set_title("Scattering Matrix", fontsize=11, fontweight="bold")
+        m = [[f"{abs(v):.4f}" for v in row] for row in s_real]
+        mat_str = (
+            f"$S = "
+            f"\\left[\\begin{{matrix}}"
+            f"{m[0][0]} & {m[0][1]} \\\\[4pt]"
+            f"{m[1][0]} & {m[1][1]}"
+            f"\\end{{matrix}}\\right]$"
+        )
+        y_pos = 0.65 if s_complex is not None else 0.5
+        ax.text(0.5, y_pos, mat_str, fontsize=13, ha="center", va="center")
+        if s_complex is not None:
+            rows_strs = []
+            for row in s_complex:
+                parts = [f"{v.real:+.3f}{v.imag:+.3f}i" for v in row]
+                rows_strs.append(" & ".join(parts))
+            cmat = " \\\\[4pt]".join(rows_strs)
+            cmat_str = f"$\\left[\\begin{{matrix}}{cmat}\\end{{matrix}}\\right]$"
+            ax.text(0.5, 0.28, cmat_str, fontsize=9, ha="center", va="center")
+
+    # ==================================================================
+    # 1. 加载数据
+    # ==================================================================
+    folder_map = {
+        "l_r0_s": left_r_0_static_folder,
+        "l_r0_f": left_r_0_feedback_folder,
+        "l_rm1_s": left_r_minus1_static_folder,
+        "l_rm1_f": left_r_minus1_feedback_folder,
+        "r_rp1_s": right_r_plus1_static_folder,
+        "r_rp1_f": right_r_plus1_feedback_folder,
+        "r_r0_s": right_r_0_static_folder,
+        "r_r0_f": right_r_0_feedback_folder,
+        "l_bg": left_background_folder,
+        "r_bg": right_background_folder,
+    }
+    raw: dict[str, SweepData | None] = {}
+    for key, folder in folder_map.items():
+        raw[key] = _load_from_folder(folder)
+        if raw[key] is None and folder is not None:
+            f_logger.warning(f"数据加载失败: {key} → {folder}")
+
+    # 获取实验频率（从第一个可用的 sweep_data 中提取）
+    ref_freq = 1000.0
+    for sd in raw.values():
+        if sd is not None:
+            ref_freq = float(getattr(sd["ao_data"], "frequency", 1000.0))
+            break
+    lowcut, highcut = ref_freq / 2, ref_freq * 2
+    f_logger.info(f"实验频率: {ref_freq} Hz, 滤波范围: [{lowcut}, {highcut}] Hz")
+
+    # ==================================================================
+    # 2. 转换为 PointTFData
+    # ==================================================================
+    tf: dict[str, list[PointTFData] | None] = {}
+    for key, sd in raw.items():
+        if sd is not None:
+            tf[key] = sweep_data_to_point_tf_data_list(
+                sd, lowcut=lowcut, highcut=highcut
+            )
+        else:
+            tf[key] = None
+
+    # ==================================================================
+    # 3. 加减运算 → passive / active
+    #    combine_point_tf_data_list 已内置 None 安全特性
+    # ==================================================================
+    # passive = static - background
+    p_l_r0 = combine_point_tf_data_list(tf["l_r0_s"], tf["r_bg"], mode="minus")
+    p_l_rm1 = combine_point_tf_data_list(tf["l_rm1_s"], tf["l_bg"], mode="minus")
+    p_r_rp1 = combine_point_tf_data_list(tf["r_rp1_s"], tf["l_bg"], mode="minus")
+    p_r_r0 = combine_point_tf_data_list(tf["r_r0_s"], tf["r_bg"], mode="minus")
+
+    # active = passive + feedback
+    a_l_r0 = combine_point_tf_data_list(p_l_r0, tf["l_r0_f"], mode="add")
+    a_l_rm1 = combine_point_tf_data_list(p_l_rm1, tf["l_rm1_f"], mode="add")
+    a_r_rp1 = combine_point_tf_data_list(p_r_rp1, tf["r_rp1_f"], mode="add")
+    a_r_r0 = combine_point_tf_data_list(p_r_r0, tf["r_r0_f"], mode="add")
+
+    bg_data = tf["l_bg"]
+
+    # ==================================================================
+    # 4. 确定每个子图的状态
+    # ==================================================================
+    def _passive_state(static_key: str, bg_key: str) -> str:
+        if raw[static_key] is None:
+            return "unavailable"
+        if raw[bg_key] is None:
+            return "partial"
+        return "normal"
+
+    def _active_state(static_key: str, bg_key: str, fb_key: str) -> str:
+        if raw[static_key] is None:
+            return "unavailable"
+        if raw[bg_key] is None or raw[fb_key] is None:
+            return "partial"
+        return "normal"
+
+    passive_info = [
+        (p_l_r0, _passive_state("l_r0_s", "r_bg"), "r\u2080 (left)"),
+        (p_r_rp1, _passive_state("r_rp1_s", "l_bg"), "r\u208a\u2081 (right)"),
+        (p_l_rm1, _passive_state("l_rm1_s", "l_bg"), "r\u208b\u2081 (left)"),
+        (p_r_r0, _passive_state("r_r0_s", "r_bg"), "r\u2080 (right)"),
+    ]
+    active_info = [
+        (a_l_r0, _active_state("l_r0_s", "r_bg", "l_r0_f"), "r\u2080 (left)"),
+        (a_r_rp1, _active_state("r_rp1_s", "l_bg", "r_rp1_f"), "r\u208a\u2081 (right)"),
+        (a_l_rm1, _active_state("l_rm1_s", "l_bg", "l_rm1_f"), "r\u208b\u2081 (left)"),
+        (a_r_r0, _active_state("r_r0_s", "r_bg", "r_r0_f"), "r\u2080 (right)"),
+    ]
+    bg_state = "normal" if bg_data is not None else "unavailable"
+
+    # ==================================================================
+    # 5. 区域选取 + 振幅积分
+    # ==================================================================
+    def _pick_and_integrate(
+        data: list[PointTFData] | None,
+        k_angle: float | None = None,
+    ) -> tuple[float, complex | None]:
+        """返回 (amp_for_display, complex_integral_or_None)。"""
+        if data is None:
+            return 0.0, None
+        picked = pick_area(data, picked_center, picked_area_radius, area_shape)
+        amp = calculate_amplitude_integral(picked, mode=integral_mode,
+                                           k_modulus=k_modulus,
+                                           k_angle_deg=k_angle if k_angle is not None else k_angle_deg)
+        if integral_mode == "fourier":
+            return abs(amp), amp  # type: ignore[return-value]
+        return float(amp), None
+
+    p_amps = [_pick_and_integrate(d)[0] for d, _, _ in passive_info]
+    a_amps = [_pick_and_integrate(d)[0] for d, _, _ in active_info]
+    bg_amp_val, _ = _pick_and_integrate(bg_data, k_angle=0)
+
+    # fourier 模式下额外计算复数积分值
+    p_complex = (
+        [_pick_and_integrate(d)[1] for d, _, _ in passive_info]
+        if integral_mode == "fourier" else None
+    )
+    a_complex = (
+        [_pick_and_integrate(d)[1] for d, _, _ in active_info]
+        if integral_mode == "fourier" else None
+    )
+
+    # ==================================================================
+    # 6. 计算全局颜色范围和归一化
+    # ==================================================================
+    all_datasets: list[list[PointTFData]] = []
+    for d, s, _ in passive_info + active_info:
+        if d is not None and s != "unavailable":
+            all_datasets.append(d)
+    if bg_data is not None:
+        all_datasets.append(bg_data)
+
+    global_max = 0.0
+    for d in all_datasets:
+        inst_vals = np.array([p["complex_amplitude"].real for p in d])
+        if inst_vals.size:
+            global_max = max(global_max, float(np.max(np.abs(inst_vals))))
+
+    bg_amp_abs = abs(bg_amp_val) if bg_amp_val else 1.0
+    norm_ref = max(global_max, bg_amp_abs)
+    if norm_ref == 0:
+        norm_ref = 1.0
+    g_vmax = norm_ref
+    g_vmin = -norm_ref
+
+    # ==================================================================
+    # 7. 构建单张图的通用绘制器
+    # ==================================================================
+    def _build_figure(
+        info_list: list[tuple],
+        bg_st: str,
+        s_real: list[list[float]],
+        s_cplx: list[list[complex]] | None,
+        fig_title: str,
+    ) -> Figure:
+        fig = plt.figure(figsize=(24, 12))
+        gs = GridSpec(
+            2, 5, figure=fig,
+            width_ratios=[1.2, 1, 1, 0.55, 0.35],
+            hspace=0.32, wspace=0.28,
+        )
+
+        # 左侧背景子图（跨两行）
+        ax_bg = fig.add_subplot(gs[:, 0])
+        _render_subplot(
+            ax_bg, fig, bg_data, bg_st, g_vmin, g_vmax,
+            picked_center, picked_area_radius, area_shape,
+            title="Background (left)",
+        )
+
+        # 2×2 子图: 左上=r₀(L), 右上=r₊₁(R), 左下=r₋₁(L), 右下=r₀(R)
+        positions = [(0, 1), (0, 2), (1, 1), (1, 2)]
+        for (data, state, title), (r, c) in zip(info_list, positions):
+            ax = fig.add_subplot(gs[r, c])
+            _render_subplot(
+                ax, fig, data, state, g_vmin, g_vmax,
+                picked_center, picked_area_radius, area_shape,
+                title=title,
+            )
+
+        # S 矩阵（第4列，跨两行）
+        s_ax = fig.add_subplot(gs[:, 3])
+        _render_s_matrix_inner(s_ax, s_real, s_cplx)
+
+        # 共享 ColorBar（第5列，归一化至背景振幅）
+        sm = plt.cm.ScalarMappable(
+            cmap="RdBu_r",
+            norm=plt.Normalize(vmin=g_vmin, vmax=g_vmax),
+        )
+        cbar_ax = fig.add_subplot(gs[:, 4])
+        cbar = fig.colorbar(sm, cax=cbar_ax)
+        ticks = np.linspace(g_vmin, g_vmax, 7)
+        cbar.set_ticks(ticks)
+        cbar.set_ticklabels([f"{t / bg_amp_abs:.2f}" for t in ticks])
+        cbar.set_label("归一化振幅 (÷ 背景)", fontsize=10)
+        cbar.ax.tick_params(labelsize=9)
+
+        fig.suptitle(fig_title, fontsize=14, fontweight="bold", y=0.98)
+        return fig
+
+    # ==================================================================
+    # 8. 绘制 Passive 图
+    # ==================================================================
+    s_real_p = [
+        [p_amps[0], p_amps[1]],   # [r₀(L), r₊₁(R)]
+        [p_amps[2], p_amps[3]],   # [r₋₁(L), r₀(R)]
+    ]
+    s_cplx_p = None
+    if integral_mode == "fourier" and p_complex is not None:
+        s_cplx_p = [
+            [p_complex[0], p_complex[1]],
+            [p_complex[2], p_complex[3]],
+        ]
+    fig_passive = _build_figure(
+        passive_info, bg_state, s_real_p, s_cplx_p,
+        f"Passive  |  mode={integral_mode}  freq={ref_freq:.0f} Hz",
+    )
+
+    # ==================================================================
+    # 9. 绘制 Active 图
+    # ==================================================================
+    s_real_a = [
+        [a_amps[0], a_amps[1]],
+        [a_amps[2], a_amps[3]],
+    ]
+    s_cplx_a = None
+    if integral_mode == "fourier" and a_complex is not None:
+        s_cplx_a = [
+            [a_complex[0], a_complex[1]],
+            [a_complex[2], a_complex[3]],
+        ]
+    fig_active = _build_figure(
+        active_info, bg_state, s_real_a, s_cplx_a,
+        f"Active  |  mode={integral_mode}  freq={ref_freq:.0f} Hz",
+    )
+
+    # ==================================================================
+    # 10. 保存
+    # ==================================================================
+    if save_path is not None:
+        sp = Path(save_path)
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        fig_passive.savefig(sp.with_stem(sp.stem + "_passive"),
+                            dpi=300, bbox_inches="tight")
+        fig_active.savefig(sp.with_stem(sp.stem + "_active"),
+                           dpi=300, bbox_inches="tight")
+        f_logger.info(f"图片已保存至: {save_path}")
+
+    f_logger.info("综合实验绘图完成")
+    return fig_passive, fig_active
+
+
+# ---------------------------------------------------------------------------
+#  时域波形绘图函数
+# ---------------------------------------------------------------------------
 
 
 def plot_waveform(
@@ -701,6 +1230,7 @@ def plot_waveform(
 
     # 9. 保存图片（如果指定了路径）
     if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
         f_logger.info(f"波形图已保存至: {save_path}")
 
@@ -751,7 +1281,6 @@ def plot_sweep_waveforms(
     f_logger = get_logger(f"{__name__}.plot_sweep_waveforms")
 
     from datetime import datetime
-    from pathlib import Path
 
     f_logger.info("开始批量绘制SweepData波形图")
 

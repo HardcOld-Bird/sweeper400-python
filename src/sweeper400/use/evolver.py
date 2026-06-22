@@ -40,6 +40,155 @@ from ..measure import SingleChasCSIO
 logger = get_logger(__name__)
 
 
+class _AndersonAccelerator:
+    """
+    Anderson Acceleration (AA) 加速器，用于加速不动点迭代收敛。
+
+    ## 原理
+
+    对于不动点迭代 ``x_{k+1} = G(x_k)``，Anderson Acceleration 利用最近
+    ``m`` 个迭代的差值信息做最小二乘外推：
+
+    .. math::
+
+        x_{k+1}^{AA} = G(x_k) - \\sum_{j=1}^{m_k} \\gamma_j
+            \\bigl(\\Delta g_{k-j} - \\Delta g_k\\bigr)
+
+    其中 :math:`\\Delta g_k = G(x_k) - x_k`（残差），
+    :math:`\\Delta x_j = x_{j+1} - x_j`，
+    系数 :math:`\\gamma_j` 由最小二乘求解
+    :math:`\\min_\\gamma \\|\\Delta g_k - \\sum \\gamma_j \\Delta g_{k-j}\\|_2`
+    得到，:math:`m_k = \\min(m, k)`。
+
+    对线性问题（如本项目的 ``a_{k+1} = A_α a_k + b_α``），AA 等价于 GMRES，
+    能将几千步 Picard 迭代压缩到几十步甚至更少。对非线性/含噪声的实测场景，
+    AA 也能提供显著加速（深度 ``m`` 不宜过大，3~5 即可）。
+
+    ## 使用方式
+
+    本类作为内部工具，由 ``Evolver`` 在 ``simulate()`` 和 ``evolve()`` 中
+    自动创建和使用。每轮迭代时：
+
+    1. ``_feedback_method`` 按原逻辑计算松弛 Picard 步 ``G_α(a_k)``；
+    2. 将 ``(a_k, G_α(a_k))`` 送入 ``apply()``，由 AA 外推出加速后的
+       ``a_{k+1}`` 作为最终迭代值。
+
+    前 ``m`` 步为 warmup 阶段（历史不足），自动退化为普通松弛 Picard 迭代。
+
+    References:
+        Walker, H.F. & Ni, P. (2011). Anderson Acceleration for Fixed-Point
+        Iterations. SIAM J. Numer. Anal., 49(4), 1715-1735.
+    """
+
+    def __init__(self, depth: int, dim: int) -> None:
+        """
+        初始化 Anderson 加速器。
+
+        Args:
+            depth: Anderson 深度 ``m``，即滑动窗口大小。0 表示禁用 AA
+                （退化为普通 Picard 迭代）。建议值 3~10；对线性问题
+                ``m >= dim`` 时可在 ``dim`` 步内精确收敛。
+            dim: 迭代向量维度（反馈 AO 通道数）。
+        """
+        self._depth: int = max(0, int(depth))
+        self._dim: int = dim
+        self.reset()
+
+    def reset(self) -> None:
+        """重置所有历史状态（新一轮迭代前调用）。"""
+        m = self._depth
+        if m <= 0:
+            return
+        # 预分配环形缓冲区
+        self._delta_x_hist = np.zeros((m, self._dim), dtype=np.complex128)
+        self._delta_g_hist = np.zeros((m, self._dim), dtype=np.complex128)
+        self._prev_x: np.ndarray | None = None
+        self._prev_residual: np.ndarray | None = None
+        self._count: int = 0
+
+    @property
+    def depth(self) -> int:
+        """Anderson 深度 ``m``。"""
+        return self._depth
+
+    @property
+    def current_count(self) -> int:
+        """当前已积累的历史步数。"""
+        return self._count
+
+    def apply(
+        self,
+        x_current: np.ndarray,
+        x_picard: np.ndarray,
+    ) -> np.ndarray:
+        """
+        应用 Anderson 加速，返回加速后的下一个迭代值。
+
+        当 ``depth <= 0`` 或历史不足（首步）时，退化为普通 Picard 步
+        （直接返回 ``x_picard``）。
+
+        Args:
+            x_current: 当前迭代值 ``a_k``，shape ``(dim,)``。
+            x_picard: 松弛 Picard 步结果 ``G_α(a_k)``，shape ``(dim,)``。
+
+        Returns:
+            加速后的下一个迭代值 ``a_{k+1}``，shape ``(dim,)``。
+        """
+        if self._depth <= 0:
+            return x_picard.copy()
+
+        # 残差 f_k = G_α(a_k) - a_k
+        residual = x_picard - x_current
+
+        if self._prev_x is not None and self._prev_residual is not None:
+            # 当前缓冲区写入位置
+            idx = self._count % self._depth
+            # Δx_k = a_k - a_{k-1}，Δg_k = f_k - f_{k-1}
+            delta_x = x_current - self._prev_x
+            delta_g = residual - self._prev_residual
+            # 写入环形缓冲区（存储差值，覆盖最旧条目）
+            self._delta_x_hist[idx] = delta_x
+            self._delta_g_hist[idx] = delta_g
+            self._count += 1
+            self._prev_x = x_current.copy()
+            self._prev_residual = residual.copy()
+
+            # 有效历史长度
+            m_k = min(self._count, self._depth)
+
+            # 构建最小二乘问题
+            # ΔG: (m_k, dim)，ΔX: (m_k, dim)
+            if self._count <= self._depth:
+                # 尚未填满，直接取前 m_k 行
+                delta_g_mat = self._delta_g_hist[:m_k]
+                delta_x_mat = self._delta_x_hist[:m_k]
+            else:
+                # 已填满，从最旧到最新重新排列
+                start = self._count % self._depth
+                delta_g_mat = np.roll(self._delta_g_hist, -start, axis=0)
+                delta_x_mat = np.roll(self._delta_x_hist, -start, axis=0)
+
+            # 最小二乘：min_γ ||ΔG^T γ - f_k||_2
+            # ΔG^T: (dim, m_k)，f_k: (dim,)
+            gram = delta_g_mat.T  # (dim, m_k)
+            gamma, _res, _rank, _sv = np.linalg.lstsq(
+                gram, residual, rcond=None
+            )
+
+            # Anderson 外推：
+            # a_{k+1} = G_α(a_k) - Σ γ_j (Δx_j - Δg_j)
+            correction = gamma @ (delta_x_mat - delta_g_mat)
+            x_next = x_picard - correction
+
+            return x_next.astype(np.complex128)
+        else:
+            # 首步：无历史，直接 Picard
+            self._count = 0  # 尚无任何差值对
+            self._prev_x = x_current.copy()
+            self._prev_residual = residual.copy()
+            return x_picard.copy()
+
+
 class Evolver:
     """
     # 反馈演化器
@@ -59,13 +208,15 @@ class Evolver:
     2. 用 ``extract_single_tone_information_vvi`` 估计 AI 各通道的"总声场复振幅"；
     3. 利用预先存储的传递矩阵对角元，从总声场中扣除"自身反馈通道贡献"，
        得到"入射声场复振幅"；
-    4. 依据增益系数计算目标总声场，进而得到"全步长"反馈 AO 更新量 Δa；
-       再按**自适应松弛因子 α*** 缩放（``a_new = a_old + α* · Δa``），避免
+    4. 依据增益系数计算目标总声场，进而得到“全步长”反馈 AO 更新量 Δa；
+       再按**自适应松弛因子 α*** 缩放（``a_picard = a_old + α* · Δa``），避免
        谱半径过大时的发散；
-    5. 幅值安全检查（默认 0.5 V 上限）；
-    6. 整体重建 static + feedback 合并波形并通过
+    5. **Anderson 加速**（默认启用）：利用最近 m 步的迭代差值信息做
+       最小二乘外推，显著加速收敛（详见下方“Anderson Acceleration”小节）；
+    6. 幅值安全检查（默认 0.5 V 上限）；
+    7. 整体重建 static + feedback 合并波形并通过
        ``SingleChasCSIO.update_static_output_waveform`` 更换；
-    7. 阻塞等待 ``settle_time``，确保新稳态形成后再开始下一轮。
+    8. 阻塞等待 ``settle_time``，确保新稳态形成后再开始下一轮。
 
     ## 收敛性与自适应松弛因子
 
@@ -80,6 +231,19 @@ class Evolver:
     - 通过日志直观告知用户系统能否收敛、衰减率多少。
 
     后续 ``_feedback_method`` 与 ``evolve()`` 都会自动使用 α*。
+
+    ## Anderson Acceleration (AA)
+
+    为加速收敛（尤其是 ρ≈1 的缓慢收敛场景），``simulate()`` 和 ``evolve()``
+    均在核心迭代逻辑中集成了 Anderson Acceleration。AA 利用最近 ``m`` 步
+    迭代的差值信息做最小二乘外推，对线性问题等价于 GMRES，能将几千步
+    Picard 迭代压缩到几十步甚至更少。通过 ``aa_depth`` 参数控制：
+
+    - ``aa_depth > 0``（默认 5）：启用 AA，滑动窗口大小为 ``m``；
+    - ``aa_depth = 0``：禁用 AA，退化为普通松弛 Picard 迭代。
+
+    AA 与松弛因子 α 完全叠加使用——α 负责保证迭代算子谱半径 < 1，
+    AA 在此基础上一进步加速收敛，不修改迭代算子本身。
 
     ## 使用方式
 
@@ -272,6 +436,7 @@ class Evolver:
         self._picked_floquet_gains_3: np.ndarray | None = None
         self._picked_cr: float | None = None
         self._picked_ci: float | None = None
+        self._picked_mode: str | None = None
 
         # ---- 反馈滤波器（按频率构建一次） ----
         self._sos = butter(
@@ -604,7 +769,7 @@ class Evolver:
         if self._scan_result_data is not None:
             return self._scan_result_data
 
-        npz_path = self._sim_result_scan_path / "scan_result.npz"
+        npz_path = self._sim_result_scan_path
         if not npz_path.exists():
             raise FileNotFoundError(
                 f"SimScanner 扫描结果文件不存在: {npz_path}\n"
@@ -817,6 +982,7 @@ class Evolver:
         pick_max: bool = False,
         ao_amplitude_limit: PositiveFloat = 0.5,
         result_folder: str | Path | None = None,
+        aa_depth: int = 0,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         从扫描结果中选取增益系数，计算理论稳态解，并执行解析迭代仿真。
@@ -840,9 +1006,10 @@ class Evolver:
 
         3. **解析迭代阶段**：从 0 反馈出发，每周期调用
            ``_feedback_method(mode="analytical")``（内部用传递矩阵解析推算总声场，
-           等价于"无噪声理想环境"），并将结果回灌到 ``_current_ao_complex_amps``。
+           等价于“无噪声理想环境”），并可选施加 Anderson Acceleration
+           加速收敛，将结果回灌到 ``_current_ao_complex_amps``。
            迭代将持续进行，直到连续两轮 8 个传声器复振幅的相对差小于
-           收敛容差（1%），或者超过最大迭代次数（10000）仍未收敛（此时
+           收敛容差（0.01%），或者超过最大迭代次数（10000）仍未收敛（此时
            发出警告并认为系统发散）。
 
         4. **可选绘图阶段**：若提供 ``result_folder``，则自动绘制并保存
@@ -870,6 +1037,10 @@ class Evolver:
                 与 ``evolve()`` 同名参数行为一致；仅在迭代阶段生效，超过即抛错。
             result_folder: 结果保存文件夹路径，可选。若提供则在末尾自动绘制
                 并保存 AI/AO 轨迹图及增益系数图。
+            aa_depth: Anderson Acceleration 深度（滑动窗口大小），默认 0。
+                设为 0 可禁用 AA（退化为普通松弛 Picard 迭代）。
+                对线性问题，``m >= 反馈通道数`` 时可在 ``m`` 步内精确收敛。
+                建议值 3~10。
 
         Returns:
             (theoretical_feedback_ao_complex_amps, theoretical_total_ai_complex_amps)，
@@ -912,6 +1083,7 @@ class Evolver:
         self._picked_floquet_gains_3 = floquet_gains_3
         self._picked_cr = picked_cr
         self._picked_ci = picked_ci
+        self._picked_mode = mode
 
         # 收敛性分析 + 自适应松弛因子
         eigenvalues, rho_unrelaxed, best_alpha, rho_relaxed = (
@@ -935,11 +1107,14 @@ class Evolver:
         )
 
         # ---- 阶段 3：解析迭代仿真（基于收敛判据的自动终止） ----
+        # 创建 Anderson 加速器
+        aa = _AndersonAccelerator(depth=aa_depth, dim=n_fb)
         self.logger.info(
             f"simulate 阶段 3/3: 解析迭代仿真，"
             f"容差={self._ITERATION_TOLERANCE:.1%}, "
             f"最大迭代={self._MAX_ITERATION_CYCLES}, "
-            f"ao_amplitude_limit={ao_amplitude_limit} V"
+            f"ao_amplitude_limit={ao_amplitude_limit} V, "
+            f"Anderson 深度={aa_depth}"
         )
         converged = False
         prev_ai_complex_amps: np.ndarray | None = None
@@ -947,7 +1122,7 @@ class Evolver:
 
         for cycle_idx in range(1, self._MAX_ITERATION_CYCLES + 1):
             new_ao_complex_amps = self._feedback_method(
-                ai_waveform=None, mode="analytical"
+                ai_waveform=None, mode="analytical", aa=aa
             )
             self._current_ao_complex_amps = new_ao_complex_amps.copy()
 
@@ -1057,40 +1232,44 @@ class Evolver:
         self,
         ai_waveform: Waveform | None,
         mode: Literal["acquisition", "analytical"] = "acquisition",
+        aa: _AndersonAccelerator | None = None,
     ) -> np.ndarray:
         """
-        基于一段（实测或解析推算的）"总声场复振幅"，按反馈律计算下一轮的反馈
+        基于一段（实测或解析推算的）“总声场复振幅”，按反馈律计算下一轮的反馈
         AO 复振幅。
 
         ## 模式
 
         - `"acquisition"`：**实测模式**（默认）。从传入的 `ai_waveform` 中通过
-          带通滤波 + 单频信息提取得到"总声场复振幅"。该模式与硬件采集流程
+          带通滤波 + 单频信息提取得到“总声场复振幅”。该模式与硬件采集流程
           严格对接，反馈结果会受到外部噪声、串扰、设备畸变等因素影响。
         - `"analytical"`：**解析模式**。完全忽略 `ai_waveform`（甚至允许传入
           None），转而用预先存储的传递矩阵
           `T_i = sum_s tf_static[s, i] * amps_static[s]
                  + sum_j tf_feedback[j, i] * old_ao[j]`
-          直接推算"总声场复振幅"。该模式排除一切外部噪声/串扰/采集畸变，
+          直接推算“总声场复振幅”。该模式排除一切外部噪声/串扰/采集畸变，
           仅保留反馈律本身的数值行为，方便调试程序逻辑与对比理论。
 
         ## 通用步骤（无论哪种模式都执行）
 
-        1. 取得"总声场复振幅" T（acquisition 来自实测、analytical 来自传递矩阵）；
+        1. 取得“总声场复振幅” T（acquisition 来自实测、analytical 来自传递矩阵）；
         2. 旧反馈 AO 复振幅取 `self._current_ao_complex_amps`；
         3. 用 `tf_diag` 扣除自身反馈通道的贡献得到入射声场复振幅；
-        4. 由增益系数计算"全步长"反馈 AO 更新量 Δa，并按
-           **自适应松弛因子** ``self._relaxation_factor`` (α*) 缩放：
-           ``a_new = a_old + α* · Δa``。该 α* 在 ``simulate()`` 阶段由
-           ``_analyze_convergence`` 计算，目的是让迭代算子
-           ``(1-α)I + α A`` 的谱半径尽量小（< 1 即收敛）；
-        5. 幅值安全检查（任意通道超限即抛错）；
-        6. 同时把本轮 T 和新 AO 复振幅追加到内部历史轨迹中。
+        4. 由增益系数计算“全步长”反馈 AO 更新量 Δa，并按
+           **自适应松弛因子** `self._relaxation_factor` (α*) 缩放：
+           `a_picard = a_old + α* · Δa`；
+        5. **Anderson 加速**（可选）：若传入 `aa` 加速器，则将
+           `(a_old, a_picard)` 送入 Anderson 外推，得到加速后的 `a_new`；
+        6. 幅值安全检查（任意通道超限即抛错）；
+        7. 同时把本轮 T 和新 AO 复振幅追加到内部历史轨迹中。
 
         Args:
             ai_waveform: 一整段稳态下的 AI 多通道波形。`mode="analytical"` 时
                 可传入 None（被忽略）。
             mode: 反馈数据来源模式，详见上方说明。
+            aa: Anderson 加速器实例（可选）。传入时自动对松弛 Picard 步
+                结果施加 Anderson 外推加速。`depth=0` 的加速器等价于
+                不加速。默认 `None` 表示不使用加速。
 
         Returns:
             新的反馈 AO 复振幅向量，shape (n_feedback,)。
@@ -1146,24 +1325,37 @@ class Evolver:
             total_ai_complex_amps - old_ao_complex_amps * self._tf_diag
         )
 
-        # ---- Step 4: 计算新反馈 AO 复振幅（含自适应松弛因子 α*） ----
-        # 反馈律的"全步长"更新量：delta_ao = (g·incident - T) / d
+        # ---- Step 4: 计算松弛 Picard 步（含自适应松弛因子 α*） ----
+        # 反馈律的“全步长”更新量：delta_ao = (g·incident - T) / d
         # 引入松弛因子 α∈(0, 1] 后，每周期只前进 α 倍，使迭代算子从 A 变为
         # (1-α)I + α A，从而把谱半径从 ρ(A) 压低到 ρ(A_α)（详见
         # `_analyze_convergence` 的推导）。α* 由初始化阶段一次性确定。
         target_total_ai = incident_complex_amps * self._gain_coefficients
         delta_ai = target_total_ai - total_ai_complex_amps
         delta_ao = delta_ai / self._tf_diag
-        new_ao_complex_amps = (
+        picard_ao = (
             old_ao_complex_amps + self._relaxation_factor * delta_ao
         ).astype(np.complex128)
+
+        # ---- Step 5: Anderson 加速（可选） ----
+        # 若提供了 AA 加速器，将 (a_k, G_α(a_k)) 送入外推，
+        # 得到加速后的 a_{k+1}。AA 不修改迭代算子本身，
+        # 仅利用历史差值信息做最小二乘外推。
+        if aa is not None and aa.depth > 0:
+            new_ao_complex_amps = aa.apply(old_ao_complex_amps, picard_ao)
+            self.logger.debug(
+                f"[{mode}] Anderson 加速 (m={aa.depth}, "
+                f"历史步数={aa.current_count})"
+            )
+        else:
+            new_ao_complex_amps = picard_ao
 
         self.logger.debug(
             f"[{mode}] 松弛因子 α={self._relaxation_factor:.4f}, "
             f"新反馈 AO 复振幅模长: {np.abs(new_ao_complex_amps)}"
         )
 
-        # ---- Step 5: 幅值安全检查 ----
+        # ---- Step 6: 幅值安全检查 ----
         magnitudes: np.ndarray = np.abs(new_ao_complex_amps)
         if np.max(magnitudes) > self._ao_amplitude_limit:
             exceeding_indices = np.where(magnitudes > self._ao_amplitude_limit)[0]
@@ -1175,7 +1367,7 @@ class Evolver:
             self.logger.error(msg)
             raise RuntimeError(msg)
 
-        # ---- Step 6: 追加 AO 历史 ----
+        # ---- Step 7: 追加 AO 历史 ----
         self._ao_complex_amps_history.append(new_ao_complex_amps.copy())
 
         return new_ao_complex_amps
@@ -1215,6 +1407,7 @@ class Evolver:
         cycles_num: PositiveInt = 10,
         ao_amplitude_limit: PositiveFloat = 0.5,
         result_folder: str | Path | None = None,
+        aa_depth: int = 0,
     ) -> Waveform | None:
         """
         启动反馈演化过程（阻塞执行）。
@@ -1228,7 +1421,8 @@ class Evolver:
         3. 循环执行 num_cycles 个演化周期：
            - 等待 ``settle_time`` 秒以确保稳态；
            - 取一段最新的 AI 波形；
-           - 调用 ``_feedback_method`` 处理数据，得到新的反馈 AO 复振幅；
+           - 调用 ``_feedback_method`` 处理数据，得到新的反馈 AO 复振幅
+             （可选施加 Anderson 加速）；
            - 构建新的合并波形并通过 ``update_static_output_waveform`` 更换；
         4. 停止 CSIO，构建并返回最终合并波形；
         5. 如果提供 ``result_folder``，自动保存最终波形和演化轨迹图。
@@ -1237,6 +1431,9 @@ class Evolver:
             cycles_num: 演化周期数，默认 10。
             ao_amplitude_limit: 反馈 AO 幅值安全上限（V），默认 0.5 V。
             result_folder: 结果保存文件夹路径，若提供则自动保存最终波形和演化图。
+            aa_depth: Anderson Acceleration 深度（滑动窗口大小），默认 0。
+                设为 0 可禁用 AA（退化为普通松弛 Picard 迭代）。
+                实测模式下建议 3~5，过大的深度可能放大测量噪声。
 
         Returns:
             最终合并的多通道 Waveform；若演化未成功则返回 None。
@@ -1292,6 +1489,7 @@ class Evolver:
         self.logger.info(f"演化周期数: {cycles_num}")
         self.logger.info(f"增益系数: {self._gain_coefficients}")
         self.logger.info(f"松弛因子 α*: {self._relaxation_factor:.4f}")
+        self.logger.info(f"Anderson 加速深度: {aa_depth}")
         self.logger.info(f"AO 幅值安全上限: {ao_amplitude_limit} V")
         self.logger.info(f"每段时长: {chunk_duration:.3f} s")
         self.logger.info(f"每轮稳态等待: {wait_time:.3f} s")
@@ -1304,6 +1502,11 @@ class Evolver:
             # ---- 启动 CSIO ----
             self._measure_controller.start()
             self.logger.info("SingleChasCSIO 任务已启动（稳态模式）")
+
+            # ---- 创建 Anderson 加速器 ----
+            aa = _AndersonAccelerator(
+                depth=aa_depth, dim=len(self._ao_channels_feedback)
+            )
 
             # ---- 演化主循环 ----
             for cycle_idx in range(1, cycles_num + 1):
@@ -1348,6 +1551,7 @@ class Evolver:
                 new_ao_complex_amps = self._feedback_method(
                     ai_waveform=ai_waveform,
                     mode="acquisition",
+                    aa=aa,
                 )
 
                 # 5. 更新当前缓存
@@ -1504,13 +1708,25 @@ class Evolver:
 
         # 数据源：history 形状 (cycles_num, n_ch)
         data_array = np.asarray(history)
+        # ---- 构建副标题（包含实验参数信息） ----
+        if self._picked_cr is not None and self._picked_ci is not None:
+            param_subtitle = (
+                f"（周期数: {num_cycles}，频率: {self._frequency:.1f} Hz，"
+                f"cr={self._picked_cr:.6f}, ci={self._picked_ci:.6f}, "
+                f"mode={self._picked_mode}）"
+            )
+        else:
+            param_subtitle = (
+                f"（周期数: {num_cycles}，频率: {self._frequency:.1f} Hz）"
+            )
+
         if mode == "absolute":
             plot_array = data_array
             xlabel = f"实部（{quantity_label}）"
             ylabel = f"虚部（{quantity_label}）"
             title = (
                 f"反馈演化 - {quantity_label} 复平面轨迹\n"
-                f"（周期数: {num_cycles}，频率: {self._frequency:.1f} Hz）"
+                f"{param_subtitle}"
             )
         else:  # mode == "diff"
             # 相对于理论解的差值轨迹
@@ -1519,11 +1735,29 @@ class Evolver:
             ylabel = f"虚部（{quantity_label} - 理论）"
             title = (
                 f"反馈演化 - {quantity_label} 与 理论稳态解 之差\n"
-                f"（周期数: {num_cycles}，频率: {self._frequency:.1f} Hz）"
+                f"{param_subtitle}"
             )
 
         fig, ax = plt.subplots(1, 1, figsize=(12, 10))
-        colors = plt.cm.tab20(np.linspace(0, 1, max(n_ch, 2)))
+
+        # ---- 通道配色：奇数通道（第1,3,5,7...）蓝色系，偶数通道（第2,4,6,8...）红色系 ----
+        n_odd = (n_ch + 1) // 2   # 奇数通道数（1-indexed: 1,3,5,7...）
+        n_even = n_ch // 2        # 偶数通道数（1-indexed: 2,4,6,8...）
+        odd_colors = plt.cm.Blues(
+            np.linspace(0.4, 0.9, max(n_odd, 1))
+        )  # 蓝色系
+        even_colors = plt.cm.Reds(
+            np.linspace(0.4, 0.9, max(n_even, 1))
+        )  # 红色系
+        colors = []
+        odd_idx, even_idx = 0, 0
+        for i in range(n_ch):
+            if i % 2 == 0:  # 0-indexed 偶数 = 1-indexed 奇数通道（第1,3,5...通道）
+                colors.append(odd_colors[odd_idx])
+                odd_idx += 1
+            else:            # 0-indexed 奇数 = 1-indexed 偶数通道（第2,4,6...通道）
+                colors.append(even_colors[even_idx])
+                even_idx += 1
 
         for i in range(n_ch):
             trajectory = plot_array[:, i]
@@ -1772,6 +2006,7 @@ def load_evolved_waveform(
     file_path: str | Path,
     segments: PositiveInt | None = None,
     picked_channels: tuple[str, ...] | None = None,
+    amp_multiplier: float = 1.0,
 ) -> Waveform:
     """
     从文件加载演化最终波形。
@@ -1792,6 +2027,10 @@ def load_evolved_waveform(
             通道（按 `picked_channels` 中的顺序排列），丢弃其余通道。若
             `picked_channels` 中包含原始波形不存在的通道名，则抛出 ValueError。
             默认 None（保留所有通道）。
+        amp_multiplier: 幅值缩放倍数，默认 1.0（不缩放）。加载后将所有通道的
+            所有信号采样值以及 `channel_complex_amplitudes` 均乘以该系数，
+            方便在使用时调整波形幅值（音量）大小。例如设为 0.5 可将幅值减半，
+            设为 2.0 可将幅值加倍。
 
     Returns:
         多通道 Waveform 对象，包含 static + feedback 通道的合并信号
@@ -1842,6 +2081,17 @@ def load_evolved_waveform(
         f_logger.info(
             f"已筛选通道: picked_channels={picked_channels}, "
             f"筛选后 shape={loaded_data.shape}"
+        )
+
+    # ---- 幅值缩放 ----
+    if amp_multiplier != 1.0:
+        loaded_data[:] *= amp_multiplier
+        if loaded_data.channel_complex_amplitudes is not None:
+            loaded_data.channel_complex_amplitudes = (
+                loaded_data.channel_complex_amplitudes * amp_multiplier
+            )
+        f_logger.info(
+            f"已应用幅值缩放: amp_multiplier={amp_multiplier}"
         )
 
     return loaded_data

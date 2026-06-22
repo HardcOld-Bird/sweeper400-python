@@ -104,6 +104,15 @@ def load_data_with_fallback(
     # 优先级1：用户显式提供的路径
     if explicit_path is not None:
         explicit_path_obj = Path(explicit_path)
+
+        # 如果显式路径是目录，自动从默认路径提取文件名进行拼接
+        if explicit_path_obj.is_dir():
+            default_filename = Path(default_path).name
+            explicit_path_obj = explicit_path_obj / default_filename
+            f_logger.warning(
+                f"显式路径为目录，自动拼接默认文件名: {explicit_path_obj}"
+            )
+
         if not explicit_path_obj.exists():
             error_msg = f"{data_type}文件不存在: {explicit_path_obj}"
             f_logger.error(error_msg)
