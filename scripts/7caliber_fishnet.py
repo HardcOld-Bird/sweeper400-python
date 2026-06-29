@@ -18,7 +18,7 @@ from sweeper400.config.exp_config import (
     sweep_ai_channel,
 )
 
-# %% 创建采样信息和正弦波参数（使用推荐的参数）
+# 创建采样信息和正弦波参数（使用推荐的参数）
 
 # 创建校准对象
 caliber = CaliberFishNet(

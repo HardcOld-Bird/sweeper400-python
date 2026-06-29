@@ -2913,7 +2913,7 @@ class FrequencyOptimizer:
         # 最终结果
         self._optimal_frequency: float | None = None
         self._optimal_sampling_info: SamplingInfo | None = None
-        self._optimization_mode: Literal["phase", "amplitude"] | None = None
+        self._optimization_mode: Literal["phase", "max_amplitude", "min_amplitude"] | None = None
         self._metric_ref: float = 1.0  # 归一化基准（第一次测量的|metric|）
 
         logger.info(
@@ -3016,24 +3016,25 @@ class FrequencyOptimizer:
     @staticmethod
     def _compute_metric(
         tf_data: TFData,
-        mode: Literal["phase", "amplitude"] = "amplitude",
+        mode: Literal["phase", "max_amplitude", "min_amplitude"] = "max_amplitude",
     ) -> tuple[float, np.ndarray, np.ndarray]:
         """
         从TFData计算优化指标
 
         根据 mode 选择不同的计算逻辑：
         - phase mode: 计算相邻通道相位差与π的加权平均偏差（rad）
-        - amplitude mode: 计算所有通道幅值之和
+        - max_amplitude mode: 计算所有通道幅值之和（越大越好）
+        - min_amplitude mode: 计算所有通道幅值之和（越小越好）
 
         Args:
             tf_data: 传递函数数据（1行×N列矩阵，行为AO通道，列为AI通道）
-            mode: 优化模式，默认 "amplitude"
+            mode: 优化模式，默认 "max_amplitude"
 
         Returns:
             tuple of:
             - metric (float): 指标值
               - phase mode: 加权平均相位偏差（正=频率偏高，负=频率偏低）
-              - amplitude mode: 所有通道幅值之和（越大越好）
+              - max_amplitude / min_amplitude mode: 所有通道幅值之和
             - amplitudes (ndarray): 各通道幅值数组
             - phases (ndarray): 各通道相位数组
         """
@@ -3046,7 +3047,7 @@ class FrequencyOptimizer:
         amplitudes = np.abs(tf_complex)
         phases = np.angle(tf_complex)
 
-        if mode == "amplitude":
+        if mode in ("max_amplitude", "min_amplitude"):
             # 目标函数：所有通道幅值之和
             metric = float(np.sum(amplitudes))
             logger.debug(
@@ -3079,7 +3080,7 @@ class FrequencyOptimizer:
 
     def optimize(
         self,
-        mode: Literal["amplitude", "phase"] = "amplitude",
+        mode: Literal["max_amplitude", "min_amplitude", "phase"] = "min_amplitude",
         initial_freq: float = 3430.0,
         second_freq: float = 3420.0,
         max_iterations: int = 10,
@@ -3097,12 +3098,15 @@ class FrequencyOptimizer:
 
         - **phase mode**: 寻找使相邻通道相位差与π的偏差为零的频率。
           使用线性插值（割线法）迭代逼近零点。适用于理想化的无限周期模型。
-        - **amplitude mode**: 寻找使所有通道幅值之和最大的频率。
+        - **max_amplitude mode**: 寻找使所有通道幅值之和最大的频率。
           仅假设目标函数是单峰的（先增后减），使用区间收缩法逐步
           逼近极大值。适用于有限周期的实际超表面。
+        - **min_amplitude mode**: 寻找使所有通道幅值之和最小的频率。
+          使用与 max_amplitude 相同的区间收缩法，但方向相反，逐步
+          逼近极小值。适用于寻找响应最弱的频率点。
 
         Args:
-            mode: 优化模式，"amplitude" 或 "phase"，默认 "amplitude"
+            mode: 优化模式，"max_amplitude"、"min_amplitude" 或 "phase"，默认 "max_amplitude"
             initial_freq: 初始测量频率（Hz），默认3430.0
             second_freq: 第二个测量频率（Hz），默认3440.0
             max_iterations: 最大迭代次数，默认10
@@ -3110,9 +3114,9 @@ class FrequencyOptimizer:
                       所有metric均以第一次测量值的绝对值为基准进行归一化，
                       因此tolerance表示"相对于初始值的比例"。
                       - phase mode: 当 |normalized_metric| < tolerance 时停止
-                      - amplitude mode: 收敛判据为存在3个相邻测量点(p1,p2,p3)，
-                        其中p2的metric大于p1和p3，且两侧归一化metric之差均
-                        < tolerance
+                      - max_amplitude / min_amplitude mode: 收敛判据为存在3个相邻
+                        测量点(p1,p2,p3)，其中p2的metric大于（max）或小于（min）
+                        p1和p3，且两侧归一化metric之差均 < tolerance
             starts_num: 每次测量中的独立校准次数，默认3
             chunks_per_start: 每次测量采集的chunk数，默认3
             settle_time: 稳定等待时间（秒）
@@ -3127,9 +3131,9 @@ class FrequencyOptimizer:
             RuntimeError: 当优化未能收敛时
         """
         # 验证 mode 参数
-        if mode not in ("amplitude", "phase"):
+        if mode not in ("max_amplitude", "min_amplitude", "phase"):
             raise ValueError(
-                f"mode 必须为 'amplitude' 或 'phase'，收到: '{mode}'"
+                f"mode 必须为 'max_amplitude'、'min_amplitude' 或 'phase'，收到: '{mode}'"
             )
 
         self._optimization_mode = mode
@@ -3222,12 +3226,12 @@ class FrequencyOptimizer:
         # 进入迭代优化
         freq_center = (initial_freq + second_freq) / 2.0
 
-        if mode == "amplitude":
+        if mode in ("max_amplitude", "min_amplitude"):
             iterate_result = self._iterate_amplitude(
                 initial_freq, second_freq, metric_1_norm, metric_2_norm,
                 freq_center, max_iterations, tolerance, starts_num,
                 chunks_per_start, settle_time, resolved_result_path,
-                measurement_counter,
+                measurement_counter, mode=mode,
             )
         else:
             iterate_result = self._iterate_phase(
@@ -3352,31 +3356,34 @@ class FrequencyOptimizer:
         settle_time: float | None,
         resolved_result_path: Path,
         measurement_counter: int,
+        mode: Literal["max_amplitude", "min_amplitude"] = "max_amplitude",
     ) -> float:
         """
-        Amplitude mode 迭代：区间收缩法寻找极大值
+        Amplitude mode 迭代：区间收缩法寻找极值
 
-        仅假设目标函数是单峰的（先增后减，有唯一极大值）。
-        通过逐步缩减包围峰值的区间来逼近极大值。
+        根据 mode 选择寻找极大值或极小值。仅假设目标函数是单峰的
+        （对极大值：先增后减；对极小值：先减后增）。
+        通过逐步缩减包围极值点的区间来逼近目标。
 
         算法步骤：
         1. 测量第三个点（根据前两点趋势方向选择），以建立初始区间
         2. 每次迭代：
            a. 将所有历史测量点按频率排序
            b. 检查收敛条件（是否存在满足条件的3相邻点）
-           c. 找到当前metric最大的点（peak candidate）
-           d. 若peak在边缘：向该方向延伸一步
-           e. 若peak被包围：在较宽半区间的中点测量以缩减区间
+           c. 找到当前metric最佳的点（peak/valley candidate）
+           d. 若极值点在边缘：向该方向延伸一步
+           e. 若极值点被包围：在较宽半区间的中点测量以缩减区间
         """
+        minimize = (mode == "min_amplitude")
         step = second_freq - initial_freq  # 有符号步长，保留方向信息
 
         # --- 第三个测量点 ---
-        # 根据前两点的趋势选择第三个点，以"包围"可能的峰值
-        if metric_2 > metric_1:
-            # 幅值朝 second_freq 方向增大，继续延伸
+        # 根据前两点的趋势选择第三个点，以"包围"可能的极值点
+        if (not minimize and metric_2 > metric_1) or (minimize and metric_2 < metric_1):
+            # 幅值朝更"好"的方向变化，继续延伸
             third_freq = second_freq + step
-        elif metric_1 > metric_2:
-            # 幅值朝 initial_freq 方向增大，反向延伸
+        elif (not minimize and metric_1 > metric_2) or (minimize and metric_1 < metric_2):
+            # 幅值反方向更"好"，反向延伸
             third_freq = initial_freq - step
         else:
             # 相等（极罕见），取中点
@@ -3397,7 +3404,7 @@ class FrequencyOptimizer:
             result_path=resolved_result_path,
         )
         metric_3, amps_3, phases_3 = self._compute_metric(
-            tf_data_3, "amplitude"
+            tf_data_3, mode
         )
         metric_3_norm = metric_3 / self._metric_ref
         self._measurement_history.append({
@@ -3423,26 +3430,33 @@ class FrequencyOptimizer:
             # 检查收敛条件：是否存在3个相邻点满足条件
             for i in range(n_points - 2):
                 p1, p2, p3 = sorted_hist[i], sorted_hist[i + 1], sorted_hist[i + 2]
+                is_extreme = (
+                    (p2["metric"] > p1["metric"] and p2["metric"] > p3["metric"])
+                    if not minimize
+                    else (p2["metric"] < p1["metric"] and p2["metric"] < p3["metric"])
+                )
                 if (
-                    p2["metric"] > p1["metric"]
-                    and p2["metric"] > p3["metric"]
-                    and (p2["metric"] - p1["metric"]) < tolerance
-                    and (p2["metric"] - p3["metric"]) < tolerance
+                    is_extreme
+                    and abs(p2["metric"] - p1["metric"]) < tolerance
+                    and abs(p2["metric"] - p3["metric"]) < tolerance
                 ):
                     best_freq = float(p2["frequency"])
+                    extreme_label = "极小" if minimize else "极大"
                     logger.info(
-                        f"已收敛！找到极大值点: {best_freq:.4f}Hz "
+                        f"已收敛！找到{extreme_label}值点: {best_freq:.4f}Hz "
                         f"(metric={p2['metric']:.6f}, "
-                        f"Δleft={p2['metric'] - p1['metric']:.6f}, "
-                        f"Δright={p2['metric'] - p3['metric']:.6f} "
+                        f"Δleft={abs(p2['metric'] - p1['metric']):.6f}, "
+                        f"Δright={abs(p2['metric'] - p3['metric']):.6f} "
                         f"< tolerance={tolerance})"
                     )
                     self._finalize(best_freq, resolved_result_path)
                     return best_freq
 
-            # 找到当前metric最大的点的索引（在sorted_hist中）
-            best_idx = max(
-                range(n_points), key=lambda i: sorted_hist[i]["metric"]
+            # 找到当前metric最优的点的索引（在sorted_hist中）
+            best_idx = (
+                max(range(n_points), key=lambda i: sorted_hist[i]["metric"])
+                if not minimize
+                else min(range(n_points), key=lambda i: sorted_hist[i]["metric"])
             )
 
             # 决定下一个测量点
@@ -3504,7 +3518,7 @@ class FrequencyOptimizer:
                 result_path=resolved_result_path,
             )
             metric_new, amps_new, phases_new = self._compute_metric(
-                tf_data_new, "amplitude"
+                tf_data_new, mode
             )
             metric_new_norm = metric_new / self._metric_ref
             self._measurement_history.append({
@@ -3517,15 +3531,18 @@ class FrequencyOptimizer:
                 f"频率 {new_freq:.2f}Hz: 归一化metric = {metric_new_norm:.6f}"
             )
 
-        # 未能完全收敛，使用幅值最大的测量点
-        best_entry = max(
-            self._measurement_history, key=lambda x: x["metric"]
+        # 未能完全收敛，使用幅值最优的测量点
+        best_entry = (
+            max(self._measurement_history, key=lambda x: x["metric"])
+            if not minimize
+            else min(self._measurement_history, key=lambda x: x["metric"])
         )
         best_freq = float(best_entry["frequency"])
+        extreme_label = "最小" if minimize else "最大"
 
         logger.warning(
             f"达到最大迭代次数 {max_iterations}，"
-            f"使用幅值之和最大的频率: {best_freq:.2f}Hz "
+            f"使用幅值之和{extreme_label}的频率: {best_freq:.2f}Hz "
             f"(metric={best_entry['metric']:.6f})"
         )
         self._finalize(best_freq, resolved_result_path)
@@ -3594,7 +3611,8 @@ class FrequencyOptimizer:
 
         根据优化模式自动选择绘图方式：
         - **phase mode**: 横轴频率，纵轴相位偏差(rad)，线性趋势线+零点标记
-        - **amplitude mode**: 横轴频率，纵轴幅值之和，测量点连线+峰值标记
+        - **max_amplitude mode**: 横轴频率，纵轴幅值之和，测量点连线+峰值标记
+        - **min_amplitude mode**: 横轴频率，纵轴幅值之和，测量点连线+谷值标记
 
         所有测量过的频率点绘制为散点，最终确定的最佳频率以竖线标记。
 
@@ -3609,7 +3627,7 @@ class FrequencyOptimizer:
 
         logger.info("开始绘制频率优化结果图")
 
-        mode = self._optimization_mode or "amplitude"
+        mode = self._optimization_mode or "max_amplitude"
 
         # 提取数据
         frequencies = np.array(
@@ -3655,7 +3673,7 @@ class FrequencyOptimizer:
         if mode == "phase":
             self._plot_trend(ax, frequencies, metrics, freq_range, "phase")
         else:
-            self._plot_trend(ax, frequencies, metrics, freq_range, "amplitude")
+            self._plot_trend(ax, frequencies, metrics, freq_range, mode)
 
         # 标记最终确定的最佳频率
         if self._optimal_frequency is not None:
@@ -3679,7 +3697,12 @@ class FrequencyOptimizer:
         else:
             ax.set_ylabel("归一化幅值之和", fontsize=12)
 
-        mode_label = "Phase" if mode == "phase" else "Amplitude"
+        if mode == "phase":
+            mode_label = "Phase"
+        elif mode == "min_amplitude":
+            mode_label = "Min Amplitude"
+        else:
+            mode_label = "Max Amplitude"
         ax.set_title(
             f"频率优化结果 ({mode_label} mode)\n"
             f"AI通道数: {len(self._ai_channels)}, "
@@ -3708,7 +3731,7 @@ class FrequencyOptimizer:
         frequencies: np.ndarray,
         metrics: np.ndarray,
         freq_range: np.ndarray,
-        mode: Literal["phase", "amplitude"] = "amplitude",
+        mode: Literal["phase", "max_amplitude", "min_amplitude"] = "max_amplitude",
     ) -> None:
         """
         根据模式绘制趋势线
@@ -3718,7 +3741,7 @@ class FrequencyOptimizer:
             frequencies: 测量频率数组
             metrics: 指标数组
             freq_range: 用于绘制趋势线的频率范围
-            mode: 优化模式，默认 "amplitude"
+            mode: 优化模式，默认 "max_amplitude"
         """
         if mode == "phase":
             # Phase mode: 线性趋势线 + 零点标记
@@ -3759,7 +3782,7 @@ class FrequencyOptimizer:
                     label=f"趋势线零点: {zero_freq:.2f}Hz",
                 )
         else:
-            # Amplitude mode: 连接线 + 峰值标记
+            # Amplitude mode: 连接线 + 极值标记
             if len(frequencies) < 2:
                 return
 
@@ -3777,8 +3800,9 @@ class FrequencyOptimizer:
                 label="测量点连线",
             )
 
-            # 标记当前最大值点
-            best_idx = np.argmax(metrics)
+            # 标记当前极值点（最大或最小）
+            best_idx = np.argmin(metrics) if mode == "min_amplitude" else np.argmax(metrics)
+            extreme_label = "最小" if mode == "min_amplitude" else "最大"
             ax.scatter(
                 [frequencies[best_idx]],
                 [metrics[best_idx]],
@@ -3788,7 +3812,7 @@ class FrequencyOptimizer:
                 edgecolors="darkgreen",
                 linewidths=1.5,
                 zorder=6,
-                label=f"最大幅值点: {frequencies[best_idx]:.2f}Hz",
+                label=f"{extreme_label}幅值点: {frequencies[best_idx]:.2f}Hz",
             )
 
     @property

@@ -234,7 +234,7 @@ class SingleChasCSIO:
         self._worker_thread: threading.Thread | None = None
         self._data_ready_event = threading.Event()  # 数据就绪事件
         self._stop_event = threading.Event()
-        self._queue_lock = threading.Lock()  # 保护队列的锁
+        self._ai_queue_lock = threading.Lock()  # 保护AI数据队列的锁
 
         # 私有属性 - 数据缓冲和控制
         self._ai_queue: deque[Any] = deque()  # 存储AI数据的双端队列
@@ -800,7 +800,7 @@ class SingleChasCSIO:
             )
 
             # 将数据加入队列并设置事件
-            with self._queue_lock:
+            with self._ai_queue_lock:
                 self._ai_queue.append(data)
 
             # 通知工作线程有新数据
@@ -840,7 +840,7 @@ class SingleChasCSIO:
             # 处理队列中的所有数据
             while True:
                 # 从队列中取出数据
-                with self._queue_lock:
+                with self._ai_queue_lock:
                     if not self._ai_queue:
                         # 队列为空，退出循环
                         break
@@ -1067,8 +1067,9 @@ class SingleChasCSIO:
             self._ao_task_feedback = None
 
         # 清空缓冲区和计数器
-        with self._queue_lock:
+        with self._ai_queue_lock:
             self._ai_queue.clear()
+        self._feedback_ao_queue.clear()
         self._chunks_num = 0
 
         # 重置事件状态

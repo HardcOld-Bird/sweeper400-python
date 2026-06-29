@@ -44,6 +44,7 @@ from .plot import (
     plot_sweep_data_as_single_waveform,
     plot_sweep_waveforms,
     plot_waveform,
+    prepare_comprehensive_experiment_data,
     sweep_data_to_point_tf_data_list,
 )
 from .post_process import (
@@ -91,6 +92,7 @@ __all__ = [
     "pick_area",
     "calculate_amplitude_integral",
     "plot_comprehensive_experiment",
+    "prepare_comprehensive_experiment_data",
     "PointTFData",
     "load_compressed_data",
     "pick_waveform_channels",

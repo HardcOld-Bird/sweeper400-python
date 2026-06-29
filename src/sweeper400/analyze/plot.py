@@ -24,7 +24,7 @@ from ..logger import get_logger
 from .basic_sine import extract_single_tone_information_vvi
 from .filter import filter_sweep_data
 from .my_dtypes import Point2D, PositiveFloat, SweepData, Waveform
-from .post_process import average_sweep_data, load_compressed_data
+from .post_process import average_sweep_data, load_compressed_data, save_compressed_data
 
 # 配置matplotlib中文字体支持
 setup_chinese_fonts()
@@ -706,7 +706,7 @@ def _render_subplot(
             )
 
 
-def plot_comprehensive_experiment(
+def prepare_comprehensive_experiment_data(
     # --- 10 组数据路径 ---
     left_r_0_static_folder: str | Path | None = None,
     left_r_0_feedback_folder: str | Path | None = None,
@@ -718,27 +718,15 @@ def plot_comprehensive_experiment(
     right_r_0_feedback_folder: str | Path | None = None,
     left_background_folder: str | Path | None = None,
     right_background_folder: str | Path | None = None,
-    # --- 区域选取参数 ---
-    picked_center: Point2D = Point2D(x=155.5, y=155.5),
-    picked_area_radius: PositiveFloat = 100,
-    area_shape: Literal["square", "circle"] = "square",
-    # --- 积分参数 ---
-    integral_mode: Literal["abs", "fourier"] = "abs",
-    k_modulus: float = 2 * np.pi / 0.1,
-    k_angle_deg: float = 180,
+    # --- 保存路径 ---
     save_path: str | Path | None = None,
-) -> tuple[Figure, tuple]:
+) -> Path:
     """
-    绘制一次完整综合实验的结果图。
+    预处理综合实验数据：逐个加载 SweepData 并转换为 PointTFData，打包保存。
 
-    基于 10 组 SweepData 进行处理、加减运算、区域选取、振幅积分，
-    最终生成 passive 和 active 两张图，每张包含瞬时场分布、
-    共享归一化 ColorBar 以及散射矩阵数值。
-
-    子图状态:
-    - **normal**: 正常绘制瞬时场 + picked_area 橘黄色线框
-    - **partial**: 绘制瞬时场 + 橘黄色粗边框 + 感叹号（数据部分缺失）
-    - **unavailable**: 灰色填充（数据完全不可用）
+    由于 SweepData 体积较大，同时加载10组数据会占用大量内存。
+    本函数逐个加载 SweepData，立即转换为轻量的 PointTFData 后释放原始数据，
+    最终将所有 PointTFData 结果打包保存为压缩 pkl 文件。
 
     Args:
         left_r_0_static_folder: 左侧 r=0 静态数据文件夹路径
@@ -751,6 +739,102 @@ def plot_comprehensive_experiment(
         right_r_0_feedback_folder: 右侧 r=0 反馈数据文件夹路径
         left_background_folder: 左侧背景数据文件夹路径
         right_background_folder: 右侧背景数据文件夹路径
+        save_path: 预处理结果保存路径（pkl 文件路径）
+
+    Returns:
+        Path: 实际保存路径
+    """
+    import gc
+
+    f_logger = get_logger(f"{__name__}.prepare_comprehensive_experiment_data")
+    f_logger.info("开始预处理综合实验数据")
+
+    if save_path is None:
+        raise ValueError("save_path 不能为 None，请指定预处理结果的保存路径")
+
+    folder_map = {
+        "l_r0_s": left_r_0_static_folder,
+        "l_r0_f": left_r_0_feedback_folder,
+        "l_rm1_s": left_r_minus1_static_folder,
+        "l_rm1_f": left_r_minus1_feedback_folder,
+        "r_rp1_s": right_r_plus1_static_folder,
+        "r_rp1_f": right_r_plus1_feedback_folder,
+        "r_r0_s": right_r_0_static_folder,
+        "r_r0_f": right_r_0_feedback_folder,
+        "l_bg": left_background_folder,
+        "r_bg": right_background_folder,
+    }
+
+    # 获取实验频率（先从第一个可用数据中提取）
+    ref_freq = 1000.0
+    for folder in folder_map.values():
+        if folder is None:
+            continue
+        pkl_path = Path(folder) / "sweep_data.pkl"
+        try:
+            sd = load_compressed_data(pkl_path, data_type_name="SweepData")
+            ref_freq = float(getattr(sd["ao_data"], "frequency", 1000.0))
+            del sd
+            gc.collect()
+            break
+        except (FileNotFoundError, OSError):
+            continue
+    lowcut, highcut = ref_freq / 2, ref_freq * 2
+    f_logger.info(f"实验频率: {ref_freq} Hz, 滤波范围: [{lowcut}, {highcut}] Hz")
+
+    # 逐个加载 SweepData → 转换为 PointTFData → 释放内存
+    tf: dict[str, list[PointTFData] | None] = {}
+    for key, folder in folder_map.items():
+        if folder is None:
+            tf[key] = None
+            continue
+        pkl_path = Path(folder) / "sweep_data.pkl"
+        try:
+            sd = load_compressed_data(pkl_path, data_type_name="SweepData")
+        except (FileNotFoundError, OSError) as e:
+            f_logger.warning(f"加载失败: {pkl_path}, {e}")
+            tf[key] = None
+            continue
+        tf[key] = sweep_data_to_point_tf_data_list(sd, lowcut=lowcut, highcut=highcut)
+        del sd  # 立即释放原始 SweepData 内存
+        gc.collect()
+        f_logger.info(f"已处理: {key} ({folder})")
+
+    # 打包保存
+    result = {"ref_freq": ref_freq, "tf": tf}
+    save_path = Path(save_path)
+    save_compressed_data(result, save_path, data_type_name="综合实验预处理数据")
+    f_logger.info("预处理完成")
+    return save_path
+
+def plot_comprehensive_experiment(
+    # --- 预处理数据路径 ---
+    data_pkl_path: str | Path,
+    # --- 区域选取参数 ---
+    picked_center: Point2D = Point2D(x=155.5, y=155.5),
+    picked_area_radius: PositiveFloat = 100,
+    area_shape: Literal["square", "circle"] = "square",
+    # --- 积分参数 ---
+    integral_mode: Literal["abs", "fourier"] = "abs",
+    k_modulus: float = 2 * np.pi / 0.1,
+    k_angle_deg: float = 180,
+    save_path: str | Path | None = None,
+) -> tuple[Figure, Figure]:
+    """
+    绘制一次完整综合实验的结果图。
+
+    基于 prepare_comprehensive_experiment_data 预处理的 PointTFData 数据，
+    进行加减运算、区域选取、振幅积分，
+    最终生成 passive 和 active 两张图，每张包含瞬时场分布、
+    共享归一化 ColorBar 以及散射矩阵数值。
+
+    子图状态:
+    - **normal**: 正常绘制瞬时场 + picked_area 橘黄色线框
+    - **partial**: 绘制瞬时场 + 橘黄色粗边框 + 感叹号（数据部分缺失）
+    - **unavailable**: 灰色填充（数据完全不可用）
+
+    Args:
+        data_pkl_path: 预处理数据 pkl 文件路径（由 prepare_comprehensive_experiment_data 生成）
         picked_center: 区域选取中心点 (mm)，默认 (155.5, 155.5)
         picked_area_radius: 区域选取半径 (mm)，默认 100
         area_shape: 区域形状 "square" 或 "circle"，默认 "square"
@@ -765,88 +849,48 @@ def plot_comprehensive_experiment(
     f_logger = get_logger(f"{__name__}.plot_comprehensive_experiment")
     f_logger.info("开始绘制综合实验结果")
 
-    # -- 内部辅助: 从文件夹加载 SweepData --
-    def _load_from_folder(folder: str | Path | None) -> SweepData | None:
-        if folder is None:
-            return None
-        pkl_path = Path(folder) / "sweep_data.pkl"
-        try:
-            return load_compressed_data(pkl_path, data_type_name="SweepData")
-        except (FileNotFoundError, OSError) as e:
-            f_logger.warning(f"加载失败: {pkl_path}, {e}")
-            return None
-
     # -- 内部辅助: 渲染 S 矩阵 --
     def _render_s_matrix_inner(
         ax: Axes,
         s_real: list[list[float]],
         s_complex: list[list[complex]] | None = None,
     ):
+        """使用纯文本（等宽字体）渲染散射矩阵，避免 mathtext 兼容性问题。"""
         ax.axis("off")
         ax.set_title("Scattering Matrix", fontsize=11, fontweight="bold")
+        # 实数振幅矩阵
         m = [[f"{abs(v):.4f}" for v in row] for row in s_real]
-        mat_str = (
-            f"$S = "
-            f"\\left[\\begin{{matrix}}"
-            f"{m[0][0]} & {m[0][1]} \\\\[4pt]"
-            f"{m[1][0]} & {m[1][1]}"
-            f"\\end{{matrix}}\\right]$"
-        )
+        col_w = [max(len(m[r][c]) for r in range(len(m))) for c in range(len(m[0]))]
+        lines = []
+        for row in m:
+            cells = [v.rjust(col_w[c]) for c, v in enumerate(row)]
+            lines.append(f"[ {'  '.join(cells)} ]")
+        matrix_text = "S = " + lines[0] + "\n    " + "\n    ".join(lines[1:])
         y_pos = 0.65 if s_complex is not None else 0.5
-        ax.text(0.5, y_pos, mat_str, fontsize=13, ha="center", va="center")
+        ax.text(0.5, y_pos, matrix_text, fontsize=12, ha="center", va="center",
+                fontfamily="monospace", linespacing=1.8)
+        # 复数矩阵（fourier 模式）
         if s_complex is not None:
-            rows_strs = []
-            for row in s_complex:
-                parts = [f"{v.real:+.3f}{v.imag:+.3f}i" for v in row]
-                rows_strs.append(" & ".join(parts))
-            cmat = " \\\\[4pt]".join(rows_strs)
-            cmat_str = f"$\\left[\\begin{{matrix}}{cmat}\\end{{matrix}}\\right]$"
-            ax.text(0.5, 0.28, cmat_str, fontsize=9, ha="center", va="center")
+            c_strs = [[f"{v.real:+.3f}{v.imag:+.3f}i" for v in row] for row in s_complex]
+            c_col_w = [max(len(c_strs[r][c]) for r in range(len(c_strs))) for c in range(len(c_strs[0]))]
+            c_lines = []
+            for row in c_strs:
+                cells = [v.rjust(c_col_w[c]) for c, v in enumerate(row)]
+                c_lines.append(f"[ {'  '.join(cells)} ]")
+            cmat_text = "\n".join(c_lines)
+            ax.text(0.5, 0.22, cmat_text, fontsize=8, ha="center", va="center",
+                    fontfamily="monospace", linespacing=1.8)
 
     # ==================================================================
-    # 1. 加载数据
+    # 1. 加载预处理数据
     # ==================================================================
-    folder_map = {
-        "l_r0_s": left_r_0_static_folder,
-        "l_r0_f": left_r_0_feedback_folder,
-        "l_rm1_s": left_r_minus1_static_folder,
-        "l_rm1_f": left_r_minus1_feedback_folder,
-        "r_rp1_s": right_r_plus1_static_folder,
-        "r_rp1_f": right_r_plus1_feedback_folder,
-        "r_r0_s": right_r_0_static_folder,
-        "r_r0_f": right_r_0_feedback_folder,
-        "l_bg": left_background_folder,
-        "r_bg": right_background_folder,
-    }
-    raw: dict[str, SweepData | None] = {}
-    for key, folder in folder_map.items():
-        raw[key] = _load_from_folder(folder)
-        if raw[key] is None and folder is not None:
-            f_logger.warning(f"数据加载失败: {key} → {folder}")
-
-    # 获取实验频率（从第一个可用的 sweep_data 中提取）
-    ref_freq = 1000.0
-    for sd in raw.values():
-        if sd is not None:
-            ref_freq = float(getattr(sd["ao_data"], "frequency", 1000.0))
-            break
-    lowcut, highcut = ref_freq / 2, ref_freq * 2
-    f_logger.info(f"实验频率: {ref_freq} Hz, 滤波范围: [{lowcut}, {highcut}] Hz")
+    preprocessed = load_compressed_data(data_pkl_path, data_type_name="综合实验预处理数据")
+    ref_freq: float = preprocessed["ref_freq"]
+    tf: dict[str, list[PointTFData] | None] = preprocessed["tf"]
+    f_logger.info(f"已加载预处理数据, 实验频率: {ref_freq} Hz")
 
     # ==================================================================
-    # 2. 转换为 PointTFData
-    # ==================================================================
-    tf: dict[str, list[PointTFData] | None] = {}
-    for key, sd in raw.items():
-        if sd is not None:
-            tf[key] = sweep_data_to_point_tf_data_list(
-                sd, lowcut=lowcut, highcut=highcut
-            )
-        else:
-            tf[key] = None
-
-    # ==================================================================
-    # 3. 加减运算 → passive / active
+    # 2. 加减运算 → passive / active
     #    combine_point_tf_data_list 已内置 None 安全特性
     # ==================================================================
     # passive = static - background
@@ -867,35 +911,36 @@ def plot_comprehensive_experiment(
     # 4. 确定每个子图的状态
     # ==================================================================
     def _passive_state(static_key: str, bg_key: str) -> str:
-        if raw[static_key] is None:
+        if tf[static_key] is None:
             return "unavailable"
-        if raw[bg_key] is None:
+        if tf[bg_key] is None:
             return "partial"
         return "normal"
 
     def _active_state(static_key: str, bg_key: str, fb_key: str) -> str:
-        if raw[static_key] is None:
+        if tf[static_key] is None:
             return "unavailable"
-        if raw[bg_key] is None or raw[fb_key] is None:
+        if tf[bg_key] is None or tf[fb_key] is None:
             return "partial"
         return "normal"
 
     passive_info = [
-        (p_l_r0, _passive_state("l_r0_s", "r_bg"), "r\u2080 (left)"),
-        (p_r_rp1, _passive_state("r_rp1_s", "l_bg"), "r\u208a\u2081 (right)"),
-        (p_l_rm1, _passive_state("l_rm1_s", "l_bg"), "r\u208b\u2081 (left)"),
-        (p_r_r0, _passive_state("r_r0_s", "r_bg"), "r\u2080 (right)"),
+        (p_l_r0, _passive_state("l_r0_s", "r_bg"), r"$r_0$ (left)"),
+        (p_r_rp1, _passive_state("r_rp1_s", "l_bg"), r"$r_{+1}$ (right)"),
+        (p_l_rm1, _passive_state("l_rm1_s", "l_bg"), r"$r_{-1}$ (left)"),
+        (p_r_r0, _passive_state("r_r0_s", "r_bg"), r"$r_0$ (right)"),
     ]
     active_info = [
-        (a_l_r0, _active_state("l_r0_s", "r_bg", "l_r0_f"), "r\u2080 (left)"),
-        (a_r_rp1, _active_state("r_rp1_s", "l_bg", "r_rp1_f"), "r\u208a\u2081 (right)"),
-        (a_l_rm1, _active_state("l_rm1_s", "l_bg", "l_rm1_f"), "r\u208b\u2081 (left)"),
-        (a_r_r0, _active_state("r_r0_s", "r_bg", "r_r0_f"), "r\u2080 (right)"),
+        (a_l_r0, _active_state("l_r0_s", "r_bg", "l_r0_f"), r"$r_0$ (left)"),
+        (a_r_rp1, _active_state("r_rp1_s", "l_bg", "r_rp1_f"), r"$r_{+1}$ (right)"),
+        (a_l_rm1, _active_state("l_rm1_s", "l_bg", "l_rm1_f"), r"$r_{-1}$ (left)"),
+        (a_r_r0, _active_state("r_r0_s", "r_bg", "r_r0_f"), r"$r_0$ (right)"),
     ]
     bg_state = "normal" if bg_data is not None else "unavailable"
 
     # ==================================================================
     # 5. 区域选取 + 振幅积分
+    #    背景场使用原始 k_angle_deg，其余场（已减背景）使用相反方向 k_angle_deg + 180
     # ==================================================================
     def _pick_and_integrate(
         data: list[PointTFData] | None,
@@ -912,42 +957,44 @@ def plot_comprehensive_experiment(
             return abs(amp), amp  # type: ignore[return-value]
         return float(amp), None
 
-    p_amps = [_pick_and_integrate(d)[0] for d, _, _ in passive_info]
-    a_amps = [_pick_and_integrate(d)[0] for d, _, _ in active_info]
-    bg_amp_val, _ = _pick_and_integrate(bg_data, k_angle=0)
+    # 背景场使用原始 k_angle_deg，其余场（已减背景）使用相反方向 k_angle_deg + 180
+    k_field = k_angle_deg + 180.0
 
-    # fourier 模式下额外计算复数积分值
+    p_amps = [_pick_and_integrate(d, k_angle=k_field)[0] for d, _, _ in passive_info]
+    a_amps = [_pick_and_integrate(d, k_angle=k_field)[0] for d, _, _ in active_info]
+    bg_amp_val, bg_complex_val = _pick_and_integrate(bg_data, k_angle=k_angle_deg)
+
+    # fourier 模式下额外计算复数积分值（使用 k_angle_deg + 180 方向）
     p_complex = (
-        [_pick_and_integrate(d)[1] for d, _, _ in passive_info]
+        [_pick_and_integrate(d, k_angle=k_field)[1] for d, _, _ in passive_info]
         if integral_mode == "fourier" else None
     )
     a_complex = (
-        [_pick_and_integrate(d)[1] for d, _, _ in active_info]
+        [_pick_and_integrate(d, k_angle=k_field)[1] for d, _, _ in active_info]
         if integral_mode == "fourier" else None
     )
 
     # ==================================================================
-    # 6. 计算全局颜色范围和归一化
+    # 6. 计算颜色范围（passive 和 active 各自独立，确保两者均有合适的显示标度）
     # ==================================================================
-    all_datasets: list[list[PointTFData]] = []
-    for d, s, _ in passive_info + active_info:
-        if d is not None and s != "unavailable":
-            all_datasets.append(d)
-    if bg_data is not None:
-        all_datasets.append(bg_data)
+    def _compute_vrange(
+        info_list: list[tuple],
+    ) -> tuple[float, float]:
+        """从一组子图数据中计算瞬时场颜色对称范围。"""
+        _max = 0.0
+        for d, s, _ in info_list:
+            if d is not None and s != "unavailable":
+                inst_vals = np.array([p["complex_amplitude"].real for p in d])
+                if inst_vals.size:
+                    _max = max(_max, float(np.max(np.abs(inst_vals))))
+        if _max == 0.0:
+            _max = 1e-6
+        return -_max, _max
 
-    global_max = 0.0
-    for d in all_datasets:
-        inst_vals = np.array([p["complex_amplitude"].real for p in d])
-        if inst_vals.size:
-            global_max = max(global_max, float(np.max(np.abs(inst_vals))))
+    p_vmin, p_vmax = _compute_vrange(passive_info)
+    a_vmin, a_vmax = _compute_vrange(active_info)
 
     bg_amp_abs = abs(bg_amp_val) if bg_amp_val else 1.0
-    norm_ref = max(global_max, bg_amp_abs)
-    if norm_ref == 0:
-        norm_ref = 1.0
-    g_vmax = norm_ref
-    g_vmin = -norm_ref
 
     # ==================================================================
     # 7. 构建单张图的通用绘制器
@@ -958,18 +1005,20 @@ def plot_comprehensive_experiment(
         s_real: list[list[float]],
         s_cplx: list[list[complex]] | None,
         fig_title: str,
+        vmin: float,
+        vmax: float,
     ) -> Figure:
         fig = plt.figure(figsize=(24, 12))
         gs = GridSpec(
             2, 5, figure=fig,
-            width_ratios=[1.2, 1, 1, 0.55, 0.35],
+            width_ratios=[1.2, 1, 1, 0.35, 0.55],
             hspace=0.32, wspace=0.28,
         )
 
         # 左侧背景子图（跨两行）
         ax_bg = fig.add_subplot(gs[:, 0])
         _render_subplot(
-            ax_bg, fig, bg_data, bg_st, g_vmin, g_vmax,
+            ax_bg, fig, bg_data, bg_st, vmin, vmax,
             picked_center, picked_area_radius, area_shape,
             title="Background (left)",
         )
@@ -979,69 +1028,96 @@ def plot_comprehensive_experiment(
         for (data, state, title), (r, c) in zip(info_list, positions):
             ax = fig.add_subplot(gs[r, c])
             _render_subplot(
-                ax, fig, data, state, g_vmin, g_vmax,
+                ax, fig, data, state, vmin, vmax,
                 picked_center, picked_area_radius, area_shape,
                 title=title,
             )
 
-        # S 矩阵（第4列，跨两行）
-        s_ax = fig.add_subplot(gs[:, 3])
-        _render_s_matrix_inner(s_ax, s_real, s_cplx)
-
-        # 共享 ColorBar（第5列，归一化至背景振幅）
+        # 共享 ColorBar（第4列，位于中央子图右侧、S矩阵左侧，归一化至背景振幅）
         sm = plt.cm.ScalarMappable(
             cmap="RdBu_r",
-            norm=plt.Normalize(vmin=g_vmin, vmax=g_vmax),
+            norm=plt.Normalize(vmin=vmin, vmax=vmax),
         )
-        cbar_ax = fig.add_subplot(gs[:, 4])
+        cbar_ax = fig.add_subplot(gs[:, 3])
         cbar = fig.colorbar(sm, cax=cbar_ax)
-        ticks = np.linspace(g_vmin, g_vmax, 7)
+        ticks = np.linspace(vmin, vmax, 7)
         cbar.set_ticks(ticks)
         cbar.set_ticklabels([f"{t / bg_amp_abs:.2f}" for t in ticks])
         cbar.set_label("归一化振幅 (÷ 背景)", fontsize=10)
         cbar.ax.tick_params(labelsize=9)
 
+        # S 矩阵（第5列，跨两行）
+        s_ax = fig.add_subplot(gs[:, 4])
+        _render_s_matrix_inner(s_ax, s_real, s_cplx)
+
         fig.suptitle(fig_title, fontsize=14, fontweight="bold", y=0.98)
         return fig
 
     # ==================================================================
-    # 8. 绘制 Passive 图
+    # 8. 计算 S 矩阵
+    #    所有分母统一使用 l_bg（左侧背景场），因所有入射均来自左侧。
+    #    fourier 模式：先复数除法得到复S矩阵，再取abs得实S矩阵；
+    #    abs 模式：直接实数除法。
     # ==================================================================
-    s_real_p = [
-        [p_amps[0], p_amps[1]],   # [r₀(L), r₊₁(R)]
-        [p_amps[2], p_amps[3]],   # [r₋₁(L), r₀(R)]
-    ]
-    s_cplx_p = None
-    if integral_mode == "fourier" and p_complex is not None:
-        s_cplx_p = [
-            [p_complex[0], p_complex[1]],
-            [p_complex[2], p_complex[3]],
+    def _build_s_matrix(
+        amps: list[float],
+        cplx: list[complex] | None,
+        bg_amp: float,
+        bg_cplx: complex | None,
+    ) -> tuple[list[list[float]], list[list[complex]] | None]:
+        """构建 S 矩阵 (2×2)，返回 (s_real, s_complex_or_None)。
+
+        S 矩阵布局：
+        - S[0][0] = l_r0 / l_bg   （左入射镜面反射）
+        - S[0][1] = r_rp1 / l_bg  （右入射逆反射）
+        - S[1][0] = l_rm1 / l_bg  （左入射逆反射）
+        - S[1][1] = r_r0 / l_bg   （右入射镜面反射）
+        """
+        if integral_mode == "fourier" and cplx is not None and bg_cplx is not None and bg_cplx != 0:
+            # 复数除法得到复S矩阵
+            s_c = [
+                [cplx[0] / bg_cplx, cplx[1] / bg_cplx],
+                [cplx[2] / bg_cplx, cplx[3] / bg_cplx],
+            ]
+            # 取abs得到实S矩阵（切忌直接对积分值取模长然后做实数除法）
+            s_r = [
+                [abs(s_c[0][0]), abs(s_c[0][1])],
+                [abs(s_c[1][0]), abs(s_c[1][1])],
+            ]
+            return s_r, s_c
+        # abs 模式（或 fourier 模式但复数数据缺失时回退）
+        denom = bg_amp if bg_amp != 0.0 else 1.0
+        s_r = [
+            [amps[0] / denom, amps[1] / denom],
+            [amps[2] / denom, amps[3] / denom],
         ]
+        return s_r, None
+
+    s_real_p, s_cplx_p = _build_s_matrix(p_amps, p_complex, bg_amp_abs,
+                                         bg_complex_val if integral_mode == "fourier" else None)
+    s_real_a, s_cplx_a = _build_s_matrix(a_amps, a_complex, bg_amp_abs,
+                                         bg_complex_val if integral_mode == "fourier" else None)
+
+    # ==================================================================
+    # 9. 绘制 Passive 图
+    # ==================================================================
     fig_passive = _build_figure(
         passive_info, bg_state, s_real_p, s_cplx_p,
         f"Passive  |  mode={integral_mode}  freq={ref_freq:.0f} Hz",
+        vmin=p_vmin, vmax=p_vmax,
     )
 
     # ==================================================================
-    # 9. 绘制 Active 图
+    # 10. 绘制 Active 图
     # ==================================================================
-    s_real_a = [
-        [a_amps[0], a_amps[1]],
-        [a_amps[2], a_amps[3]],
-    ]
-    s_cplx_a = None
-    if integral_mode == "fourier" and a_complex is not None:
-        s_cplx_a = [
-            [a_complex[0], a_complex[1]],
-            [a_complex[2], a_complex[3]],
-        ]
     fig_active = _build_figure(
         active_info, bg_state, s_real_a, s_cplx_a,
         f"Active  |  mode={integral_mode}  freq={ref_freq:.0f} Hz",
+        vmin=a_vmin, vmax=a_vmax,
     )
 
     # ==================================================================
-    # 10. 保存
+    # 11. 保存
     # ==================================================================
     if save_path is not None:
         sp = Path(save_path)

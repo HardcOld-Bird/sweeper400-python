@@ -567,6 +567,9 @@ class SweeperCore:
         这是MotorController.move_absolute_2D方法的封装，方便用户在创建sweeper后
         移动步进电机来确定位置。
 
+        注意：当扫场正在运行时，该方法会拒绝执行并返回False，
+        以避免与后台扫场线程产生电机并发访问冲突。
+
         Args:
             x_mm: X轴目标绝对位置（毫米），0mm代表X轴负限位（零位）
             y_mm: Y轴目标绝对位置（毫米），0mm代表Y轴负限位（零位）
@@ -586,6 +589,14 @@ class SweeperCore:
         if not hasattr(self, "_move_controller"):
             raise RuntimeError("步进电机控制器未初始化")
 
+        # 安全守卫：防止扫场运行时从外部并发操作电机
+        if self._is_running:
+            logger.error(
+                "扫场正在运行中，无法执行手动移动操作。"
+                "请先等待扫场完成或调用 stop() 中止扫场。"
+            )
+            return False
+
         logger.info(f"移动到位置: ({x_mm:.3f}, {y_mm:.3f}) mm")
         return self._move_controller.move_absolute_2D(x_mm=x_mm, y_mm=y_mm)
 
@@ -595,6 +606,9 @@ class SweeperCore:
 
         这是MotorController.calibrate_all_axis方法的封装，方便用户在创建sweeper后
         执行零位校准。
+
+        注意：当扫场正在运行时，该方法会拒绝执行并返回False，
+        以避免与后台扫场线程产生电机并发访问冲突。
 
         Returns:
             bool: 校准是否成功完成
@@ -610,6 +624,14 @@ class SweeperCore:
         """
         if not hasattr(self, "_move_controller"):
             raise RuntimeError("步进电机控制器未初始化")
+
+        # 安全守卫：防止扫场运行时从外部并发操作电机
+        if self._is_running:
+            logger.error(
+                "扫场正在运行中，无法执行零位校准。"
+                "请先等待扫场完成或调用 stop() 中止扫场。"
+            )
+            return False
 
         logger.info("执行零位校准...")
         return self._move_controller.calibrate_all_axis()
@@ -1274,7 +1296,7 @@ class SweeperCore:
     def save_data(
         self,
         save_path: str | Path,
-        compress_level: int = 9,
+        compress_level: int = 6,
     ) -> None:
         """
         保存测量数据到文件（使用gzip压缩）
@@ -1291,7 +1313,7 @@ class SweeperCore:
 
         Args:
             save_path: 保存文件的路径（建议使用.pkl或.pkl.gz扩展名）
-            compress_level: gzip压缩级别（0-9），默认9。
+            compress_level: gzip压缩级别（0-9），默认6。
                           0表示不压缩，9表示最大压缩。
                           级别越高压缩率越高但速度越慢。
 
@@ -1391,7 +1413,8 @@ class SweeperCore:
         """
         清理资源
 
-        清理状态，停止所有线程，销毁内部创建的控制器对象。
+        清理状态，停止所有线程，释放内部控制器引用。
+        调用后当前实例不可再用。
         """
         # 如果正在运行，先停止
         if self._is_running:
@@ -1399,17 +1422,16 @@ class SweeperCore:
             self.stop(timeout=15.0)
 
         # 清理数据采集控制器
-        if hasattr(self, "_measure_controller"):
+        if hasattr(self, "_measure_controller") and self._measure_controller is not None:
             try:
                 logger.debug("正在清理数据采集控制器...")
                 self._measure_controller.stop()  # 确保停止任务
-                # SingleChasCSIO没有专门的cleanup方法，stop()已经处理了资源清理
                 logger.debug("数据采集控制器清理完成")
             except Exception as e:
                 logger.error(f"清理数据采集控制器时出错: {e}")
 
         # 清理步进电机控制器
-        if hasattr(self, "_move_controller"):
+        if hasattr(self, "_move_controller") and self._move_controller is not None:
             try:
                 logger.debug("正在清理步进电机控制器...")
                 self._move_controller.cleanup()
@@ -1417,14 +1439,35 @@ class SweeperCore:
             except Exception as e:
                 logger.error(f"清理步进电机控制器时出错: {e}")
 
+        # 断开对内部控制器的引用，打破循环引用
+        # （SweeperCore → SingleChasCSIO → export_function bound method → SweeperCore）
+        # 这样 del swp 后 GC 可以立即回收，避免延迟的 __del__ 触发
+        self._measure_controller = None  # type: ignore[assignment]
+        self._move_controller = None  # type: ignore[assignment]
+
         # 重置状态
         try:
-            self.reset()
+            self._set_state(SweepState.IDLE)
+            with self._point_index_lock:
+                self._current_point_index = 0
+            with self._time_lock:
+                self._sweep_start_time = None
+                self._first_point_start_time = None
+            self._enough_chunks_event.clear()
         except Exception as e:
             logger.error(f"重置状态时出错: {e}")
 
         logger.info("SweeperCore 资源清理完成")
 
     def __del__(self):
-        """析构函数，确保资源被正确释放"""
-        self.cleanup()
+        """析构函数
+
+        安全地清理资源。如果 cleanup() 已被显式调用，内部控制器已为 None，
+        此处会安全跳过。
+        """
+        try:
+            # 如果控制器还在（说明用户没有显式调用cleanup），执行清理
+            if getattr(self, "_measure_controller", None) is not None:
+                self.cleanup()
+        except Exception:
+            pass

@@ -68,10 +68,21 @@ class MotorController:
         - 坐标系以负限位为原点(0, 0)
         - 最大行程：MAX_POSITION mm（基于硬件限制）
         - 脱机模式下部分功能使用本地计算
+        - MT_Init() 在整个进程生命周期中只能调用一次（API硬性要求），
+          本类使用类级别单例管理确保这一约束
     """
 
     # 获取类日志器（类属性，所有实例共享）
     logger = get_logger(f"{__name__}.MotorController")
+
+    # 类级别DLL管理（MT_Init/MT_DeInit在进程中只能各调用一次）
+    _dll_initialized: bool = False  # MT_Init()是否已执行
+    _dll_api = None  # 共享的DLL句柄（WinDLL实例）
+
+    # 类级别USB连接管理（进程中USB只打开一次，不在实例间关闭）
+    # 原因：SDK典型流程为 Init→Open→[工作]→Close→DeInit，
+    # 不支持在同一Init/DeInit对之间反复Close+Open，否则运动指令会返回-1
+    _usb_connected: bool = False
 
     def __init__(
         self,
@@ -118,30 +129,43 @@ class MotorController:
     def _initialize_dll(self) -> bool:
         """初始化DLL文件（私有方法）
 
+        MT_Init() 在整个进程生命周期中只能调用一次（API硬性要求）。
+        使用类级别标志确保多实例安全。
+
         Returns:
             bool: 初始化是否成功
         """
         try:
-            # 设置DLL路径并加载
+            # 如果DLL已经初始化过，直接复用共享句柄
+            if MotorController._dll_initialized and MotorController._dll_api is not None:
+                self._api = MotorController._dll_api
+                self._is_initialized = True
+                logger.debug("DLL已初始化，复用共享句柄")
+                return True
+
+            # 首次初始化：加载DLL并调用MT_Init()
             dll_path: str = os.path.join(os.path.dirname(__file__), "MT_API.dll")  # noqa
             self._api = windll.LoadLibrary(dll_path)
             logger.debug(f"成功加载DLL: {dll_path}")
 
-            # 初始化API
+            # 初始化API（进程生命周期中只调用一次）
             result = self._api.MT_Init()
             if result == 0:
                 self._is_initialized = True
-                logger.debug("API初始化成功")
-                return self._is_initialized
+                # 记录到类级别，供后续实例复用
+                MotorController._dll_initialized = True
+                MotorController._dll_api = self._api
+                logger.debug("API初始化成功（首次）")
+                return True
             else:
                 self._is_initialized = False
                 logger.error(f"API初始化失败，错误码: {result}", exc_info=True)
-                return self._is_initialized
+                return False
 
         except Exception as e:
             self._is_initialized = False
             logger.error(f"初始化过程中发生异常: {e}", exc_info=True)
-            return self._is_initialized
+            return False
 
     def _setup_api_types(self) -> bool:
         """设置API函数的参数类型
@@ -226,11 +250,23 @@ class MotorController:
     def _connect_usb(self) -> bool:
         """通过USB连接控制器
 
+        USB连接使用类级别单例管理：进程中只打开一次，后续实例直接复用。
+        首次连接成功后会停止所有轴的运动并等待稳定，确保控制器处于就绪状态。
+
         Returns:
             bool: 连接是否成功
         """
         if not self._is_initialized:
             logger.error("API未初始化，无法连接", exc_info=True)
+            return self._is_connected
+
+        # 如果USB已在类级别连接，直接复用
+        if MotorController._usb_connected:
+            self._is_connected = True
+            logger.debug("USB已连接（复用类级别连接），执行轴复位")
+            # 即使复用连接，也停止所有轴的运动以确保安全
+            self._api.MT_Set_Axis_Halt_All()
+            time.sleep(0.3)  # 等待控制器稳定
             return self._is_connected
 
         try:
@@ -240,7 +276,15 @@ class MotorController:
                 check_result = self._api.MT_Check()
                 if check_result == 0:
                     self._is_connected = True
-                    logger.debug("USB连接成功")
+                    MotorController._usb_connected = True
+                    logger.debug("USB连接成功（首次）")
+
+                    # 连接成功后，停止所有轴的运动并等待稳定
+                    # （参考Demo.py：连接后立即调用 MT_Set_Axis_Halt_All）
+                    self._api.MT_Set_Axis_Halt_All()
+                    time.sleep(0.3)  # 等待控制器稳定
+                    logger.debug("已停止所有轴并等待稳定")
+
                     return self._is_connected
                 else:
                     self._is_connected = False
@@ -1355,28 +1399,51 @@ class MotorController:
         return (x_pos, y_pos)
 
     def cleanup(self):
-        """清理资源"""
-        self._disconnect()
-        if self._is_initialized:
-            try:
-                self._api.MT_DeInit()
-                self._is_initialized = False
-                logger.info("步进电机资源已释放")
-            except Exception as e:
-                logger.error(f"清理资源时发生异常: {e}", exc_info=True)
+        """清理实例资源（软清理）
 
-    def _disconnect(self):
-        """断开连接"""
-        if self._is_connected:
+        仅重置实例级别的状态标志，不关闭USB连接、不调用MT_DeInit。
+        USB连接和DLL初始化是进程级别的资源，在进程生命周期内保持打开。
+
+        原因：SDK的典型流程为 Init→Open→[工作]→Close→DeInit，
+        不支持在同一Init/DeInit对之间反复Close+Open USB，否则运动指令会返回-1。
+        """
+        self._is_connected = False
+        self._is_initialized = False
+        self._is_calibrated = False
+        logger.info("步进电机实例资源已释放（USB连接保持）")
+
+    @classmethod
+    def shutdown(cls):
+        """进程级别的完全关闭（关闭USB + 释放DLL资源）
+
+        只应在程序退出时调用，调用后同一进程中无法再创建新的MotorController实例。
+        一般情况下不需要手动调用此方法。
+        """
+        if cls._usb_connected:
             try:
-                self._api.MT_Close_USB()
-                self._api.MT_Close_UART()
-                self._api.MT_Close_Net()
-                self._is_connected = False
-                logger.debug("已断开控制器连接")
+                if cls._dll_api is not None:
+                    cls._dll_api.MT_Close_USB()
+                cls._usb_connected = False
+                logger.debug("已断开USB连接（shutdown）")
             except Exception as e:
-                logger.error(f"断开连接时发生异常: {e}", exc_info=True)
+                logger.error(f"关闭USB时发生异常: {e}", exc_info=True)
+
+        if cls._dll_initialized:
+            try:
+                if cls._dll_api is not None:
+                    cls._dll_api.MT_DeInit()
+                cls._dll_initialized = False
+                cls._dll_api = None
+                logger.debug("已释放DLL资源（shutdown）")
+            except Exception as e:
+                logger.error(f"释放DLL时发生异常: {e}", exc_info=True)
+
+        logger.info("MotorController 进程级别资源已完全释放")
 
     def __del__(self):
-        """析构函数，确保资源被正确释放"""
-        self.cleanup()
+        """析构函数
+
+        实例析构时仅做软清理（重置标志），不关闭共享的USB连接。
+        """
+        self._is_connected = False
+        self._is_initialized = False

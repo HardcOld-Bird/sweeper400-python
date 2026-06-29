@@ -27,7 +27,7 @@ import pandas as pd
 from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
 
-from ..analyze import load_data_with_fallback
+from ..analyze import load_compressed_data, load_data_with_fallback, save_compressed_data
 from ..config import setup_chinese_fonts
 from ..logger import get_logger
 
@@ -123,6 +123,55 @@ class ScanResult:
         )
 
 
+@dataclass
+class _SimCache:
+    """仿真缓存数据结构
+
+    缓存 run_scan 中仅依赖于 f、input_amp_l、input_amp_r 的计算结果，
+    避免 f 和入射激励参数不变时重复执行耗时的 COMSOL 仿真。
+
+    缓存范围（对应 run_scan 中的步骤）：
+        - 步骤 2: 8 周期模式空管槽初态
+        - 步骤 3: 8 周期模式 8×8 传递矩阵
+        - 步骤 7: Floquet 模式空管槽初态
+        - 步骤 8: Floquet 模式传递函数
+
+    Attributes:
+        f: 仿真频率 (Hz)
+        input_amp_l: 左侧入射声源激励幅值 (COMSOL 参数字符串)
+        input_amp_r: 右侧入射声源激励幅值 (COMSOL 参数字符串)
+        eight_initial: 8 周期模式空管槽初态，shape (8,), complex128
+        eight_tf_matrix: 8 周期模式传递矩阵，shape (8, 8), complex128
+        floquet_initial: Floquet 模式空管槽初态，shape (3,), complex128
+        floquet_tf: Floquet 模式传递函数，shape (3,), complex128
+    """
+
+    f: float
+    input_amp_l: str
+    input_amp_r: str
+    eight_initial: np.ndarray
+    eight_tf_matrix: np.ndarray
+    floquet_initial: np.ndarray
+    floquet_tf: np.ndarray
+
+    def matches(self, f: float, input_amp_l: str, input_amp_r: str) -> bool:
+        """检查缓存参数是否与给定参数匹配
+
+        Args:
+            f: 仿真频率 (Hz)
+            input_amp_l: 左侧入射声源激励幅值
+            input_amp_r: 右侧入射声源激励幅值
+
+        Returns:
+            参数匹配时返回 True，否则 False
+        """
+        return (
+            self.f == f
+            and self.input_amp_l == input_amp_l
+            and self.input_amp_r == input_amp_r
+        )
+
+
 class SimScanner:
     """声学超表面 COMSOL 参数扫描仿真器
 
@@ -131,14 +180,19 @@ class SimScanner:
 
     run_scan() 主方法执行以下流程：
         1. 8 周期模式参数扫描 → 各参数组合的目标稳态 (point1~8)
-        2. 8 周期模式空管槽仿真 → 初态
-        3. 8 周期模式传递矩阵计算 (8 次单点仿真)
+        2. 8 周期模式空管槽仿真 → 初态（可缓存）
+        3. 8 周期模式传递矩阵计算 (8 次单点仿真)（可缓存）
         4. 批量求解 8 周期模式增益系数
-        5. Floquet 模式参数扫描 → 各参数组合的目标稳态 (bnd1, bnd2, point1)
-        6. Floquet 模式空管槽仿真 → 初态
-        7. Floquet 模式传递函数计算 (1 次单点仿真，获取 3 个 TF 值)
-        8. 求解 Floquet 模式增益系数 (3 种)
-        9. 保存数据和绘图
+        5. 真实实验系统稳态计算 + 8 周期收敛性分析
+        6. Floquet 模式参数扫描 → 各参数组合的目标稳态 (bnd1, bnd2, point1)
+        7. Floquet 模式空管槽仿真 → 初态（可缓存）
+        8. Floquet 模式传递函数计算 (1 次单点仿真)（可缓存）
+        9. 求解 Floquet 模式增益系数 (3 种)
+        10. 真实实验系统稳态计算 + Floquet 收敛性分析
+        11. 保存数据和绘图
+
+    步骤 2/3/7/8 的结果仅依赖于 f、input_amp_l、input_amp_r 参数，
+    当这些参数不变时自动复用 ``storage/sim/sim_cache`` 中的缓存。
 
     Attributes:
         client: MPh Client 对象
@@ -205,6 +259,10 @@ class SimScanner:
 
         self.last_result: ScanResult | None = None
 
+        # 缓存目录：storage/sim/sim_cache
+        self._sim_cache_dir: Path = self.storage_dir / "sim_cache"
+        self._sim_cache_file: Path = self._sim_cache_dir / "sim_cache.pkl"
+
         logger.info("SimScanner 初始化完成")
 
     # =========================================================================
@@ -245,6 +303,70 @@ class SimScanner:
     @property
     def is_connected(self) -> bool:
         return self.client is not None
+
+    # =========================================================================
+    # 缓存管理
+    # =========================================================================
+
+    def _load_sim_cache(
+        self, f: float, input_amp_l: str, input_amp_r: str,
+    ) -> _SimCache | None:
+        """尝试加载仿真缓存
+
+        从 ``storage/sim/sim_cache/sim_cache.pkl`` 加载缓存数据，
+        并校验 f、input_amp_l、input_amp_r 参数是否匹配。
+
+        Args:
+            f: 仿真频率 (Hz)
+            input_amp_l: 左侧入射声源激励幅值
+            input_amp_r: 右侧入射声源激励幅值
+
+        Returns:
+            缓存命中且参数匹配时返回 _SimCache 对象，否则返回 None
+        """
+        if not self._sim_cache_file.exists():
+            return None
+
+        try:
+            cache = load_compressed_data(
+                self._sim_cache_file, data_type_name="仿真缓存",
+            )
+        except Exception as e:
+            logger.warning(f"加载仿真缓存失败，将重新计算: {e}")
+            return None
+
+        if not isinstance(cache, _SimCache):
+            logger.warning("仿真缓存格式不匹配，将重新计算")
+            return None
+
+        if not cache.matches(f, input_amp_l, input_amp_r):
+            logger.info(
+                f"仿真缓存参数不匹配 (缓存: f={cache.f}, "
+                f"input_amp_l={cache.input_amp_l}, "
+                f"input_amp_r={cache.input_amp_r}; "
+                f"当前: f={f}, input_amp_l={input_amp_l}, "
+                f"input_amp_r={input_amp_r})，将重新计算"
+            )
+            return None
+
+        logger.info("仿真缓存命中，参数匹配")
+        return cache
+
+    def _save_sim_cache(self, cache: _SimCache) -> None:
+        """保存仿真缓存到磁盘
+
+        将缓存数据保存到 ``storage/sim/sim_cache/sim_cache.pkl``。
+
+        Args:
+            cache: 仿真缓存数据对象
+        """
+        try:
+            save_compressed_data(
+                cache, self._sim_cache_file,
+                data_type_name="仿真缓存",
+            )
+        except Exception as e:
+            logger.warning(f"保存仿真缓存失败: {e}")
 
     # =========================================================================
     # 主方法
@@ -333,6 +455,16 @@ class SimScanner:
         cr_values = np.linspace(cr_min, cr_max, res)
         ci_values = np.linspace(ci_min, ci_max, res)
 
+        # ---- 加载仿真缓存 ----
+        # 步骤 2/3/7/8 的结果仅依赖于 f、input_amp_l、input_amp_r，
+        # 当这些参数不变时可复用缓存，避免重复执行耗时的 COMSOL 仿真。
+        cache = self._load_sim_cache(f, input_amp_l, input_amp_r)
+        cache_hit = cache is not None
+        if cache_hit:
+            logger.info("仿真缓存命中，跳过步骤 2/3/7/8 的 COMSOL 仿真")
+        else:
+            logger.info("仿真缓存未命中，将执行完整仿真并更新缓存")
+
         # =================================================================
         # 8 周期模式
         # =================================================================
@@ -348,18 +480,26 @@ class SimScanner:
         eight_target = eight_target_flat.reshape(res, res, 8)
         logger.info(f"  目标稳态: shape={eight_target.shape}")
 
-        # 2. 空管槽 (cr=1, ci=0) → 初态
-        logger.info("2/10: eight_probes_single 空管槽 (cr=1, ci=0)...")
-        eight_initial = self._run_single_simulation(
-            "eight_single", f, 1.0, ci_min, ci_max, 0.0, ci_min, ci_max, res,
-            input_amp_l=input_amp_l, input_amp_r=input_amp_r,
-            speaker_amps_8=np.zeros(8, dtype=complex),
-        )
+        # 2. 空管槽 (cr=1, ci=0) → 初态（可缓存）
+        if cache_hit:
+            logger.info("2/10: eight_probes_single 空管槽 (cr=1, ci=0) [缓存]...")
+            eight_initial = cache.eight_initial
+        else:
+            logger.info("2/10: eight_probes_single 空管槽 (cr=1, ci=0)...")
+            eight_initial = self._run_single_simulation(
+                "eight_single", f, 1.0, ci_min, ci_max, 0.0, ci_min, ci_max, res,
+                input_amp_l=input_amp_l, input_amp_r=input_amp_r,
+                speaker_amps_8=np.zeros(8, dtype=complex),
+            )
         logger.info(f"  初态: {np.abs(eight_initial)}")
 
-        # 3. 传递矩阵 (8 次仿真)
-        logger.info("3/10: 计算 8x8 传递矩阵...")
-        eight_tf_matrix = self._compute_eight_transfer_matrix(f)
+        # 3. 传递矩阵 (8 次仿真)（可缓存）
+        if cache_hit:
+            logger.info("3/10: 计算 8x8 传递矩阵 [缓存]...")
+            eight_tf_matrix = cache.eight_tf_matrix
+        else:
+            logger.info("3/10: 计算 8x8 传递矩阵...")
+            eight_tf_matrix = self._compute_eight_transfer_matrix(f)
 
         # 4. 批量求解增益系数
         logger.info("4/10: 批量求解 8 周期模式增益系数...")
@@ -383,12 +523,30 @@ class SimScanner:
                 f"mean |steady|={np.mean(np.abs(exp_eight_steady)):.4f}"
             )
 
+        # 6. 收敛性分析
+        exp_eight_rho = np.zeros((res, res))
+        exp_eight_alpha = np.zeros((res, res))
+        exp_eight_rho_relaxed = np.zeros((res, res))
+        if exp_tf_matrix is not None:
+            logger.info("  计算 8 周期模式收敛性...")
+            exp_eight_rho, exp_eight_alpha, exp_eight_rho_relaxed = (
+                self._analyze_convergence_batch(eight_gains, exp_tf_matrix)
+            )
+            safe_8 = int(np.sum(exp_eight_rho < 1.0))
+            recoverable_8 = int(np.sum(
+                (exp_eight_rho >= 1.0) & (exp_eight_rho_relaxed < 1.0)
+            ))
+            logger.info(
+                f"  8周期: 安全区={safe_8}/{res*res}, "
+                f"可恢复区={recoverable_8}/{res*res}"
+            )
+
         # =================================================================
         # Floquet 周期模式
         # =================================================================
         logger.info("=== Floquet 周期模式 ===")
 
-        # 6. 参数扫描 → 目标稳态 (res*res 组, 每组 bnd1+bnd2+point1)
+        # 7. 参数扫描 → 目标稳态 (res*res 组, 每组 bnd1+bnd2+point1)
         logger.info("6/10: floquet_probes_para_scan 参数扫描...")
         floquet_target_flat = self._run_single_simulation(
             "floquet_scan", f, cr, cr_min, cr_max, ci, ci_min, ci_max, res,
@@ -398,25 +556,33 @@ class SimScanner:
         floquet_target = floquet_target_flat.reshape(res, res, 3)
         logger.info(f"  目标稳态: shape={floquet_target.shape}")
 
-        # 7. 空管槽 → 初态
-        logger.info("7/10: floquet_probes_single 空管槽 (cr=1, ci=0)...")
-        floquet_initial = self._run_single_simulation(
-            "floquet_single", f, 1.0, ci_min, ci_max, 0.0, ci_min, ci_max, res,
-            positive_is_left="1", input_amp="1[Pa]",
-            speaker_amp_floquet="0",
-        )
+        # 8. 空管槽 → 初态（可缓存）
+        if cache_hit:
+            logger.info("7/10: floquet_probes_single 空管槽 (cr=1, ci=0) [缓存]...")
+            floquet_initial = cache.floquet_initial
+        else:
+            logger.info("7/10: floquet_probes_single 空管槽 (cr=1, ci=0)...")
+            floquet_initial = self._run_single_simulation(
+                "floquet_single", f, 1.0, ci_min, ci_max, 0.0, ci_min, ci_max, res,
+                positive_is_left="1", input_amp="1[Pa]",
+                speaker_amp_floquet="0",
+            )
         logger.info(f"  初态: {np.abs(floquet_initial)}")
 
-        # 8. 传递函数 (1 次仿真, speaker_amp=1, input_amp=0)
-        logger.info("8/10: floquet_probes_single 传递函数 (speaker_amp=1)...")
-        floquet_tf = self._run_single_simulation(
-            "floquet_single", f, 1.0, ci_min, ci_max, 0.0, ci_min, ci_max, res,
-            positive_is_left="1", input_amp="0[Pa]",
-            speaker_amp_floquet="1",
-        )
+        # 9. 传递函数 (1 次仿真, speaker_amp=1, input_amp=0)（可缓存）
+        if cache_hit:
+            logger.info("8/10: floquet_probes_single 传递函数 (speaker_amp=1) [缓存]...")
+            floquet_tf = cache.floquet_tf
+        else:
+            logger.info("8/10: floquet_probes_single 传递函数 (speaker_amp=1)...")
+            floquet_tf = self._run_single_simulation(
+                "floquet_single", f, 1.0, ci_min, ci_max, 0.0, ci_min, ci_max, res,
+                positive_is_left="1", input_amp="0[Pa]",
+                speaker_amp_floquet="1",
+            )
         logger.info(f"  传递函数: {np.abs(floquet_tf)}")
 
-        # 9. 求解 Floquet 增益系数 (3 种目标探针)
+        # 10. 求解 Floquet 增益系数 (3 种目标探针)
         logger.info("9/10: 求解 Floquet 模式增益系数...")
         # 增益定义: 稳态传声器(point1)结果 / 初态传声器(point1)结果
         # 对于不同目标探针，通过传递函数反推传声器稳态值：
@@ -446,15 +612,15 @@ class SimScanner:
             f"mean |gain|={np.mean(np.abs(floquet_gains)):.4f}"
         )
 
-        # 10. 使用 Floquet 增益 + 实验传递矩阵计算真实实验系统稳态
-        # Floquet 模式仅产生 1 个增益（point1），将其复制到全部 8 个管槽
+        # 取 point1 (idx=2) 对应的增益，复制为 8 个相同增益（供稳态和收敛性分析使用）
+        floquet_point1_gains = np.repeat(
+            floquet_gains[:, :, 2:3], 8, axis=2
+        )  # (res, res, 8)
+
+        # 11. 使用 Floquet 增益 + 实验传递矩阵计算真实实验系统稳态
         exp_floquet_steady = np.zeros((res, res, 8), dtype=np.complex128)
         if exp_tf_matrix is not None and exp_initial_state is not None:
             logger.info("10/10: 计算真实实验系统稳态（Floquet 增益）...")
-            # 取 point1 (idx=2) 对应的增益，复制为 8 个相同增益
-            floquet_point1_gains = np.repeat(
-                floquet_gains[:, :, 2:3], 8, axis=2
-            )  # (res, res, 8)
             exp_floquet_steady = self._solve_exp_steady_batch(
                 floquet_point1_gains, exp_tf_matrix, exp_initial_state,
             )
@@ -463,34 +629,12 @@ class SimScanner:
                 f"mean |steady|={np.mean(np.abs(exp_floquet_steady)):.4f}"
             )
 
-        # =================================================================
-        # 收敛性分析
-        # =================================================================
-        exp_eight_rho = np.zeros((res, res))
-        exp_eight_alpha = np.zeros((res, res))
-        exp_eight_rho_relaxed = np.zeros((res, res))
+        # 12. 收敛性分析
         exp_floquet_rho = np.zeros((res, res))
         exp_floquet_alpha = np.zeros((res, res))
         exp_floquet_rho_relaxed = np.zeros((res, res))
-
         if exp_tf_matrix is not None:
-            logger.info("=== 收敛性分析 ===")
-            # 8 周期增益收敛性
-            logger.info("计算 8 周期模式收敛性...")
-            exp_eight_rho, exp_eight_alpha, exp_eight_rho_relaxed = (
-                self._analyze_convergence_batch(eight_gains, exp_tf_matrix)
-            )
-            safe_8 = int(np.sum(exp_eight_rho < 1.0))
-            recoverable_8 = int(np.sum(
-                (exp_eight_rho >= 1.0) & (exp_eight_rho_relaxed < 1.0)
-            ))
-            logger.info(
-                f"  8周期: 安全区={safe_8}/{res*res}, "
-                f"可恢复区={recoverable_8}/{res*res}"
-            )
-
-            # Floquet 增益收敛性
-            logger.info("计算 Floquet 模式收敛性...")
+            logger.info("  计算 Floquet 模式收敛性...")
             exp_floquet_rho, exp_floquet_alpha, exp_floquet_rho_relaxed = (
                 self._analyze_convergence_batch(
                     floquet_point1_gains, exp_tf_matrix
@@ -504,6 +648,16 @@ class SimScanner:
                 f"  Floquet: 安全区={safe_f}/{res*res}, "
                 f"可恢复区={recoverable_f}/{res*res}"
             )
+
+        # ---- 保存仿真缓存（仅缓存未命中时） ----
+        if not cache_hit:
+            self._save_sim_cache(_SimCache(
+                f=f, input_amp_l=input_amp_l, input_amp_r=input_amp_r,
+                eight_initial=eight_initial,
+                eight_tf_matrix=eight_tf_matrix,
+                floquet_initial=floquet_initial,
+                floquet_tf=floquet_tf,
+            ))
 
         # =================================================================
         # 组装结果
